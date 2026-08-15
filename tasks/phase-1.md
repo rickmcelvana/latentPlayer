@@ -265,3 +265,41 @@ synthesised WAV: 0 silent frames and 0.00% difference at all three positions,
 i.e. bit-exact. **User-confirmed passing on a real MP3 too** -- so the warning
 is what the reading above says it is, and none of the zeroed audio it refers to
 reaches playback.
+
+## M3 -- Queue + gapless: decisions (2026-08-15)
+
+1. **The engine holds current + next; the UI owns the playlist.** Gapless needs
+   a one-deep lookahead in `player-core` and nothing more -- the decoder must be
+   able to open the next track before the current one ends. Ordering, shuffle
+   and repeat stay in the UI, on the same argument playback.rs already makes
+   about volume curves: they're product decisions, and baking them into the
+   audio core makes them harder to change than they should be.
+2. **The web build runs one AudioContext rate for the session and resamples to
+   it.** Web Audio cannot change a live context's rate, so per-track rates mean
+   tearing the context down between tracks -- i.e. "gapless except when the rate
+   changes", which is not a property worth shipping. Resampling in the worker
+   instead reuses `StreamingResampler` unchanged (rubato 5 compiles clean for
+   wasm32, checked), unifies both shells on one model, and closes
+   ARCHITECTURE.md's "AudioContext sample rate must match the decoded track"
+   gap as a side effect.
+3. **Crossfade is deferred**, against the milestone's own "if it falls out
+   cheaply" test -- it doesn't. A gapless hand-off is one decoder feeding one
+   ring; a crossfade needs two tracks decoded concurrently and mixed, which is
+   two decoders, two resamplers and a mix stage. That's its own milestone, not a
+   rider on this one.
+
+Three things follow from the shape rather than from taste, and are in scope:
+
+- **Encoder delay and padding must be trimmed** (`Track::delay`/`Track::padding`,
+  which `StreamingDecoder` currently ignores). Every MP3 carries ~1105 frames of
+  encoder delay at the head; untrimmed, each boundary gets ~25ms of silence,
+  which is exactly the gap this milestone is about.
+- **Track boundaries have to travel with the audio.** The ring holds two tracks
+  at once and the decoder runs up to a ring ahead of the speakers, so the
+  position must reset when the boundary reaches the *output*. A second SPSC
+  queue of boundary records, popped by the consumer as its frame total crosses
+  them -- the same family as M2's seek handshake.
+- **The ring becomes output-shaped.** It is currently interleaved in *source*
+  channels with the callback adapting cyclically; a queue of mixed-channel
+  tracks would change that geometry mid-stream. Normalising in the decoder
+  thread keeps the ring one shape for the life of the stream.
