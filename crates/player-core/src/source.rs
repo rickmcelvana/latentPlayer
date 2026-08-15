@@ -52,14 +52,19 @@ impl PlaybackSource for LocalFile {
 /// handed over on the web build (§5 -- `player-rt-wasm` has no filesystem
 /// to read from). The Phase-0 wasm source.
 pub struct InMemorySource {
-    bytes: Vec<u8>,
+    /// `Arc<[u8]>` rather than `Vec<u8>` so `open` shares the encoded bytes
+    /// instead of copying them. It used to clone, which meant a file was held
+    /// twice for as long as it was open -- the opposite of what M2's streaming
+    /// decode is for, and worst on the web build, where these bytes are the
+    /// whole file the browser handed over.
+    bytes: std::sync::Arc<[u8]>,
     extension_hint: Option<String>,
 }
 
 impl InMemorySource {
     pub fn new(bytes: Vec<u8>, extension_hint: Option<String>) -> Self {
         Self {
-            bytes,
+            bytes: bytes.into(),
             extension_hint,
         }
     }
@@ -77,7 +82,7 @@ impl PlaybackSource for InMemorySource {
 
 /// `Cursor<Vec<u8>>` already satisfies `Read + Seek`; `MediaSource` just
 /// needs the two extra queries below, which this newtype supplies.
-struct CursorSource(Cursor<Vec<u8>>);
+struct CursorSource(Cursor<std::sync::Arc<[u8]>>);
 
 impl std::io::Read for CursorSource {
     fn read(&mut self, buf: &mut [u8]) -> std::io::Result<usize> {

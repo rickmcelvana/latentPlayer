@@ -37,7 +37,8 @@ clean is not evidence.
   live on both shells.**
 - **M2 -- Streaming decode.** Replace whole-file-into-memory decode with a
   decoder thread feeding a ring buffer, so a long FLAC doesn't cost its
-  full size in RAM. Native and web (worker) both.
+  full size in RAM. Native and web (worker) both. **Engine done and measured
+  on both shells; native UI awaiting a live listen.**
 - **M3 -- Queue + gapless.** Playlist model, next/prev, gapless hand-off
   between tracks, crossfade if it falls out cheaply.
 - **M4 -- Analysis tap + spectrum analyzer.** The per-block tap every meter
@@ -111,3 +112,112 @@ clock in tabular figures so it doesn't shove the bar around at 9:59 ->
   path the automated checks can't reach -- React driving the Tauri
   commands, where an argument-name mismatch would fail silently at the IPC
   boundary. Session log was clean: no surface, stream, or draw errors.
+
+## M2 -- Streaming decode: engine done
+
+Nothing decodes a whole track into memory any more. Both shells now hold a
+fixed ~2s ring and refill it as it drains.
+
+**The shared half.** `player-core/src/stream.rs` is a new `StreamingDecoder`:
+it keeps the Symphonia format reader and codec open for the life of the track
+and hands out one block at a time (`next_block`), with `seek` asking the
+container to move rather than moving a cursor. Deliberately free of threads,
+devices and ring buffers, because the native decoder thread and the web Worker
+need the same two operations and neither should inherit the other's
+concurrency model. `decode_all` survives as a thin wrapper over it -- the smoke
+examples and the resampler tests want a whole clip -- which also gives a test
+asserting the streamed blocks are bit-exact against the old whole-file decode.
+
+**Duration stopped being free.** It used to be the length of a buffer; it now
+comes from the container (`Track::num_frames`, falling back to the timebase
+duration) and can be absent, e.g. a VBR MP3 with no Xing header. That
+`Option<f64>` travels to the UI as 0.0-means-unknown. Tracked in
+ARCHITECTURE.md's "Known gaps" -- it is a real regression in what the player
+knows, and the price of not decoding an hour of audio to find out.
+
+**Seek is now a real seek**, with the two failure modes that come with one:
+the codec carries state across packets (MP3's bit reservoir, FLAC's inter-frame
+prediction), so the decoder is `reset()`; and a reader may only land on a
+container boundary at or before the requested time, so the difference is
+decoded and discarded. `seek_lands_on_the_requested_frame` proves the second
+by reading a frame counter encoded in the test WAV's right channel.
+
+**Resampling had to become incremental** (`StreamingResampler`). `process_all`
+is whole-buffer by construction and was doing three things that now have to be
+done by hand: trimming `output_delay()` so a track doesn't open on silence and
+run permanently late, feeding the final partial chunk via
+`Indexing::partial_len`, and pumping zeros at the end so the audio still inside
+the filter comes out. The streamed and whole-buffer paths are asserted
+bit-exact against each other, so M1's measured ~85dB quality carries over
+rather than needing to be re-argued. One deliberate difference: the output
+length is computed from the integer rates, because `ceil(44100 * (48000 /
+44100))` in f64 is 48001 -- a stray frame of filter tail on every track, landing
+exactly in M3's gapless seam.
+
+**Native output** (`playback.rs`) is now a decoder thread feeding an `rtrb`
+lock-free SPSC ring, with the cpal callback consuming it. The callback no
+longer takes a `Mutex` -- Phase 0's design let a decode stall or an unlucky
+lock holder reach the speakers.
+
+**The seek handshake** is the one genuinely subtle piece, and it is identical
+on both shells (`Shared` in playback.rs, `CONTROL` in app/src/audioSab.ts). A
+seek must discard up to two seconds of already-queued audio without discarding
+any decoded *after* it. Only the consumer can drop items from an SPSC ring and
+only the producer knows which side of the seek a sample came from, so it takes
+three counters: the caller bumps `seek_seq`; the producer seeks and sets
+`decoder_ready_seq` **before** writing anything new; the consumer, seeing that,
+empties the ring and sets `drained_seq`, which the producer waits for. Without
+the middle step there is a real race -- a push that began before the seek lands
+*behind* the drain and plays the old position anyway.
+
+**The scope needed its own memory.** `scope_window` used to be a slice of the
+whole-file buffer ending at the cursor; with streaming, played audio is gone.
+Both shells now keep a small ring of what was actually sent to the output,
+written by the consumer (`scope.rs` natively, in the SAB on the web). Arguably
+more correct than before: the scope shows what the device played, not what the
+decoder produced.
+
+**Underrun stopped being indistinguishable from the end.** An empty ring alone
+now means the producer fell behind -- silence, position holds, transport
+untouched. Only end-of-stream *and* an empty ring reports `finished`.
+
+**Web layout is one definition now** (`app/src/audioSab.ts`). Phase 0 had the
+same constants copied into three files under a comment asking them to stay in
+sync; M2 roughly quadruples the field count, so worker, worklet and engine all
+import the layout instead. Frame counts are held as a `filledFrames` counter
+the two ends add to and subtract from, rather than a pair of monotonic
+indices -- an Int32 monotonic counter would wrap after ~12 hours.
+
+### Verified
+
+- **Native engine**, `cargo run -p player-core --example transport_smoke`
+  (rewritten: it synthesises WAVs whose right channel is a 0->1 ramp across
+  the track, so "did the audio really come from where the transport says"
+  is measurable rather than something only a listener could answer). All 13
+  checks pass against the real default device, including the 44.1 -> 48kHz
+  resample:
+  - `open()` does not scale with track length: 30s took 87ms, 300s (10x the
+    audio) took 75ms -- 0.9x. Under whole-file decode this was linear.
+  - No pre-seek audio survives a seek: after seeking to 20s the ramp read
+    0.682 against an expected 0.683; a broken handshake would have read ~0.03.
+  - Duration from the container, position in real time, pause freezing it,
+    volume clamping, finished at the end, and seeking back un-finishing it.
+- **Web**, in-browser against the running dev server:
+  - The decoded-audio allocation no longer tracks track length: **0.837MB for
+    both a 30s and a 300s track** (ratio 1.000), where Phase 0 would have
+    allocated 10.6MB and 105.8MB. Load took 10ms and 24ms, not 10x apart.
+  - Position advanced 1.010s per second of wall clock; the scope's ramp read
+    0.754 against a position implying 0.755.
+  - `seek(20)` reported 20.000 immediately, and 0.7s later the audio itself
+    read 0.689 against an expected 0.690 -- i.e. the queued audio really was
+    thrown away, not played out.
+  - Finished exactly at 30.000; pressing play again restarted from 0.380.
+  - Pause froze the position and did not report finished.
+  - The scope still draws from the new ring: `draw_frame(scopeWindow(2048))`
+    on a test canvas produced background `rgb(5,5,8)` plus 168 trace pixels of
+    `rgb(38,242,140)`, read back pixel-by-pixel. DOM showed `0:13 / 0:30` with
+    the slider at 13.02. No console or dev-server errors.
+- **Not yet done: the native UI on a real compressed file.** The automated
+  checks use synthesised WAV, which is a trivially seekable container; MP3 and
+  FLAC are where a real container seek is worth confirming by ear. This is the
+  same gap M1 closed with a user listen.

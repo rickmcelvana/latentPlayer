@@ -8,7 +8,7 @@
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
-use player_core::{decode_all, LocalFile, Playback};
+use player_core::{LocalFile, Playback};
 use tauri::Manager;
 
 /// How many interleaved samples the scope reads per frame. Arbitrary for
@@ -57,9 +57,9 @@ impl TransportState {
 
 #[tauri::command]
 fn load_file(path: String, state: tauri::State<SharedPlayback>) -> Result<TransportState, String> {
-    let source = LocalFile::new(path);
-    let audio = decode_all(&source).map_err(|e| e.to_string())?;
-    let playback = Playback::open(audio).map_err(|e| e.to_string())?;
+    // Streaming since Phase 1 M2: this returns once the decoder thread has a
+    // prebuffer's worth of audio ready, not once the whole file is decoded.
+    let playback = Playback::open(&LocalFile::new(path)).map_err(|e| e.to_string())?;
     playback.play();
     let transport = TransportState::read(&playback);
     *state.lock().unwrap() = Some(playback);

@@ -10,10 +10,14 @@ pub mod playback;
 /// convert (its `AudioContext` runs at the file's own rate).
 #[cfg(not(target_arch = "wasm32"))]
 pub mod resample;
+pub mod scope;
 pub mod source;
+pub mod stream;
 
 pub use decode::{decode_all, DecodedAudio};
 pub use error::PlayerError;
 #[cfg(not(target_arch = "wasm32"))]
 pub use playback::Playback;
+pub use scope::ScopeRing;
 pub use source::{InMemorySource, LocalFile, PlaybackSource};
+pub use stream::StreamingDecoder;

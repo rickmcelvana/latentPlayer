@@ -10,6 +10,22 @@ crates/
   player-core/      Symphonia decode, PlaybackSource trait (LocalFile,
                      InMemorySource), native cpal output (playback.rs,
                      not built on wasm32). No UI/windowing code.
+
+                     Decode streams (stream.rs's StreamingDecoder): the
+                     format reader stays open for the life of the track and
+                     hands out one block at a time. Native playback drives it
+                     from a decoder thread into an rtrb lock-free SPSC ring
+                     (~2s) that the cpal callback consumes, so the callback
+                     takes no lock and memory is bounded by the ring rather
+                     than by the track. resample.rs's StreamingResampler sits
+                     between the two; scope.rs keeps a small ring of what was
+                     actually played, for the scope to draw.
+
+                     A seek is a real container seek, which means discarding
+                     the audio already queued. That takes a three-counter
+                     handshake between the caller, the decoder thread and the
+                     callback -- see `Shared` in playback.rs; the web build
+                     runs the identical protocol in app/src/audioSab.ts.
   player-render/    wgpu render engine. Takes any wgpu::SurfaceTarget
                      (native window handle or web canvas) -- knows nothing
                      about Tauri or the browser. Currently a 2D XY
@@ -20,8 +36,8 @@ crates/
                      those two crates knows wasm-bindgen exists). wasm-only;
                      excluded from native `--workspace` commands, see
                      WORKFLOW.md. No per-block wasm calls on the audio path
-                     -- decode happens once, up front, in a Worker; the
-                     AudioWorkletProcessor itself is plain TS.
+                     -- WasmDecoder is driven from a Worker, once per ring
+                     refill; the AudioWorkletProcessor itself is plain TS.
 
 src-tauri/           Tauri 2 desktop shell. Two windows: the React webview
                      (UI, transport controls) and a second, plain
@@ -45,16 +61,17 @@ app/                 React + TS + Vite. Same component tree renders in the
                      which playback adapter a component uses:
                        - nativePlayer.ts: Tauri commands (desktop; decode +
                          output + the scope run entirely in Rust already)
-                       - playerEngine.ts: AudioWorklet + wasm (web; decode
-                         runs once in worker.ts, the worklet itself is
+                       - playerEngine.ts: AudioWorklet + wasm (web; worker.ts
+                         keeps a ring topped up, the worklet itself is
                          plain TS -- see player-rt-wasm above)
                      Both adapters expose the *same* `TransportState` shape,
                      so App.tsx drives the transport without branching on
-                     which shell it's in. Web seeks by storing a new frame
-                     index into the shared control block (the worklet reads
-                     its cursor from there every block, so no message round
-                     trip); web volume rides a GainNode, since Web Audio
-                     smooths it and the worklet would zipper.
+                     which shell it's in. audioSab.ts holds the one definition
+                     of the SharedArrayBuffer all three web parties use --
+                     control block, playback ring, scope history -- including
+                     the seek handshake that mirrors the native one. Web
+                     volume rides a GainNode, since Web Audio smooths it and
+                     the worklet would zipper.
                      webScope.ts drives the web build's scope canvas
                      (WasmRenderer, via rAF) -- the web-side counterpart of
                      src-tauri's native redraw thread.
@@ -192,6 +209,27 @@ at the correct rate, re-verified with the same probe.
 
 ## Known gaps (tracked, not forgotten)
 
+- ~~**Whole-file decode.**~~ Replaced in Phase 1 M2 by streaming decode on
+  both shells (`stream.rs`, and worker.ts on the web). Measured: the web
+  build's decoded-audio buffer is 0.837MB for a 300s track and 0.837MB for a
+  30s one, where before it was 105.8MB and 10.6MB; natively, `open()` on a
+  300s track takes 0.9x the time of a 30s one rather than 10x. See
+  `tasks/phase-1.md`'s M2 section.
+- **Track duration can now be unknown.** It used to be measured off the
+  decoded buffer and was therefore always exact; it now comes from the
+  container (`Track::num_frames`, falling back to the timebase duration),
+  which some files don't state -- a VBR MP3 with no Xing header is the usual
+  case. Both shells report 0.0 for it, which the transport renders as a
+  `0:00` total and a degenerate seek bar. Deliberate: the alternative is
+  decoding an hour of audio to find out how long it is, which is the thing M2
+  removed. A real fix is a duration *estimate* (bitrate x file size) or a
+  background scan, and belongs with the library work in M7.
+- **The decoder polls rather than parks.** Both the native decoder thread and
+  the web Worker sleep on a short timer when the ring is full (2ms and 20ms)
+  instead of waiting on a condvar or `Atomics.waitAsync`. It costs a wakeup
+  or two per ring's worth of audio and keeps the consumer free of any
+  signalling work, which is the trade that matters on the audio callback --
+  but it is a poll, and worth revisiting if it ever shows up in a profile.
 - **No Opus decode.** Symphonia 0.6.1 has no Opus support at all (checked
   its own feature list, not assumed) -- PLAN.md §3 lists Opus as a target
   format; that needs a second decode path (real question) or dropping Opus
@@ -225,6 +263,9 @@ at the correct rate, re-verified with the same probe.
   delay (~half a sample here), so comparing its output sample-by-sample
   against an analytic reference measures *that*, not quality -- which is
   why the test measures spectral purity instead.
+  M2 added `StreamingResampler` alongside it for the streaming path, driven
+  a block at a time; the two are asserted bit-exact against each other, so
+  the measurement above still describes what plays.
 - **No response to the OS default output device changing** (Windows).
   Observed live during the first Windows `cargo tauri dev` run:
   `output stream error: Default audio device changed`, twice. Checked cpal

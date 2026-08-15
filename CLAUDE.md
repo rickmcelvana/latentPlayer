@@ -29,9 +29,12 @@ device.
 
 **Phase 1 is underway** — see `tasks/phase-1.md` for the milestone plan and decisions (engine
 foundation before metering; web parity lockstep per milestone). M1 (transport: real `rubato`
-resampling, seek, volume, position, transport UI) is done and user-confirmed on both shells; M2 is
-streaming decode. See `ARCHITECTURE.md`'s "Known gaps" for tracked limitations (Opus,
-whole-file decode, output-device changes, WebGL2 fallback, scope aspect).
+resampling, seek, volume, position, transport UI) is done and user-confirmed on both shells.
+M2 (streaming decode: `StreamingDecoder` + a decoder thread feeding an `rtrb` ring natively, a
+Worker topping up a SharedArrayBuffer ring on the web) is built and measured on both shells —
+web is verified in-browser, and the native UI still wants a live listen on a real MP3/FLAC.
+M3 is queue + gapless. See `ARCHITECTURE.md`'s "Known gaps" for tracked limitations (Opus,
+unknown track durations, output-device changes, WebGL2 fallback, scope aspect).
 
 ## Build/lint/test
 

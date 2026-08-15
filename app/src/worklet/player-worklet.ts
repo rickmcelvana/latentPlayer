@@ -10,17 +10,25 @@
 //
 // Unlike mixer-worklet.ts, this processor makes no wasm calls at all: a
 // plain player has no per-block DSP to run, so there's nothing for wasm to
-// do here. All the decode work already happened once, up front, in
-// worker.ts -- this just reads already-decoded interleaved f32 PCM
-// straight out of a SharedArrayBuffer and copies it to the output. See
-// playerEngine.ts for the buffer layout this shares.
+// do here. It reads already-decoded interleaved f32 PCM out of a ring in a
+// SharedArrayBuffer that worker.ts keeps topped up, and copies it to the
+// output. See audioSab.ts for the layout, which this shares with the worker
+// and playerEngine.
+//
+// Its M2 responsibilities beyond copying samples: it is the consumer end of
+// the seek handshake, it owns the authoritative play position, and it writes
+// the scope's history -- because it is the only party that knows what actually
+// reached the output.
+
+import { CONTROL, SCOPE_MASK, audioViews } from "../audioSab";
 
 const BLOCK_FRAMES = 128;
-const CONTROL_INTS = 3; // [playing, cursorFrames, totalFrames]
 
 class PlayerWorklet extends AudioWorkletProcessor {
   private control: Int32Array;
-  private data: Float32Array;
+  private ring: Float32Array;
+  private scope: Float32Array;
+  private ringFrames: number;
   private channels: number;
 
   // `any` here matches the sibling repos' own worklet convention
@@ -28,36 +36,96 @@ class PlayerWorklet extends AudioWorkletProcessor {
   // globals, and `processorOptions` is untyped at the message boundary.
   constructor(options: any) {
     super();
-    const { sab, channels } = options.processorOptions as { sab: SharedArrayBuffer; channels: number };
-    this.channels = channels;
-    this.control = new Int32Array(sab, 0, CONTROL_INTS);
-    this.data = new Float32Array(sab, CONTROL_INTS * 4);
+    const { sab } = options.processorOptions as { sab: SharedArrayBuffer };
+    const views = audioViews(sab);
+    this.control = views.control;
+    this.ring = views.ring;
+    this.scope = views.scope;
+    this.ringFrames = views.ringFrames;
+    this.channels = views.channels;
   }
 
   process(_inputs: Float32Array[][], outputs: Float32Array[][]): boolean {
     const output = outputs[0];
-    const playing = Atomics.load(this.control, 0) === 1;
-    const totalFrames = Atomics.load(this.control, 2);
-    let cursor = Atomics.load(this.control, 1);
+    const c = this.control;
 
-    for (let frame = 0; frame < BLOCK_FRAMES; frame++) {
-      const silent = !playing || cursor >= totalFrames;
-      for (let ch = 0; ch < output.length; ch++) {
-        const channel = output[ch];
-        if (silent) {
-          channel[frame] = 0;
-          continue;
-        }
-        // Simple channel adaptation, same rule as the native path
-        // (player-core/src/playback.rs): reuse source channels cyclically.
-        const srcIdx = cursor * this.channels + (ch % this.channels);
-        channel[frame] = this.data[srcIdx] ?? 0;
+    // Step 3 of the handshake (see audioSab.ts). Once the worker says it has
+    // moved, everything queued is from where the track no longer is.
+    const requested = Atomics.load(c, CONTROL.seekSeq);
+    if (requested !== Atomics.load(c, CONTROL.drainedSeq)) {
+      if (Atomics.load(c, CONTROL.decoderReadySeq) === requested) {
+        Atomics.store(c, CONTROL.readIndex, Atomics.load(c, CONTROL.writeIndex));
+        Atomics.store(c, CONTROL.filledFrames, 0);
+        Atomics.store(c, CONTROL.positionFrames, Atomics.load(c, CONTROL.seekTargetFrames));
+        Atomics.store(c, CONTROL.finished, 0);
+        // Otherwise the next scope frame is spliced from both sides of the seek.
+        Atomics.store(c, CONTROL.scopeFilled, 0);
+        Atomics.store(c, CONTROL.drainedSeq, requested);
       }
-      if (!silent) cursor++;
+      // Either way, play nothing this block.
+      this.silence(output);
+      return true;
     }
 
-    Atomics.store(this.control, 1, cursor);
+    if (Atomics.load(c, CONTROL.playing) !== 1) {
+      this.silence(output);
+      return true;
+    }
+
+    const available = Atomics.load(c, CONTROL.filledFrames);
+    const frames = Math.min(BLOCK_FRAMES, available);
+    const readIndex = Atomics.load(c, CONTROL.readIndex);
+    let scopeIndex = Atomics.load(c, CONTROL.scopeIndex);
+
+    for (let frame = 0; frame < BLOCK_FRAMES; frame++) {
+      // Short of a full block means end of track, or the worker falling
+      // behind. Silence either way; the position only counts real frames, so
+      // an underrun stalls rather than skipping ahead.
+      if (frame >= frames) {
+        for (let ch = 0; ch < output.length; ch++) output[ch][frame] = 0;
+        continue;
+      }
+      const base = ((readIndex + frame) % this.ringFrames) * this.channels;
+      for (let ch = 0; ch < output.length; ch++) {
+        // Simple channel adaptation, same rule as the native path
+        // (player-core/src/playback.rs): reuse source channels cyclically.
+        output[ch][frame] = this.ring[base + (ch % this.channels)] ?? 0;
+      }
+      // The scope gets what was played, in the source's own channel layout, so
+      // a stereo track gives it real L/R pairs to plot against each other.
+      for (let s = 0; s < this.channels; s++) {
+        this.scope[(scopeIndex + s) & SCOPE_MASK] = this.ring[base + s];
+      }
+      scopeIndex += this.channels;
+    }
+
+    if (frames > 0) {
+      Atomics.store(c, CONTROL.readIndex, (readIndex + frames) % this.ringFrames);
+      Atomics.add(c, CONTROL.filledFrames, -frames);
+      Atomics.add(c, CONTROL.positionFrames, frames);
+      const written = frames * this.channels;
+      Atomics.store(c, CONTROL.scopeIndex, scopeIndex & SCOPE_MASK);
+      Atomics.store(
+        c,
+        CONTROL.scopeFilled,
+        Math.min(SCOPE_MASK + 1, Atomics.load(c, CONTROL.scopeFilled) + written),
+      );
+    }
+
+    // Finished only when the decoder is done *and* nothing is left to play.
+    // Either alone is an ordinary mid-track state.
+    if (
+      Atomics.load(c, CONTROL.eos) === 1 &&
+      Atomics.load(c, CONTROL.filledFrames) === 0
+    ) {
+      Atomics.store(c, CONTROL.finished, 1);
+    }
+
     return true;
+  }
+
+  private silence(output: Float32Array[]): void {
+    for (let ch = 0; ch < output.length; ch++) output[ch].fill(0);
   }
 }
 

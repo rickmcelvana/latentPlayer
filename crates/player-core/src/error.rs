@@ -33,6 +33,12 @@ pub enum PlayerError {
     #[error("sample-rate conversion failed: {0}")]
     Resample(String),
 
+    /// A seek the container could not satisfy. Distinct from `Symphonia`
+    /// because the common cause is a request this crate built badly (an
+    /// out-of-range time), not a broken file.
+    #[error("seek failed: {0}")]
+    Seek(String),
+
     #[error("output device only offers an unsupported sample format: {0}")]
     UnsupportedOutputFormat(String),
 }
