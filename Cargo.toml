@@ -1,0 +1,17 @@
+[workspace]
+resolver = "2"
+members = [
+    "crates/player-core",
+    "crates/player-render",
+    "crates/player-rt-wasm",
+    "src-tauri",
+]
+
+[workspace.package]
+version = "0.1.0"
+edition = "2021"
+repository = "local-only, no remote yet"
+
+[profile.release]
+lto = true
+codegen-units = 1

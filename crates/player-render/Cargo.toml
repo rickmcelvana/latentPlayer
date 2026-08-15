@@ -1,0 +1,13 @@
+[package]
+name = "player-render"
+version.workspace = true
+edition.workspace = true
+
+[dependencies]
+# No windowing crate here on purpose: this crate only knows how to draw into
+# a wgpu Surface it's handed. The native window (src-tauri) and the web
+# canvas (player-rt-wasm) are both callers, not dependencies -- that's the
+# whole point of the Phase 0 "shared rendering" spike (PLAN.md §5/§8.1).
+wgpu = "30"
+bytemuck = { version = "1", features = ["derive"] }
+thiserror = "1"
