@@ -4,3 +4,13 @@
 
 # Editor/OS
 .DS_Store
+
+# Audio dropped in the tree to test against. The smoke examples take a path
+# rather than shipping fixtures, so these are always someone's own music --
+# not ours to commit, and large.
+*.mp3
+*.flac
+*.m4a
+*.ogg
+*.opus
+*.wav
