@@ -246,35 +246,60 @@ app then ran ~3.5 minutes with an MP3 loaded and logged **no** stream errors
 at all, where the previous run had failed. Whether it now *sounds* right is
 still a human check.
 
-**Observed, believed benign**: 308 `scope draw_frame error: ... "Outdated"`
-warnings, all inside the final 5 seconds before the app exited and none in
-the 3.5 minutes before that -- i.e. the scope's redraw thread drawing into a
-window being torn down, not a render failure. Worth confirming if it ever
-shows up mid-run.
+## M8 -- Scope window couldn't survive a resize: fixed
 
-## What's left before Phase 0 is fully closed
-- **Native: closed.** User-confirmed (2026-08-15) live: plays correctly,
-  scope displays.
-- **Web audio: closed.** User-confirmed (2026-08-15): sample-rate fix
-  resolved the pitch bug, sounds correct now.
-- **Web: closed.** User-confirmed on Windows (2026-08-15): "Web passes.
-  Sounds perfect, scope shows up", across several output devices.
-- **Native: config/resampling bugs fixed (M7), sound not yet re-confirmed.**
-  All 10 output devices now open at the correct rate, verified with
-  `device_probe`; a human still needs to confirm it sounds right and the
-  scope moves.
-- **Web scope: no longer blocked.** It was environmental, not an app bug --
-  `navigator.gpu.requestAdapter()` returned `null` on the Linux box (Dawn
-  blocklists NVIDIA driver 570+ there by default; that machine ran
-  610.57.04). On Windows the same code gets a real adapter and the renderer
-  demonstrably draws (see M6). What's left is an eyeball check on a visible
-  window, not a fix.
+Observed first as 308 `scope draw_frame error: ... "Outdated"` warnings
+bunched in the last seconds of a run, which looked like teardown noise and
+was written up here as "believed benign". **That was wrong.** The user
+pinned it immediately by bisecting their own session: no warnings across
+several runs, then "I tried again and resized the scope's window, it threw
+the errors then." Resize, not shutdown -- and a real bug, not noise.
 
-Everything else Phase 0 asked for -- the wgpu-rendering-shared-natively-
-and-in-browser question, the AudioWorklet/SharedArrayBuffer port, and a
-minimal local-playback walking skeleton on both targets -- is built and
-compiles/builds clean; native is fully user-confirmed working, web audio
-is user-confirmed working, web video (the scope) is the one open bug.
+`draw_frame` treated every non-Success surface outcome as "skip this frame,
+the caller retries". wgpu's own docs (`surface_texture.rs`) say `Outdated`
+means the config no longer matches the surface: **call `configure()` and
+try again**. Retrying without reconfiguring can only spin, so one resize
+killed the scope permanently and logged a warning per frame forever.
+
+- `Renderer::draw_frame` now reconfigures on `Outdated` and skips just that
+  frame; `Suboptimal` still draws (the texture is usable) and reconfigures
+  on the next frame. `Lost` stays an error -- recovering it needs the
+  surface recreated, which needs a window handle the renderer doesn't hold.
+- `src-tauri`'s redraw thread keeps a clone of the scope `Window` and polls
+  `inner_size()`, calling `Renderer::resize` when it changes. Without this
+  the renderer can only rebuild the swapchain at the size it already knew;
+  only the window knows the new one. `Window<R>` is `Clone` in tauri 2.11.5
+  and the clone shares the same underlying window.
+
+**Verified live on Windows**: drove five programmatic resizes (496x519 ->
+300 -> 700 -> 480 -> 900 -> 520) against the running app and counted
+`Outdated` warnings in the log -- **zero**, where the same action used to
+produce hundreds -- then screen-captured the window to confirm the trace was
+still drawing at the new size, which it was.
+
+Note the window is built `.resizable(false)` and Windows resizes it anyway,
+by hand or via `MoveWindow`. Assuming it can't be resized was never safe.
+
+## Phase 0: closed (2026-08-15)
+
+Both shells are user-confirmed working on real music files:
+
+- **Web: closed.** "Web passes. Sounds perfect, scope shows up", across
+  several output devices. The old blank-scope bug was environmental (the
+  Linux box's Chrome/Dawn adapter blocklist), not app code -- see M6.
+- **Native: closed.** "No error with the wired headset or wireless. Sounds
+  good", after M7 fixed output-device config + resampling. Both of those
+  devices failed outright before it. M8 then fixed the scope's resize
+  handling, verified live.
+
+Everything Phase 0 asked for is built and confirmed: the
+wgpu-rendering-shared-natively-and-in-browser question is answered yes on
+both targets, latent-mixing's AudioWorklet/SharedArrayBuffer pattern is
+ported and working, and the local-playback walking skeleton runs on both.
+
+Remaining limitations are tracked as known gaps in ARCHITECTURE.md (Opus,
+resampler quality, output-device-change handling, WebGL2 fallback, scope
+aspect ratio) -- all Phase 1 material, none blocking.
 
 ## Resuming this session after a restart
 **The dev machine is Windows now** (`Z:\_dev\latent\latentPlayer`); the
@@ -282,10 +307,10 @@ Linux env-var and Chrome-flag workarounds in WORKFLOW.md/ARCHITECTURE.md
 don't apply here. M0-M6 above are all done -- don't redo or re-explain
 them. Every build/check command passes on this machine.
 
-Web is user-confirmed closed (audio + scope). The only open item is a
-listen-test of the **native** build after M7's output fixes: `cargo tauri
-dev` (no env vars needed -- but stop any standalone dev server first, see
-WORKFLOW.md's port note), open a real music file, confirm it plays at the
-right speed and the scope window's trace moves. If a device misbehaves,
+**Phase 0 is closed** -- both shells user-confirmed on real music. Nothing
+here is waiting on anything; the next session starts Phase 1 (PLAN.md §7),
+not more Phase 0 verification. Run the app with `cargo tauri dev` (no env
+vars needed -- but stop any standalone dev server first, see WORKFLOW.md's
+port note). If a device misbehaves,
 `cargo run -p player-core --example device_probe` prints exactly what that
 device offers and what the app will do with it.

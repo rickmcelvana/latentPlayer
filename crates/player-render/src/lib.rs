@@ -36,6 +36,12 @@ pub struct Renderer {
     config: wgpu::SurfaceConfiguration,
     pipeline: wgpu::RenderPipeline,
     vertex_buffer: wgpu::Buffer,
+    /// Set when the surface told us its texture no longer matches it, so
+    /// the *next* frame reconfigures before drawing. Deferred rather than
+    /// done on the spot because the surface texture is still in hand at
+    /// that point, and reconfiguring underneath it is not worth the risk
+    /// when the frame is perfectly drawable as-is.
+    needs_reconfigure: bool,
 }
 
 impl Renderer {
@@ -134,9 +140,13 @@ impl Renderer {
             config,
             pipeline,
             vertex_buffer,
+            needs_reconfigure: false,
         })
     }
 
+    /// Reconfigures the surface for a new window/canvas size. Callers must
+    /// drive this from whatever tells them the size changed -- the renderer
+    /// holds no window handle and cannot ask.
     pub fn resize(&mut self, width: u32, height: u32) {
         if width == 0 || height == 0 {
             return;
@@ -144,6 +154,7 @@ impl Renderer {
         self.config.width = width;
         self.config.height = height;
         self.surface.configure(&self.device, &self.config);
+        self.needs_reconfigure = false;
     }
 
     /// `samples` is interleaved `[L0, R0, L1, R1, ...]`, already in roughly
@@ -160,13 +171,39 @@ impl Renderer {
         self.queue
             .write_buffer(&self.vertex_buffer, 0, bytemuck::cast_slice(&points));
 
-        // `get_current_texture` returns an enum rather than a `Result` --
-        // the non-Success/Suboptimal cases are all "skip this frame and try
-        // again", which is exactly what returning our own error and letting
-        // the caller's next draw_frame() retry already does.
+        if self.needs_reconfigure {
+            self.surface.configure(&self.device, &self.config);
+            self.needs_reconfigure = false;
+        }
+
+        // `get_current_texture` returns an enum rather than a `Result`, and
+        // the variants do *not* all mean the same thing. This used to treat
+        // every non-Success case as "skip the frame, the caller will retry",
+        // which is wrong for `Outdated`: wgpu's own docs say to call
+        // `configure()` and try again, so retrying without reconfiguring
+        // just spins. Found live on Windows (2026-08-15) -- resizing the
+        // scope window produced an unbroken flood of Outdated frames and the
+        // scope never recovered, because nothing here ever reconfigured.
+        //
+        // Note `resize()` is still the real fix for a size change: this
+        // rebuilds the swapchain at the size the config already knows,
+        // which recovers a surface whose size did *not* change (a DPI or
+        // monitor switch, a compositor restart) and keeps a genuine resize
+        // from spinning until the caller notices.
         let frame = match self.surface.get_current_texture() {
-            wgpu::CurrentSurfaceTexture::Success(t)
-            | wgpu::CurrentSurfaceTexture::Suboptimal(t) => t,
+            wgpu::CurrentSurfaceTexture::Success(t) => t,
+            // Still a usable texture -- draw it, then reconfigure next frame.
+            wgpu::CurrentSurfaceTexture::Suboptimal(t) => {
+                self.needs_reconfigure = true;
+                t
+            }
+            wgpu::CurrentSurfaceTexture::Outdated => {
+                self.surface.configure(&self.device, &self.config);
+                return Ok(()); // frame deliberately skipped; the next one draws
+            }
+            // `Lost` needs the *surface* recreated, which needs the window
+            // handle this type doesn't keep -- so it stays an error the
+            // caller has to deal with, rather than being quietly swallowed.
             other => return Err(RenderError::SurfaceUnavailable(format!("{other:?}"))),
         };
         let view = frame

@@ -223,7 +223,17 @@ at the correct rate, re-verified with the same probe.
   first Windows desktop test -- see "Fixed: native output was broken on most
   Windows devices" above. The remaining limitation is the *quality* of that
   conversion, tracked in its own entry above.
-- **Fixed-size scope window**, not resizable, no live-resize handling.
+- **The scope window is built `.resizable(false)`, which Windows does not
+  fully honour** -- it can still be resized (by hand, and programmatically
+  via `MoveWindow`). Resizing is now handled properly rather than assumed
+  away: the redraw thread polls `inner_size()` and calls `Renderer::resize`
+  on a change, and `draw_frame` reconfigures the surface on `Outdated`
+  instead of retrying forever. Verified live on Windows 2026-08-15 by
+  resizing the window five times (496x519 -> 300 -> 700 -> 480 -> 900 ->
+  520) and capturing it: zero `Outdated` warnings, live trace still drawing
+  at the new size. What's still missing is any *layout* response -- the
+  scope is drawn in normalised device coordinates, so it stretches with the
+  window rather than holding a square aspect.
 - **No WebGL2 fallback on the web build.** `player-render` on wasm32 only
   targets wgpu's WebGPU backend; a browser/GPU without WebGPU gets a clear
   error (`webScope.ts` checks `navigator.gpu` up front) rather than a

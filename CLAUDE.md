@@ -18,14 +18,15 @@ both native and web playback paths). Every build/check/test command below passes
 test target. The Linux-only workarounds still documented in `WORKFLOW.md` (Wayland env vars) and
 `ARCHITECTURE.md` (Chrome WebGPU flags) do not apply here.
 
-**Web is user-confirmed working on Windows** (audio + scope, 2026-08-15); the old blank-scope bug
-was environmental, not app code (`tasks/phase-0.md` M6). **Native output was genuinely broken on
-most Windows devices and is now fixed** (`tasks/phase-0.md` M7, full write-up in
-`ARCHITECTURE.md`) — it opened devices at the wrong rate, which cpal's WASAPI backend then either
-refused outright or played back at 2.177x. `cargo run -p player-core --example device_probe`
-diagnoses any output device. The one thing still open in Phase 0 is a listen-test of the native
-build after that fix. See `ARCHITECTURE.md`'s "Known gaps" for known limitations (Opus, resampler
-quality, output-device changes, etc.).
+**Phase 0 is closed** (2026-08-15): both shells are user-confirmed working on real music files —
+web ("sounds perfect, scope shows up") and native ("no error with the wired headset or wireless,
+sounds good"). Getting there on Windows took three real fixes, all written up in
+`tasks/phase-0.md` M6–M8: the blank web scope turned out to be environmental (the Linux box's
+Chrome/Dawn adapter blocklist), native output opened devices at the wrong sample rate (cpal's
+WASAPI backend then either refused outright or played at 2.177x), and the scope window couldn't
+survive being resized. `cargo run -p player-core --example device_probe` diagnoses any output
+device. Next up is Phase 1 (PLAN.md §7). See `ARCHITECTURE.md`'s "Known gaps" for tracked
+limitations (Opus, resampler quality, output-device changes, WebGL2 fallback, scope aspect).
 
 ## Build/lint/test
 

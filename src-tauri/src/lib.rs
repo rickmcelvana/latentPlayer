@@ -68,6 +68,14 @@ pub fn run() {
                 .build()?;
             let size = scope_window.inner_size()?;
 
+            // Keep a handle for the redraw loop to ask the window how big it
+            // currently is. `Renderer::new` consumes the one it turns into a
+            // surface target, and the renderer holds no window handle of its
+            // own, so without this clone nothing can ever tell it the size
+            // changed. Window<R> is Clone (tauri 2.11.5 `window/mod.rs`) and
+            // the clone shares the same underlying window.
+            let size_probe = scope_window.clone();
+
             let mut renderer = pollster::block_on(player_render::Renderer::new(
                 scope_window,
                 size.width,
@@ -76,18 +84,36 @@ pub fn run() {
             .map_err(|e| format!("scope renderer init failed: {e}"))?;
 
             let shared = app.state::<SharedPlayback>().inner().clone();
-            std::thread::spawn(move || loop {
-                let samples = {
-                    let guard = shared.lock().unwrap();
-                    guard
-                        .as_ref()
-                        .map(|p| p.scope_window(SCOPE_WINDOW_SAMPLES))
-                        .unwrap_or_default()
-                };
-                if let Err(e) = renderer.draw_frame(&samples) {
-                    log::warn!("scope draw_frame error: {e}");
+            std::thread::spawn(move || {
+                let mut last_size = size;
+                loop {
+                    // Resizing the window invalidates the swapchain. The
+                    // renderer can rebuild it at the old size on its own, but
+                    // only the window knows the *new* size -- found live on
+                    // Windows (2026-08-15): resizing the scope window threw a
+                    // continuous stream of "Outdated" frames. Polling here
+                    // rather than subscribing to a resize event keeps this on
+                    // the one thread that owns the renderer; at 60Hz the cost
+                    // is a syscall per frame.
+                    if let Ok(current) = size_probe.inner_size() {
+                        if current != last_size {
+                            renderer.resize(current.width, current.height);
+                            last_size = current;
+                        }
+                    }
+
+                    let samples = {
+                        let guard = shared.lock().unwrap();
+                        guard
+                            .as_ref()
+                            .map(|p| p.scope_window(SCOPE_WINDOW_SAMPLES))
+                            .unwrap_or_default()
+                    };
+                    if let Err(e) = renderer.draw_frame(&samples) {
+                        log::warn!("scope draw_frame error: {e}");
+                    }
+                    std::thread::sleep(Duration::from_millis(16));
                 }
-                std::thread::sleep(Duration::from_millis(16));
             });
 
             Ok(())
