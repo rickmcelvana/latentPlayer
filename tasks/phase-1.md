@@ -37,8 +37,8 @@ clean is not evidence.
   live on both shells.**
 - **M2 -- Streaming decode.** Replace whole-file-into-memory decode with a
   decoder thread feeding a ring buffer, so a long FLAC doesn't cost its
-  full size in RAM. Native and web (worker) both. **Engine done and measured
-  on both shells; native UI awaiting a live listen.**
+  full size in RAM. Native and web (worker) both. **Done, verified live on
+  both shells.**
 - **M3 -- Queue + gapless.** Playlist model, next/prev, gapless hand-off
   between tracks, crossfade if it falls out cheaply.
 - **M4 -- Analysis tap + spectrum analyzer.** The per-block tap every meter
@@ -113,7 +113,7 @@ clock in tabular figures so it doesn't shove the bar around at 9:59 ->
   commands, where an argument-name mismatch would fail silently at the IPC
   boundary. Session log was clean: no surface, stream, or draw errors.
 
-## M2 -- Streaming decode: engine done
+## M2 -- Streaming decode: done
 
 Nothing decodes a whole track into memory any more. Both shells now hold a
 fixed ~2s ring and refill it as it drains.
@@ -217,10 +217,12 @@ indices -- an Int32 monotonic counter would wrap after ~12 hours.
     on a test canvas produced background `rgb(5,5,8)` plus 168 trace pixels of
     `rgb(38,242,140)`, read back pixel-by-pixel. DOM showed `0:13 / 0:30` with
     the slider at 13.02. No console or dev-server errors.
-- **Not yet done: the native UI on a real compressed file.** The automated
-  checks use synthesised WAV, which is a trivially seekable container; MP3 and
-  FLAC are where a real container seek is worth confirming by ear. This is the
-  same gap M1 closed with a user listen.
+- **Native UI, user-confirmed live**: "Desktop test passes. Everything works as
+  expected and sounds good. No errors." That covers the paths the automated
+  checks can't reach -- React driving the Tauri commands, and a real compressed
+  file, where the automated checks use synthesised WAV (a trivially seekable
+  container). The one thing the session did surface was symphonia's MP3
+  bit-reservoir warning on seek, written up below.
 
 ### The MP3 seek warning (2026-08-15)
 

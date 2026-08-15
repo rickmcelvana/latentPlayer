@@ -31,9 +31,11 @@ device.
 foundation before metering; web parity lockstep per milestone). M1 (transport: real `rubato`
 resampling, seek, volume, position, transport UI) is done and user-confirmed on both shells.
 M2 (streaming decode: `StreamingDecoder` + a decoder thread feeding an `rtrb` ring natively, a
-Worker topping up a SharedArrayBuffer ring on the web) is built and measured on both shells —
-web is verified in-browser, and the native UI still wants a live listen on a real MP3/FLAC.
-M3 is queue + gapless. See `ARCHITECTURE.md`'s "Known gaps" for tracked limitations (Opus,
+Worker topping up a SharedArrayBuffer ring on the web) is done and user-confirmed on both shells.
+M3 is queue + gapless.
+`cargo run -p player-core --example seek_smoke -- <path>` checks that seeking a given file yields
+the same audio as playing through to that point — written for MP3, whose bit reservoir makes
+symphonia log an underflow warning on every seek (expected; see `tasks/phase-1.md`). See `ARCHITECTURE.md`'s "Known gaps" for tracked limitations (Opus,
 unknown track durations, output-device changes, WebGL2 fallback, scope aspect).
 
 ## Build/lint/test
