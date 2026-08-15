@@ -132,16 +132,34 @@ Both fixes shipped; `tsc -b`/`npm run build` clean.
 now."** The blank-scope fix did **not** resolve it: **scope is still blank
 on web**, audio still fine. So the rAF-loop try/catch (real bug, worth
 having fixed regardless) was not the actual cause, or wasn't the only one --
-diagnosis from code alone has run out of road here. **Next step: live
-browser debugging via the `claude-in-chrome` extension/`/chrome`**, to
-actually read the devtools console instead of guessing further. Not done
-yet -- the user ran `/chrome` three times at the end of this session with
-no visible effect (empty stdout each time); getting it connected is the
-first thing to sort out in the next session before anything else. Once
-connected: open the web build, check the console for any thrown/logged
-error (the `navigator.gpu` check and the `WasmRenderer.create`/`draw_frame`
-console.error calls added above should surface anything real), and go from
-there. Don't re-guess blind again -- get the console output first.
+diagnosis from code alone has run out of road here.
+
+**Root-caused (2026-08-15, later same day): `claude-in-chrome` connected
+successfully this time** (previous session's three `/chrome` attempts had
+no visible effect -- whatever was blocking it is resolved now, per the
+user). Opened the web build, read the devtools console directly:
+
+```
+TypeError: Cannot read properties of null (reading 'requestDevice')
+    at __wbg_requestDevice_ab46d0519ea1cc34 (player_rt_wasm.js)
+```
+
+Confirmed via `javascript_tool` in the live tab that
+`navigator.gpu.requestAdapter()` resolves to `null` on this dev machine,
+while WebGL2 in the same tab gets real hardware acceleration (`ANGLE ...
+NVIDIA GeForce RTX 5060 Ti`) and the host's Vulkan stack (`vulkaninfo`,
+driver 610.57.04) is healthy -- so this isn't a missing-GPU problem, it's
+specifically Chrome's WebGPU backend (Dawn) refusing this NVIDIA driver.
+Chrome's own WebGPU troubleshooting docs confirm Dawn has its own adapter
+blocklist (separate from `--ignore-gpu-blocklist`) that rejects NVIDIA
+driver 570+ by default on Linux -- 610.57.04 is well past that. **Not an
+app bug** -- see `ARCHITECTURE.md`'s "Active bug" section for full detail
+and the fix (`chrome://flags/#enable-unsafe-webgpu` +
+`chrome://flags/#enable-vulkan`, restart Chrome, verify via `chrome://gpu`).
+
+**Not yet done: re-test live with those flags enabled** to confirm the
+scope actually renders once Chrome gets a real adapter. That's the
+remaining step before Phase 0's web scope can be marked closed.
 
 ## M5 -- Sanity pass: done
 `cargo check/test/clippy --workspace --exclude player-rt-wasm` and `cargo
@@ -154,13 +172,15 @@ fmt --check` all clean. `player-rt-wasm` separately clean for
   scope displays.
 - **Web audio: closed.** User-confirmed (2026-08-15): sample-rate fix
   resolved the pitch bug, sounds correct now.
-- **Web scope: still open, actively broken.** Stays blank. One real bug
-  (rAF loop dying on a thrown frame) was found and fixed but did not
-  resolve it -- root cause still unknown. **This is the one thing blocking
-  Phase 0 from being fully closed.** Plan: get `claude-in-chrome` connected
-  (user is working on this, `/chrome` not yet taking effect as of session
-  end) and read the actual devtools console output rather than guessing
-  further from code alone.
+- **Web scope: root cause confirmed, fix not yet verified live.** Stays
+  blank because `navigator.gpu.requestAdapter()` returns `null` on this dev
+  machine's Chrome -- Dawn's WebGPU backend blocklists NVIDIA driver 570+
+  on Linux by default, and this machine runs 610.57.04. Not an app bug (see
+  `ARCHITECTURE.md`'s "Active bug"). Fix: enable
+  `chrome://flags/#enable-unsafe-webgpu` and `chrome://flags/#enable-vulkan`,
+  restart Chrome, re-test. **This is the one thing blocking Phase 0 from
+  being fully closed** -- needs that flag change + a live re-test to
+  confirm the scope actually renders.
 
 Everything else Phase 0 asked for -- the wgpu-rendering-shared-natively-
 and-in-browser question, the AudioWorklet/SharedArrayBuffer port, and a
@@ -169,10 +189,11 @@ compiles/builds clean; native is fully user-confirmed working, web audio
 is user-confirmed working, web video (the scope) is the one open bug.
 
 ## Resuming this session after a restart
-Start here: **web scope is blank, root cause unknown, need `claude-in-chrome`
-connected to see the console.** Everything else in this file is settled/
+Start here: **web scope root cause is confirmed (Chrome/Dawn WebGPU adapter
+blocklist on this dev machine's NVIDIA driver -- see "Active bug" in
+ARCHITECTURE.md). Fix is a local Chrome flag change
+(`chrome://flags/#enable-unsafe-webgpu` + `#enable-vulkan`, restart Chrome),
+not yet applied/re-tested live.** Everything else in this file is settled/
 confirmed. Don't re-explain or redo the M0-M5 work above -- it's done. The
 dev server command is `npm run dev` in `app/`; native is `cargo tauri dev`
-with the env vars in WORKFLOW.md. See ARCHITECTURE.md's "Known gaps" for
-the current best theory (WebGPU unavailable, or something else in
-`WasmRenderer.create`/`draw_frame` -- unconfirmed either way).
+with the env vars in WORKFLOW.md.

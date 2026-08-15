@@ -61,17 +61,43 @@ creation must happen on the main thread, so this is done unconditionally
 rather than "working by luck" on Linux/Windows only); only the redraw loop
 itself moves to a background thread.
 
-## Active bug (as of 2026-08-15, unresolved)
+## Active bug (as of 2026-08-15, root-caused -- environmental, not app code)
 
-**Web scope stays blank.** Native scope works (user-confirmed live). Web
-audio now sounds correct (user-confirmed live, see "Known gaps" below for
-the fix). The web *scope* still shows nothing, and the one real bug found
-and fixed while investigating it (the rAF loop dying on a thrown frame,
-also below) did **not** fix this -- so the actual cause is still unknown.
-Diagnosis from reading code has run out of road; next step is live
-browser debugging via `claude-in-chrome` (`/chrome`) to read the devtools
-console directly instead of guessing further. See `tasks/phase-0.md`'s
-"Resuming this session" note.
+**Web scope stays blank -- root cause confirmed via live `claude-in-chrome`
+devtools console.** Native scope works (user-confirmed live). Web audio
+sounds correct (user-confirmed live, see "Known gaps" below for the fix).
+The web *scope* throws on load:
+
+```
+TypeError: Cannot read properties of null (reading 'requestDevice')
+    at __wbg_requestDevice_ab46d0519ea1cc34 (player_rt_wasm.js)
+```
+
+Confirmed live in the page console (`navigator.gpu.requestAdapter()`
+resolves to `null` on this dev machine's Chrome, checked directly via
+`javascript_tool`) that this is Chrome's WebGPU backend (Dawn) returning no
+adapter, *not* a missing-GPU or missing-Vulkan problem: WebGL2 on the same
+tab reports real hardware acceleration (`ANGLE ... NVIDIA GeForce RTX 5060
+Ti ... OpenGL ES 3.2`), and `vulkaninfo`/`nvidia-smi` on the host confirm a
+working Vulkan 1.4 stack with NVIDIA driver 610.57.04. Per Chrome's own
+WebGPU troubleshooting docs, Dawn carries its own adapter blocklist
+(separate from `--ignore-gpu-blocklist`) that rejects NVIDIA driver 570+ by
+default on Linux -- this machine's 610.57.04 driver is well past that
+threshold, which matches the symptom exactly.
+
+`player-render`'s own code (`Renderer::new` in
+`crates/player-render/src/lib.rs`) does `instance.request_adapter(...).await?`,
+expecting wgpu to turn a failed/null adapter into a proper `Err`. It
+doesn't in this case -- the raw JS exception happens inside wgpu's own
+generated webgpu-backend bindings, before request_adapter's Rust wrapper
+gets a chance to check for `None`, so nothing in this app's code could have
+caught it more gracefully. Not a bug in this repo.
+
+**Fix is a local Chrome flag, not a code change**: enable
+`chrome://flags/#enable-unsafe-webgpu` (disables Dawn's adapter blocklist)
+and `chrome://flags/#enable-vulkan`, restart Chrome, then verify
+`chrome://gpu` shows WebGPU hardware-accelerated. Not yet re-tested live
+with the flags on -- that's the next step.
 
 ## Known gaps (tracked, not forgotten)
 
@@ -113,4 +139,5 @@ console directly instead of guessing further. See `tasks/phase-0.md`'s
   an exception. This was a real bug worth having fixed (now logs and keeps
   going) -- but it was **not** the cause of the blank web scope: re-tested
   live (2026-08-15) with this fix in place and the scope is still blank.
-  See "Active bug" above -- root cause still open.
+  See "Active bug" above -- root cause now confirmed (Chrome/Dawn WebGPU
+  adapter blocklist on this dev machine's NVIDIA driver, not an app bug).
