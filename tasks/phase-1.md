@@ -262,4 +262,6 @@ decodes the same moment twice, once by playing through from the start and once
 by seeking, then reports the leading run of exact zeros (the fingerprint of a
 zeroed granule reaching playback) and the RMS difference between the two. On a
 synthesised WAV: 0 silent frames and 0.00% difference at all three positions,
-i.e. bit-exact.
+i.e. bit-exact. **User-confirmed passing on a real MP3 too** -- so the warning
+is what the reading above says it is, and none of the zeroed audio it refers to
+reaches playback.
