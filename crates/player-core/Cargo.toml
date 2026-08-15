@@ -12,5 +12,9 @@ thiserror = "1"
 # Web Audio API / AudioWorklet instead, see crates/player-rt-wasm).
 [target.'cfg(not(target_arch = "wasm32"))'.dependencies]
 cpal = "0.18"
+# Real sample-rate conversion, replacing Phase 0's linear-interpolation
+# stopgap. Native-only for the same reason cpal is: the web build runs its
+# AudioContext at the file's own rate and has nothing to convert.
+rubato = "5"
 
 [dev-dependencies]

@@ -25,8 +25,13 @@ sounds good"). Getting there on Windows took three real fixes, all written up in
 Chrome/Dawn adapter blocklist), native output opened devices at the wrong sample rate (cpal's
 WASAPI backend then either refused outright or played at 2.177x), and the scope window couldn't
 survive being resized. `cargo run -p player-core --example device_probe` diagnoses any output
-device. Next up is Phase 1 (PLAN.md §7). See `ARCHITECTURE.md`'s "Known gaps" for tracked
-limitations (Opus, resampler quality, output-device changes, WebGL2 fallback, scope aspect).
+device.
+
+**Phase 1 is underway** — see `tasks/phase-1.md` for the milestone plan and decisions (engine
+foundation before metering; web parity lockstep per milestone). M1 (transport: real `rubato`
+resampling, seek, volume, position, transport UI) is done and user-confirmed on both shells; M2 is
+streaming decode. See `ARCHITECTURE.md`'s "Known gaps" for tracked limitations (Opus,
+whole-file decode, output-device changes, WebGL2 fallback, scope aspect).
 
 ## Build/lint/test
 

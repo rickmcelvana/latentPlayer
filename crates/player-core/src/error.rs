@@ -30,6 +30,9 @@ pub enum PlayerError {
     #[error("audio output stream error: {0}")]
     OutputStream(String),
 
+    #[error("sample-rate conversion failed: {0}")]
+    Resample(String),
+
     #[error("output device only offers an unsupported sample format: {0}")]
     UnsupportedOutputFormat(String),
 }

@@ -24,6 +24,10 @@ struct PlaybackState {
     /// write out.
     cursor: usize,
     playing: bool,
+    /// Linear gain applied on the way out. Not a dB curve -- callers that
+    /// want a fader taper are expected to shape it themselves, since the
+    /// right curve is a UI decision rather than an engine one.
+    volume: f32,
 }
 
 pub struct Playback {
@@ -59,13 +63,14 @@ impl Playback {
             audio.channels,
             audio.sample_rate,
             config.sample_rate,
-        );
+        )?;
 
         let state = Arc::new(Mutex::new(PlaybackState {
             samples,
             channels: audio.channels,
             cursor: 0,
             playing: false,
+            volume: 1.0,
         }));
 
         let stream = match sample_format {
@@ -97,6 +102,53 @@ impl Playback {
 
     pub fn is_playing(&self) -> bool {
         self.state.lock().unwrap().playing
+    }
+
+    /// Linear gain, clamped to `0.0..=1.0`.
+    pub fn set_volume(&self, volume: f32) {
+        self.state.lock().unwrap().volume = volume.clamp(0.0, 1.0);
+    }
+
+    pub fn volume(&self) -> f32 {
+        self.state.lock().unwrap().volume
+    }
+
+    /// Jumps to `seconds` from the start. Clamped to the track, so seeking
+    /// past the end parks on the end rather than reading out of bounds.
+    ///
+    /// Note this seeks within the already-decoded buffer -- cheap and exact.
+    /// Once decoding streams (Phase 1 M2) this becomes a real demux/decoder
+    /// seek and stops being free.
+    pub fn seek(&self, seconds: f64) {
+        let mut state = self.state.lock().unwrap();
+        let channels = state.channels.max(1) as usize;
+        let frame = (seconds.max(0.0) * self.sample_rate as f64) as usize;
+        let total_frames = state.samples.len() / channels;
+        state.cursor = frame.min(total_frames) * channels;
+    }
+
+    /// Current play position in seconds.
+    pub fn position_seconds(&self) -> f64 {
+        let state = self.state.lock().unwrap();
+        let channels = state.channels.max(1) as usize;
+        (state.cursor / channels) as f64 / self.sample_rate as f64
+    }
+
+    /// Total length in seconds, measured on the *resampled* buffer that is
+    /// actually being played -- so it matches what `position_seconds`
+    /// counts up to, rather than the source file's own duration.
+    pub fn duration_seconds(&self) -> f64 {
+        let state = self.state.lock().unwrap();
+        let channels = state.channels.max(1) as usize;
+        (state.samples.len() / channels) as f64 / self.sample_rate as f64
+    }
+
+    /// Whether playback has run off the end of the track. The UI uses this
+    /// to flip its transport back to a stopped state without polling for
+    /// exact equality on a moving cursor.
+    pub fn is_finished(&self) -> bool {
+        let state = self.state.lock().unwrap();
+        state.cursor >= state.samples.len()
     }
 
     pub fn output_channels(&self) -> u16 {
@@ -179,6 +231,7 @@ where
             move |data: &mut [T], _info: &cpal::OutputCallbackInfo| {
                 let mut state = state.lock().unwrap();
                 let src_channels = state.channels.max(1) as usize;
+                let volume = state.volume;
                 for frame in data.chunks_mut(out_channels) {
                     if !state.playing || state.cursor >= state.samples.len() {
                         frame.fill(convert(0.0));
@@ -190,7 +243,7 @@ where
                         // anything fancier is Phase 1 territory).
                         let src_idx = state.cursor + (ch % src_channels);
                         let sample = state.samples.get(src_idx).copied().unwrap_or(0.0);
-                        *out = convert(sample);
+                        *out = convert(sample * volume);
                     }
                     state.cursor += src_channels;
                 }

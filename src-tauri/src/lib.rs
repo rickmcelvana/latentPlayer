@@ -18,15 +18,81 @@ const SCOPE_WINDOW_SAMPLES: usize = 2048;
 
 type SharedPlayback = Arc<Mutex<Option<Playback>>>;
 
+/// What the UI needs to render its transport after any state change, in one
+/// round trip. Sending these as a struct rather than as four separate
+/// commands keeps the seek bar, the clock and the play/pause button from
+/// disagreeing with each other mid-poll.
+#[derive(serde::Serialize)]
+#[serde(rename_all = "camelCase")]
+struct TransportState {
+    position: f64,
+    duration: f64,
+    playing: bool,
+    volume: f32,
+    finished: bool,
+}
+
+impl TransportState {
+    fn read(playback: &Playback) -> Self {
+        Self {
+            position: playback.position_seconds(),
+            duration: playback.duration_seconds(),
+            playing: playback.is_playing(),
+            volume: playback.volume(),
+            finished: playback.is_finished(),
+        }
+    }
+
+    /// What the UI shows with nothing loaded.
+    fn empty() -> Self {
+        Self {
+            position: 0.0,
+            duration: 0.0,
+            playing: false,
+            volume: 1.0,
+            finished: false,
+        }
+    }
+}
+
 #[tauri::command]
-fn load_file(path: String, state: tauri::State<SharedPlayback>) -> Result<f64, String> {
+fn load_file(path: String, state: tauri::State<SharedPlayback>) -> Result<TransportState, String> {
     let source = LocalFile::new(path);
     let audio = decode_all(&source).map_err(|e| e.to_string())?;
-    let duration = audio.duration_seconds();
     let playback = Playback::open(audio).map_err(|e| e.to_string())?;
     playback.play();
+    let transport = TransportState::read(&playback);
     *state.lock().unwrap() = Some(playback);
-    Ok(duration)
+    Ok(transport)
+}
+
+#[tauri::command]
+fn transport(state: tauri::State<SharedPlayback>) -> TransportState {
+    state
+        .lock()
+        .unwrap()
+        .as_ref()
+        .map(TransportState::read)
+        .unwrap_or_else(TransportState::empty)
+}
+
+#[tauri::command]
+fn seek(seconds: f64, state: tauri::State<SharedPlayback>) -> TransportState {
+    let guard = state.lock().unwrap();
+    match guard.as_ref() {
+        Some(playback) => {
+            playback.seek(seconds);
+            TransportState::read(playback)
+        }
+        None => TransportState::empty(),
+    }
+}
+
+#[tauri::command]
+fn set_volume(volume: f32, state: tauri::State<SharedPlayback>) {
+    if let Some(playback) = state.lock().unwrap().as_ref() {
+        playback.set_volume(volume);
+    }
 }
 
 #[tauri::command]
@@ -45,7 +111,13 @@ pub fn run() {
     tauri::Builder::default()
         .plugin(tauri_plugin_dialog::init())
         .manage(SharedPlayback::default())
-        .invoke_handler(tauri::generate_handler![load_file, set_playing])
+        .invoke_handler(tauri::generate_handler![
+            load_file,
+            set_playing,
+            transport,
+            seek,
+            set_volume
+        ])
         .setup(|app| {
             if cfg!(debug_assertions) {
                 app.handle().plugin(

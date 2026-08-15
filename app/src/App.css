@@ -74,6 +74,47 @@ button {
   }
 }
 
+.transport {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  width: min(560px, 100%);
+}
+
+/* Fixed width and tabular figures so the clock doesn't shove the seek bar
+   sideways every time the digit count changes (9:59 -> 10:00). */
+.time {
+  color: var(--text-h);
+  font-family: var(--mono);
+  font-size: 14px;
+  font-variant-numeric: tabular-nums;
+  width: 5ch;
+  text-align: center;
+}
+
+.seek {
+  flex: 1;
+  min-width: 0;
+}
+
+.volume {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  color: var(--text);
+  font-size: 14px;
+}
+
+input[type="range"] {
+  accent-color: var(--accent);
+  cursor: pointer;
+
+  &:disabled {
+    opacity: 0.5;
+    cursor: default;
+  }
+}
+
 .scope {
   border-radius: 8px;
   border: 1px solid var(--border);

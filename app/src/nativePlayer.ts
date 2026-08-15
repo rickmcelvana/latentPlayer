@@ -21,12 +21,37 @@ export async function pickAudioFile(): Promise<string | null> {
   return typeof path === "string" ? path : null;
 }
 
-/// Decodes and starts playing the file at `path`. Returns its duration in
-/// seconds.
-export async function loadFile(path: string): Promise<number> {
-  return invoke<number>("load_file", { path });
+/// Everything the transport UI needs, read in one round trip so the seek
+/// bar, clock and play/pause button can't disagree with each other. Mirrors
+/// `TransportState` in src-tauri/src/lib.rs, and playerEngine.ts's
+/// `TransportState` on the web side -- the two adapters deliberately expose
+/// the same shape so App.tsx doesn't branch on which shell it's in.
+export interface TransportState {
+  position: number;
+  duration: number;
+  playing: boolean;
+  volume: number;
+  finished: boolean;
+}
+
+/// Decodes and starts playing the file at `path`.
+export async function loadFile(path: string): Promise<TransportState> {
+  return invoke<TransportState>("load_file", { path });
 }
 
 export async function setPlaying(playing: boolean): Promise<void> {
   return invoke("set_playing", { playing });
+}
+
+/// Current transport state. Polled by the UI to drive the seek bar/clock.
+export async function transport(): Promise<TransportState> {
+  return invoke<TransportState>("transport");
+}
+
+export async function seek(seconds: number): Promise<TransportState> {
+  return invoke<TransportState>("seek", { seconds });
+}
+
+export async function setVolume(volume: number): Promise<void> {
+  return invoke("set_volume", { volume });
 }

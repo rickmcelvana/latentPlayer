@@ -34,6 +34,11 @@ src-tauri/           Tauri 2 desktop shell. Two windows: the React webview
                      Rust; the webview only sends transport commands
                      (load_file/set_playing) and never touches audio data.
 
+                     Transport (play/pause/seek/volume/position) is exposed
+                     as `#[tauri::command]`s returning one `TransportState`
+                     struct rather than a command per field, so the seek
+                     bar, clock and play button can't disagree mid-poll.
+
 app/                 React + TS + Vite. Same component tree renders in the
                      Tauri webview and (eventually) the plain web build --
                      matches ../latent-mixing/app/ exactly. isTauri() gates
@@ -43,6 +48,13 @@ app/                 React + TS + Vite. Same component tree renders in the
                        - playerEngine.ts: AudioWorklet + wasm (web; decode
                          runs once in worker.ts, the worklet itself is
                          plain TS -- see player-rt-wasm above)
+                     Both adapters expose the *same* `TransportState` shape,
+                     so App.tsx drives the transport without branching on
+                     which shell it's in. Web seeks by storing a new frame
+                     index into the shared control block (the worklet reads
+                     its cursor from there every block, so no message round
+                     trip); web volume rides a GainNode, since Web Audio
+                     smooths it and the worklet would zipper.
                      webScope.ts drives the web build's scope canvas
                      (WasmRenderer, via rAF) -- the web-side counterpart of
                      src-tauri's native redraw thread.
@@ -202,12 +214,17 @@ at the correct rate, re-verified with the same probe.
   knowing: no bit-perfect/exclusive-mode path, and no way to ask the OS
   resampler to do the work instead. Both are Phase 1 questions, and both
   get easier if cpal fixes the advertise/accept mismatch upstream.
-- **Resampling is linear interpolation** (`player-core/src/resample.rs`),
-  which fixes pitch/duration but is not transparent -- no anti-alias filter
-  when downsampling. `rubato` is the Phase 1 answer, and matters more once
-  the metering suite lands, since LUFS/true-peak off a linear-interpolated
-  signal would be subtly wrong. Note the web path doesn't use this at all:
-  it sets the `AudioContext` to the file's own rate instead.
+- ~~**Resampling is linear interpolation.**~~ Replaced in Phase 1 M1 with
+  `rubato` 5's FFT-based synchronous resampler -- the right family for a
+  fixed rational ratio like 44100 -> 48000, and it applies a real
+  anti-aliasing window. Measured at ~85dB tone-vs-everything-else on a
+  440Hz sweep through 44.1 -> 48kHz (see `resample.rs`'s own test, which
+  asserts >70dB). Native-only; the web path still has nothing to convert,
+  since it runs its `AudioContext` at the file's own rate.
+  One property worth knowing: rubato leaves a constant sub-sample group
+  delay (~half a sample here), so comparing its output sample-by-sample
+  against an analytic reference measures *that*, not quality -- which is
+  why the test measures spectral purity instead.
 - **No response to the OS default output device changing** (Windows).
   Observed live during the first Windows `cargo tauri dev` run:
   `output stream error: Default audio device changed`, twice. Checked cpal
