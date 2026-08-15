@@ -36,25 +36,33 @@ pub struct Playback {
 }
 
 impl Playback {
-    /// Opens the default output device and starts a stream immediately
-    /// (paused). Phase 0 doesn't attempt sample-rate conversion: if the
-    /// decoded audio's rate doesn't match a config the device supports, the
-    /// device's default config is used as-is and playback will sound
-    /// pitched -- fine for a spike, wrong for Phase 1.
+    /// Opens the default output device at *its own* mix format and starts a
+    /// stream immediately (paused), resampling the decoded audio to match.
+    ///
+    /// The device's format is taken as given rather than negotiated, which
+    /// looks lazy and isn't -- see `device_config` below for the evidence.
     pub fn open(audio: DecodedAudio) -> Result<Self, PlayerError> {
         let host = cpal::default_host();
         let device = host
             .default_output_device()
             .ok_or(PlayerError::NoOutputDevice)?;
 
-        let supported = pick_config(&device, audio.sample_rate, audio.channels)
-            .or_else(|| device.default_output_config().ok())
-            .ok_or(PlayerError::NoOutputDevice)?;
+        let supported = device_config(&device)?;
         let sample_format = supported.sample_format();
         let config: StreamConfig = supported.config();
 
+        // The device dictates the rate (again: see `device_config`), so the
+        // audio has to move to meet it. Without this, a 44.1kHz file on a
+        // 96kHz device plays at 2.177x -- found live on Windows, 2026-08-15.
+        let samples = crate::resample::resample_interleaved(
+            audio.samples,
+            audio.channels,
+            audio.sample_rate,
+            config.sample_rate,
+        );
+
         let state = Arc::new(Mutex::new(PlaybackState {
-            samples: audio.samples,
+            samples,
             channels: audio.channels,
             cursor: 0,
             playing: false,
@@ -67,7 +75,9 @@ impl Playback {
             }),
             other => return Err(PlayerError::UnsupportedOutputFormat(format!("{other:?}"))),
         }?;
-        stream.play().map_err(|_| PlayerError::NoOutputDevice)?;
+        stream
+            .play()
+            .map_err(|e| PlayerError::OutputStream(e.to_string()))?;
 
         Ok(Self {
             channels: config.channels,
@@ -107,36 +117,50 @@ impl Playback {
     }
 }
 
-fn pick_config(
-    device: &cpal::Device,
-    sample_rate: u32,
-    channels: u16,
-) -> Option<cpal::SupportedStreamConfig> {
-    let candidates: Vec<_> = device
-        .supported_output_configs()
-        .ok()?
-        .filter(|c| c.channels() == channels)
-        .filter(|c| c.min_sample_rate() <= sample_rate && sample_rate <= c.max_sample_rate())
-        .collect();
+/// The device's own mix format -- the only config that can actually be
+/// opened, so there is nothing to choose between.
+///
+/// This *used* to search `supported_output_configs()` for an entry matching
+/// the file's rate and channel count. That is the obvious thing to do and
+/// it is wrong on Windows, which cost a full desktop test to find
+/// (2026-08-15). Reading cpal 0.18.1's WASAPI backend rather than guessing:
+///
+/// - `supported_output_configs()` skips its own `is_format_supported` check
+///   for output devices (`device.rs`, "Output streams use
+///   AUDCLNT_STREAMFLAGS_AUTOCONVERTPCM so Initialize accepts any format"),
+///   so it advertises ~112 configs per device spanning every common rate.
+/// - `build_output_stream_raw()` then *does* run that check, and its
+///   `is_format_supported` returns true only for `S_OK` -- i.e. only for a
+///   format the engine takes natively, with no conversion. Anything else is
+///   rejected with "Stream configuration is not supported in shared mode"
+///   before the AUTOCONVERTPCM flag is ever reached.
+///
+/// So cpal advertises configs it will refuse to build, and in practice only
+/// the mix format survives. Asking for the file's rate got a hard failure on
+/// 6 of this machine's 9 output devices; the 3 that "worked" were the ones
+/// where the old channel filter happened to miss, falling through to this
+/// same mix format -- at 96kHz, hence the 2.177x speed-up. Both symptoms,
+/// one cause.
+///
+/// Taking the mix format and resampling to it (see `open`) makes every
+/// device behave the same way. If cpal fixes the advertise/accept mismatch,
+/// requesting the file's native rate becomes worth revisiting -- it would
+/// let the OS resampler do this job, or let bit-perfect output happen when
+/// the rates already agree.
+fn device_config(device: &cpal::Device) -> Result<cpal::SupportedStreamConfig, PlayerError> {
+    let config = device
+        .default_output_config()
+        .map_err(|e| PlayerError::OutputStream(e.to_string()))?;
 
-    // Prefer F32, then I16 -- the only formats `build_stream` (below) can
-    // actually feed. Found the hard way (2026-08-15 Phase 0 live playback
-    // test): a plain `.find()` over `supported_output_configs()` took
-    // whatever format the device listed *first* for a matching
-    // channel/rate combo, and this machine's ALSA/PipeWire device lists
-    // U8 before F32/I16 for mono -- `build_stream` correctly refused it
-    // rather than mangling audio, but a stereo/48kHz play would have
-    // hit the same trap silently on a different device.
-    candidates
-        .iter()
-        .find(|c| c.sample_format() == SampleFormat::F32)
-        .or_else(|| {
-            candidates
-                .iter()
-                .find(|c| c.sample_format() == SampleFormat::I16)
-        })
-        .cloned()
-        .map(|c| c.with_sample_rate(sample_rate))
+    // `build_stream` below can only feed F32 and I16. Since no *other*
+    // config would build either, a mix format outside those two is a real
+    // dead end rather than something to search around -- say so plainly.
+    match config.sample_format() {
+        SampleFormat::F32 | SampleFormat::I16 => Ok(config),
+        other => Err(PlayerError::UnsupportedOutputFormat(format!(
+            "{other:?} (the device's mix format; cpal will not open this device in any other format)"
+        ))),
+    }
 }
 
 fn build_stream<T>(
@@ -174,5 +198,5 @@ where
             |err| eprintln!("output stream error: {err}"),
             None,
         )
-        .map_err(|_| PlayerError::NoOutputDevice)
+        .map_err(|e| PlayerError::OutputStream(e.to_string()))
 }

@@ -6,6 +6,7 @@ pub mod decode;
 pub mod error;
 #[cfg(not(target_arch = "wasm32"))]
 pub mod playback;
+pub mod resample;
 pub mod source;
 
 pub use decode::{decode_all, DecodedAudio};

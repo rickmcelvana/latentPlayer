@@ -33,9 +33,30 @@ by design, not by bug. It's a real workspace member (for `version.workspace
 wasm32-unknown-unknown` both just work), just never part of a native
 `--workspace` command.
 
-## Known environment gotcha: `cargo tauri dev` on this machine
+## Windows (the current dev machine)
 
-**On this Linux/NVIDIA/Wayland (KWin) setup, `cargo tauri dev` crashes
+Everything above runs as written -- no env-var workaround, no flag change.
+Toolchain: rustc 1.97.1 (MSVC host), cargo-tauri 2.11.4, node 22, wasm-pack
+0.15, `wasm32-unknown-unknown` installed. A fresh clone needs `npm install`
+in `app/` and nothing else.
+
+Two Windows-specific things worth knowing:
+
+- **Only run one dev server at a time.** `tauri.conf.json`'s `devUrl` is
+  hardcoded to `http://localhost:5173`, and its `beforeDevCommand` starts
+  its own `npm run dev`. If something else already holds 5173, Vite quietly
+  moves to 5174 while the Tauri webview still loads 5173 -- so the desktop
+  app ends up rendering *the other* server's page. It looks like it works
+  (same app, after all), which is exactly what makes it confusing. Stop a
+  standalone `npm run dev` before `cargo tauri dev`.
+- **`output stream error: Default audio device changed`** in the console is
+  cpal telling you Windows moved the default output device; it does not
+  kill the stream, and the app doesn't act on it yet. See ARCHITECTURE.md's
+  "Known gaps".
+
+## Known environment gotcha: `cargo tauri dev` on the Linux box
+
+**On that Linux/NVIDIA/Wayland (KWin) setup, `cargo tauri dev` crashes
 instantly with `Gdk-Message: Error 71 (Protocol error) dispatching to
 Wayland display`** -- confirmed (2026-08-15) to happen even with zero wgpu
 code involved, i.e. a plain single-webview-window Tauri app crashes the same
@@ -49,7 +70,8 @@ separate `Failed to create GBM buffer` spam from the NVIDIA/Mesa GBM path):
 GDK_BACKEND=x11 WEBKIT_DISABLE_COMPOSITING_MODE=1 cargo tauri dev
 ```
 
-Verified (2026-08-15): with these two env vars, both windows (webview UI +
+Not needed on Windows -- this section applies only when working on that
+Linux machine. Verified (2026-08-15): with these two env vars, both windows (webview UI +
 the wgpu-rendered scope window) launch and stay up cleanly -- no crash over
 a sustained run, confirmed both via process liveness and a screenshot
 showing the scope window's cleared wgpu surface rendering correctly.

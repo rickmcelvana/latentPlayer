@@ -21,6 +21,15 @@ pub enum PlayerError {
     #[error("no usable audio output device")]
     NoOutputDevice,
 
+    /// Anything the audio backend itself refused, carrying its own message.
+    /// Previously these were all flattened into `NoOutputDevice`, which
+    /// reported "no usable audio output device" for a device that was
+    /// present and working fine and had merely rejected the requested
+    /// format -- actively misleading, and it cost real debugging time on
+    /// the first Windows desktop test (2026-08-15).
+    #[error("audio output stream error: {0}")]
+    OutputStream(String),
+
     #[error("output device only offers an unsupported sample format: {0}")]
     UnsupportedOutputFormat(String),
 }

@@ -167,20 +167,108 @@ fmt --check` all clean. `player-rt-wasm` separately clean for
 `wasm32-unknown-unknown` (check + clippy). `npx tsc -b` and `npm run build`
 (in `app/`) both clean, worklet bundle included.
 
+## M6 -- Windows bring-up (2026-08-15): done
+
+Development moved from the Linux box to Windows
+(`Z:\_dev\latent\latentPlayer`), on the call that the Linux blockers were
+environmental and not worth the detour. Linux stays a later test target.
+
+The toolchain was already installed (rustc 1.97.1 MSVC, cargo-tauri 2.11.4,
+node 22.22, npm 10.9, wasm-pack 0.15, `wasm32-unknown-unknown` +
+`x86_64-pc-windows-msvc`); `npm install` in `app/` was the only setup step.
+
+Everything in WORKFLOW.md passes here: `cargo check/test/clippy/fmt`
+(native), `cargo check/clippy -p player-rt-wasm --target
+wasm32-unknown-unknown`, `npm run wasm`, `npx tsc -b`, `npm run build`,
+`npm run dev`, `cargo tauri dev` -- the last with **no** env-var workaround,
+since the Wayland gotcha is Linux-only.
+
+**The blank web scope does not reproduce on Windows.** Verified against the
+running dev server, by reading pixels rather than trusting appearances:
+
+- `navigator.gpu.requestAdapter()` returns a real NVIDIA/Blackwell adapter
+  (the exact call that resolved to `null` on Linux), and the page is
+  `crossOriginIsolated` with `SharedArrayBuffer` available.
+- `WasmRenderer.create` + `draw_frame` on a test canvas drew an actual
+  image: `rgb(5,5,8)` background plus ~580 `rgb(38,242,140)` trace pixels,
+  counted from `getImageData`.
+- A synthetic stereo WAV fed through the app's own file input decoded to
+  the correct duration, played, and `scopeWindow(2048)` returned live
+  samples at the generated amplitude whose contents changed between polls
+  -- the full decode -> SAB -> worklet -> cursor -> scope feed, working.
+
+**Still not verified: the on-screen result.** The automation browser pane
+runs hidden and a hidden tab fires no `requestAnimationFrame` callbacks, so
+`webScope.ts`'s loop never ticks there; every call that loop makes was
+driven by hand instead. Same for the native app -- it launches, stays up,
+and the webview + scope windows exist, but "audio audible, trace moving" is
+a human-eyeball check.
+
+**New gap found live**: the first Windows `cargo tauri dev` run logged
+`output stream error: Default audio device changed` twice. Read cpal
+0.18.1's WASAPI source to be sure of the meaning -- it's a notification,
+not a stream teardown, and the app ignores it. Tracked in ARCHITECTURE.md's
+"Known gaps"; Phase 1 work.
+
+**User live-tested both builds on Windows (2026-08-15).** Web: "Web passes.
+Sounds perfect, scope shows up" -- web is closed, both audio and scope, on
+real music files across several different output devices. Native: two real
+bugs, fixed in M7 below.
+
+## M7 -- Native output was broken on most Windows devices: fixed
+
+Reported from the live test: "no usable audio output device" on most
+default devices, and *very* sped-up audio on the one device that did work.
+Same root cause, and it is not the obvious one -- full write-up in
+ARCHITECTURE.md's "Fixed: native output was broken on most Windows
+devices". Short version: `Playback::open` searched
+`supported_output_configs()` for the file's own rate, and on WASAPI cpal
+0.18.1 advertises configs it will then refuse to build, so only the
+device's mix format is ever openable.
+
+`crates/player-core/examples/device_probe.rs` was written to get evidence
+instead of theories -- it enumerates every output device and shows what the
+old and new config paths each do, including the real cpal error text. On
+this machine the old path failed to build on 6 of 10 devices and played at
+2.177x on 3 more (96kHz mix rate vs 44.1kHz files); exactly one device was
+correct, by luck. After the fix all 10 open at the correct rate. Keep the
+probe -- it turns "audio doesn't work on my machine" into one command.
+
+Fixes, all in `player-core`: `device_config` takes the mix format and stops
+negotiating; `resample.rs` converts to it (linear interpolation, honestly
+documented as a stopgap, with unit tests including one asserting a 440Hz
+second stays a 440Hz second); `PlayerError::OutputStream` carries the
+backend's real message instead of flattening everything into the actively
+misleading `NoOutputDevice`.
+
+Re-ran clean: `cargo test/clippy/fmt` (native + wasm) all pass. The rebuilt
+app then ran ~3.5 minutes with an MP3 loaded and logged **no** stream errors
+at all, where the previous run had failed. Whether it now *sounds* right is
+still a human check.
+
+**Observed, believed benign**: 308 `scope draw_frame error: ... "Outdated"`
+warnings, all inside the final 5 seconds before the app exited and none in
+the 3.5 minutes before that -- i.e. the scope's redraw thread drawing into a
+window being torn down, not a render failure. Worth confirming if it ever
+shows up mid-run.
+
 ## What's left before Phase 0 is fully closed
 - **Native: closed.** User-confirmed (2026-08-15) live: plays correctly,
   scope displays.
 - **Web audio: closed.** User-confirmed (2026-08-15): sample-rate fix
   resolved the pitch bug, sounds correct now.
-- **Web scope: root cause confirmed, fix not yet verified live.** Stays
-  blank because `navigator.gpu.requestAdapter()` returns `null` on this dev
-  machine's Chrome -- Dawn's WebGPU backend blocklists NVIDIA driver 570+
-  on Linux by default, and this machine runs 610.57.04. Not an app bug (see
-  `ARCHITECTURE.md`'s "Active bug"). Fix: enable
-  `chrome://flags/#enable-unsafe-webgpu` and `chrome://flags/#enable-vulkan`,
-  restart Chrome, re-test. **This is the one thing blocking Phase 0 from
-  being fully closed** -- needs that flag change + a live re-test to
-  confirm the scope actually renders.
+- **Web: closed.** User-confirmed on Windows (2026-08-15): "Web passes.
+  Sounds perfect, scope shows up", across several output devices.
+- **Native: config/resampling bugs fixed (M7), sound not yet re-confirmed.**
+  All 10 output devices now open at the correct rate, verified with
+  `device_probe`; a human still needs to confirm it sounds right and the
+  scope moves.
+- **Web scope: no longer blocked.** It was environmental, not an app bug --
+  `navigator.gpu.requestAdapter()` returned `null` on the Linux box (Dawn
+  blocklists NVIDIA driver 570+ there by default; that machine ran
+  610.57.04). On Windows the same code gets a real adapter and the renderer
+  demonstrably draws (see M6). What's left is an eyeball check on a visible
+  window, not a fix.
 
 Everything else Phase 0 asked for -- the wgpu-rendering-shared-natively-
 and-in-browser question, the AudioWorklet/SharedArrayBuffer port, and a
@@ -189,11 +277,15 @@ compiles/builds clean; native is fully user-confirmed working, web audio
 is user-confirmed working, web video (the scope) is the one open bug.
 
 ## Resuming this session after a restart
-Start here: **web scope root cause is confirmed (Chrome/Dawn WebGPU adapter
-blocklist on this dev machine's NVIDIA driver -- see "Active bug" in
-ARCHITECTURE.md). Fix is a local Chrome flag change
-(`chrome://flags/#enable-unsafe-webgpu` + `#enable-vulkan`, restart Chrome),
-not yet applied/re-tested live.** Everything else in this file is settled/
-confirmed. Don't re-explain or redo the M0-M5 work above -- it's done. The
-dev server command is `npm run dev` in `app/`; native is `cargo tauri dev`
-with the env vars in WORKFLOW.md.
+**The dev machine is Windows now** (`Z:\_dev\latent\latentPlayer`); the
+Linux env-var and Chrome-flag workarounds in WORKFLOW.md/ARCHITECTURE.md
+don't apply here. M0-M6 above are all done -- don't redo or re-explain
+them. Every build/check command passes on this machine.
+
+Web is user-confirmed closed (audio + scope). The only open item is a
+listen-test of the **native** build after M7's output fixes: `cargo tauri
+dev` (no env vars needed -- but stop any standalone dev server first, see
+WORKFLOW.md's port note), open a real music file, confirm it plays at the
+right speed and the scope window's trace moves. If a device misbehaves,
+`cargo run -p player-core --example device_probe` prints exactly what that
+device offers and what the app will do with it.
