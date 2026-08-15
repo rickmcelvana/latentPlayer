@@ -303,3 +303,36 @@ Three things follow from the shape rather than from taste, and are in scope:
   channels with the callback adapting cyclically; a queue of mixed-channel
   tracks would change that geometry mid-stream. Normalising in the decoder
   thread keeps the ring one shape for the life of the stream.
+
+### Encoder delay/padding: already handled (measured, 2026-08-15)
+
+The first item M3's plan listed as in-scope turned out to be done already, and
+the check was worth running before writing code rather than after.
+
+Symphonia 0.6.1's `Packet` carries `trim_start` and `trim_end`, documented as
+"the duration of decoded frames that should be trimmed... to remove encoder
+delay/padding". Read as a request, which is the natural reading, that means the
+caller should trim -- and `StreamingDecoder` didn't. But measuring a real MP3
+before trusting that reading:
+
+```
+packet #0:    pts=-1105 dur=1152 trim_start=1105 trim_end=0   decoded_frames=47
+packet #6678: pts=7691951      trim_start=0    trim_end=530 decoded_frames=622
+```
+
+47 = 1152 - 1105 and 622 = 1152 - 530: the decoder has **already** applied the
+trims, and the packet fields report what it did.
+`symphonia-bundle-mp3/src/decoder.rs:131` confirms it --
+`self.buf.trim(packet.trim_start.get(), packet.trim_end.get())` inside `decode`.
+Trimming again cut a further 577 frames of real audio off the track (47 from the
+head, 530 from the tail), which is how the discrepancy showed up: total decoded
+frames stopped matching the container's `num_frames`.
+
+So: nothing to build, and a bug avoided that would have clipped the first
+frames of every MP3 -- at exactly the track boundary M3 is trying to make
+seamless. The change was reverted.
+
+One real limitation falls out of the same investigation, now in
+ARCHITECTURE.md's "Known gaps": symphonia's `isomp4` demuxer sets neither trim
+field and its AAC decoder applies neither, so **M4A/AAC keeps its priming
+frames** and gapless will only be truly gapless for MP3, Ogg, FLAC and WAV.

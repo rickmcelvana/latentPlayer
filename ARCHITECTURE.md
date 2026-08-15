@@ -230,6 +230,17 @@ at the correct rate, re-verified with the same probe.
   or two per ring's worth of audio and keeps the consumer free of any
   signalling work, which is the trade that matters on the audio callback --
   but it is a poll, and worth revisiting if it ever shows up in a profile.
+- **AAC/M4A encoder delay and padding are not trimmed.** For MP3 and Ogg this
+  is handled for us: the demuxer populates `Packet::trim_start`/`trim_end` and
+  the decoder applies them itself (`symphonia-bundle-mp3/src/decoder.rs:131`
+  calls `buf.trim(...)`), so a decoded MP3 is already free of its ~1105 priming
+  frames and its tail padding -- measured on a real file, where packet 0
+  declares `trim_start=1105` and decodes to 47 frames. Symphonia's `isomp4`
+  demuxer sets neither field and the AAC decoder applies neither, so an M4A
+  keeps its priming frames. Harmless for single-track playback (a few tens of
+  milliseconds of near-silence at each end) but it means gapless is only really
+  gapless for MP3, Ogg, FLAC and WAV. Fixing it means reading the mp4
+  `edts`/`sgpd` boxes ourselves, or waiting for symphonia to.
 - **No Opus decode.** Symphonia 0.6.1 has no Opus support at all (checked
   its own feature list, not assumed) -- PLAN.md §3 lists Opus as a target
   format; that needs a second decode path (real question) or dropping Opus
