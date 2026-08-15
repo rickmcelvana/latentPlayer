@@ -1,0 +1,16 @@
+[package]
+name = "player-core"
+version.workspace = true
+edition.workspace = true
+
+[dependencies]
+symphonia = { version = "0.6", features = ["mp3", "aac", "alac", "isomp4"] }
+thiserror = "1"
+
+# cpal doesn't target wasm32 -- native playback output lives behind this cfg
+# and is simply absent from wasm builds (player-rt-wasm drives output via the
+# Web Audio API / AudioWorklet instead, see crates/player-rt-wasm).
+[target.'cfg(not(target_arch = "wasm32"))'.dependencies]
+cpal = "0.18"
+
+[dev-dependencies]

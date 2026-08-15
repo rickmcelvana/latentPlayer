@@ -1,0 +1,24 @@
+[package]
+name = "player-rt-wasm"
+version.workspace = true
+edition.workspace = true
+
+[lib]
+crate-type = ["cdylib"]
+
+[dependencies]
+# The web-facing glue crate: wraps player-core's decoder and
+# player-render's Renderer with wasm-bindgen bindings. Neither of those two
+# crates knows wasm-bindgen/web-sys exist -- this crate is where that
+# knowledge lives, mirroring how src-tauri is player-render's native-side
+# glue (CONVENTIONS.md).
+wasm-bindgen = "0.2"
+wasm-bindgen-futures = "0.4"
+js-sys = "0.3"
+player-core = { path = "../player-core" }
+player-render = { path = "../player-render" }
+wgpu = "30"
+
+[dependencies.web-sys]
+version = "0.3"
+features = ["HtmlCanvasElement"]
