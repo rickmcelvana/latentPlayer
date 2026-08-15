@@ -221,3 +221,43 @@ indices -- an Int32 monotonic counter would wrap after ~12 hours.
   checks use synthesised WAV, which is a trivially seekable container; MP3 and
   FLAC are where a real container seek is worth confirming by ear. This is the
   same gap M1 closed with a user listen.
+
+### The MP3 seek warning (2026-08-15)
+
+The desktop test surfaced one thing worth writing down. Seeking in an MP3 logs
+
+```
+[symphonia_bundle_mp3::layer3][WARN] mpa: invalid main_data_begin, underflow by 424 bytes
+```
+
+and seeking in a WAV logs nothing. Read out of symphonia 0.6.1's source rather
+than guessed at, it is expected and benign, for a reason that is actually the
+pre-roll machinery working:
+
+- MP3 frames don't carry all their own data. `main_data_begin` is a *backwards*
+  offset into previous frames' bit reservoir.
+- So symphonia's MP3 demuxer, on a seek, deliberately lands *before* the
+  requested time: it walks back to the reference frame containing the first
+  byte of the target frame's main data, and reports that earlier position as
+  `SeekedTo::actual_ts` (`demuxer.rs`, "attempt to find the first (oldest)
+  reference frame, then select 1 frame before that one to actually seek to").
+  It is handing the caller a pre-roll and expecting it to be decoded and
+  discarded.
+- `StreamingDecoder::seek` already discards exactly `required_ts - actual_ts`
+  (that's what `discard_frames` is for), so those frames never reach the
+  device.
+- The warning fires on the *first* of those pre-roll frames, which legitimately
+  references bytes from before itself that nothing has. Symphonia's response is
+  to zero the affected granules (`layer3/mod.rs`'s `read_main_data`,
+  `underflow_bits`) -- silence, not garbage -- and the reservoir has refilled by
+  the time the target frame decodes.
+
+WAV has no bit reservoir, hence no warning there.
+
+`cargo run -p player-core --example seek_smoke -- <path>` is the new example
+that measures this instead of reasoning about it: for three positions it
+decodes the same moment twice, once by playing through from the start and once
+by seeking, then reports the leading run of exact zeros (the fingerprint of a
+zeroed granule reaching playback) and the RMS difference between the two. On a
+synthesised WAV: 0 silent frames and 0.00% difference at all three positions,
+i.e. bit-exact.
