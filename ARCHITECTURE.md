@@ -268,8 +268,9 @@ at the correct rate, re-verified with the same probe.
   fixed rational ratio like 44100 -> 48000, and it applies a real
   anti-aliasing window. Measured at ~85dB tone-vs-everything-else on a
   440Hz sweep through 44.1 -> 48kHz (see `resample.rs`'s own test, which
-  asserts >70dB). Native-only; the web path still has nothing to convert,
-  since it runs its `AudioContext` at the file's own rate.
+  asserts >70dB). Cross-target as of M3: the web path needs it too, because
+  a live `AudioContext`'s rate cannot be changed, so the web build picks one
+  rate per session and converts every track to it.
   One property worth knowing: rubato leaves a constant sub-sample group
   delay (~half a sample here), so comparing its output sample-by-sample
   against an analytic reference measures *that*, not quality -- which is

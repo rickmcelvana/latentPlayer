@@ -6,9 +6,6 @@ pub mod decode;
 pub mod error;
 #[cfg(not(target_arch = "wasm32"))]
 pub mod playback;
-/// Native-only: it's backed by `rubato`, and the web build has nothing to
-/// convert (its `AudioContext` runs at the file's own rate).
-#[cfg(not(target_arch = "wasm32"))]
 pub mod resample;
 pub mod scope;
 pub mod source;

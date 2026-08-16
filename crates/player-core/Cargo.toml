@@ -6,6 +6,11 @@ edition.workspace = true
 [dependencies]
 symphonia = { version = "0.6", features = ["mp3", "aac", "alac", "isomp4"] }
 thiserror = "1"
+# Real sample-rate conversion, replacing Phase 0's linear-interpolation
+# stopgap. Both shells need it: a Web Audio context's rate is fixed for its
+# lifetime, so the web build picks one rate per session and converts every
+# track to it rather than tearing the context down between tracks.
+rubato = "5"
 
 # cpal doesn't target wasm32 -- native playback output lives behind this cfg
 # and is simply absent from wasm builds (player-rt-wasm drives output via the
@@ -13,9 +18,5 @@ thiserror = "1"
 [target.'cfg(not(target_arch = "wasm32"))'.dependencies]
 cpal = "0.18"
 rtrb = "0.3.4"
-# Real sample-rate conversion, replacing Phase 0's linear-interpolation
-# stopgap. Native-only for the same reason cpal is: the web build runs its
-# AudioContext at the file's own rate and has nothing to convert.
-rubato = "5"
 
 [dev-dependencies]
