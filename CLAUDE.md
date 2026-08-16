@@ -43,7 +43,16 @@ M4 (analysis tap + spectrum analyzer) is done and user-confirmed on both shells:
 cursors for meters that must see every sample), `analysis.rs`/`spectrum.rs` are
 the cross-target meters, and they run off the audio thread on both shells --
 `cargo run -p player-core --example spectrum_smoke` and `/spectrum.html` report
-10/10 each. M5 (LUFS + phase metering) is next.
+10/10 each.
+
+M5 (LUFS + phase metering) is built and verified live on both shells, pending a
+desktop check by the user: `loudness.rs` is BS.1770-4 (K-weighting derived per
+output rate, momentary/short-term/gated integrated, true peak by 4x
+oversampling) and `phase.rs` is the correlation meter plus the goniometer's
+points. Both join the spectrum inside `Meters`, off the one drain, and reset
+whenever a continuous listen breaks -- a seek, a lap, or a gapless hand-off.
+`cargo run -p player-core --example loudness_smoke` and `/loudness.html` report
+15/15 each, agreeing to the hundredth of a dB. M6 (3D vectorscope v1) is next.
 
 `cargo run -p player-core --example seek_smoke -- <path>` checks that seeking a given file yields
 the same audio as playing through to that point — written for MP3, whose bit reservoir makes

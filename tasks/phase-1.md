@@ -603,7 +603,7 @@ at the release rate instead -- measured at exactly 30dB in one second on both.
   and the tap's cursor ones (every sample seen, lapping reported, a clear
   reported).
 
-## M5 -- Loudness + phase metering: in progress
+## M5 -- Loudness + phase metering: done
 
 The second and third readers of M4's tap: a BS.1770-4 loudness meter (momentary,
 short-term, integrated, true peak) and a phase pair (correlation, goniometer).
@@ -651,3 +651,89 @@ Decisions first, so the reasoning is on the record before the code is.
    transform is two lines of arithmetic. Two lines are enough to disagree
    across shells. Decimated to a fixed count so the per-frame cost across the
    IPC boundary is bounded rather than a function of the sample rate.
+
+### What it is
+
+**BS.1770-4, derived rather than pasted.** `loudness.rs` holds the K-weighting
+(high shelf into an RLB high-pass), the 100ms sub-block accumulation everything
+else is built from, momentary (400ms), short-term (3s), gated integrated, and
+true peak. The filters are built by bilinear transform for whatever rate the
+output device opened at, and `derivation_matches_the_published_table` holds that
+derivation to the spec's own 48kHz coefficients to 1e-6. That test is what makes
+the 96kHz case trustworthy: there is nothing to compare against at 96kHz, so the
+evidence has to come from agreeing with the standard where the standard states
+an answer.
+
+**True peak is measured.** 4x oversampling through a 48-tap windowed-sinc
+polyphase interpolator, BS.1770-4 Annex 2's method rather than its table (which
+is 48kHz-only for the same reason). The test is analytic: a sine at fs/4 sampled
+through its zero crossings has every sample at -3.01dBFS and reaches full scale
+between them. The interpolator reads **-0.07 dBTP** where the answer is 0.
+
+**Phase, two ways.** `phase.rs` has the correlation meter (a one-pole 300ms
+average of the L/R sums, so the needle doesn't depend on how the caller chunks
+its drains -- there is a test for exactly that) and the goniometer's points. The
+points are the orthonormal mid/side rotation, so they are real amplitudes: a
+hard-panned full-scale sample plots at 0.707 and full-scale mono at 1.414. What
+to do with that is the display's business, as the spectrum's floor is.
+
+**One drain, four meters.** `Meters::ingest` feeds all of them. The spectrum and
+the goniometer are pictures of a window; loudness and correlation are
+measurements over time and get every sample. That is M4's `window`/`TapCursor`
+distinction one layer up, which is why the cursor was built then.
+
+**Five numbers cross as one snapshot** (`MeterSnapshot`), the way
+`TransportState` does, and the goniometer's points cross decimated to 256 so the
+per-frame cost is a property of the display rather than of the sample rate.
+`Loudness.tsx` polls at 10Hz -- the shortest window here is 400ms, and digits
+that flicker faster than they can be read are worse, not better -- while
+`Goniometer.tsx` runs at frame rate, because it is a picture.
+
+### Two things the checks caught
+
+**The hand-off leaked one track's peak into the next.** The first native run
+reported the -33 LUFS track holding the previous track's **-23.0 dBTP**. A break
+is only noticed once the drain containing it has been read, so that drain holds
+audio from both sides -- and a peak meter latches the loudest sample it ever
+saw. Resetting and then measuring those samples put the outgoing track's peak
+into the incoming track's hold. The drain carrying a break is now dropped
+outright, which costs at most 16ms (native) or ~20ms (web) of audio at each
+break, well under one sub-block of the loudness measurement.
+
+**A stale wasm build showed up as exactly one failing check.** The web harness
+reproduced that same true-peak failure after the native side was fixed, because
+`npm run wasm` had run before the fix. Worth recording as the shape of the
+symptom: when the two shells disagree on exactly one check and the native side
+just changed, suspect the wasm bundle before the code.
+
+### Verified
+
+- **Native**, `cargo run -p player-core --example loudness_smoke` (new): **15/15**
+  against the real default device at 48kHz. A tone generated at -23 LUFS reads
+  **-23.00** momentary, short-term and integrated, with a true peak of -23.00
+  dBTP; the volume control moves it by 0.00; identical channels read a
+  correlation of **1.000** and an inverted pair **-1.000**; the goniometer holds
+  mono material to 0.0000 of side energy and an inverted pair to 0.0000 of mid.
+  After a gapless hand-off into a -33 LUFS out-of-phase track, integrated reads
+  **-33.00** rather than the -25.6 an unreset meter would average to. A pause
+  empties the momentary window to the floor while integrated moves 0.23 LU --
+  the absolute gate doing its job.
+- **Web**, `/loudness.html` (new, the counterpart harness, same claims, same
+  synthesised tones): **15/15**, and every figure matches the native run to the
+  hundredth -- -23.00, -33.00, -33.00 dBTP. The same evidence M4 produced for
+  the spectrum, for the same reason: one implementation, two hosts.
+- **The UI**, read back pixel by pixel in-browser against a 440Hz tone generated
+  at -23 LUFS: the readout shows **-23.7 / -23.7 / -23.7 LUFS and -23.0 dBTP**
+  with a correlation of 1.00 and the phase bar filling the right half. The 0.7
+  LU difference from the harness is the K-weighting itself -- the shelf gives
+  1kHz +0.69dB and 440Hz nothing -- and the true peak, which is unweighted, is
+  unchanged at -23.0. The goniometer's points are all within 2px of the centre
+  line, spanning 11px vertically, which is where a quiet mono tone belongs.
+- **No regressions**: `/gapless.html` and the native `gapless_smoke` still
+  11/11, `/spectrum.html` and `spectrum_smoke` still 10/10 (-3.39dBFS in band
+  28, unchanged).
+- 73 unit tests in `player-core`, up from 49: the K-weighting against the
+  published table, the -23 LUFS calibration, 6.02 LU per halving, rate
+  independence across 44.1/48/96kHz, gating a silent passage out of an
+  integrated number, the inter-sample peak, correlation at +1/0/-1, and the
+  goniometer's rotation.

@@ -28,11 +28,21 @@ crates/
                      display only wants what is on screen now, while an
                      integrated loudness reading has to have seen every sample
                      it claims to measure. analysis.rs owns the meters and the
-                     drain; spectrum.rs is the first of them (windowed FFT,
-                     log bands, dBFS). Both are cross-target: the native
-                     analysis thread and the web worker run the same code, so
-                     the two shells cannot measure differently. Neither runs
-                     on the audio thread.
+                     drain; spectrum.rs (windowed FFT, log bands, dBFS),
+                     loudness.rs (BS.1770-4: K-weighting, momentary/short-term/
+                     gated integrated, true peak by 4x oversampling) and
+                     phase.rs (correlation, goniometer points) are the meters
+                     themselves. All cross-target: the native analysis thread
+                     and the web worker run the same code, so the two shells
+                     cannot measure differently. None runs on the audio thread.
+
+                     The loudness meters measure a *continuous listen*, so a
+                     seek, a lap or a gapless hand-off resets them (M5). The
+                     hand-off is the awkward one -- the audio is continuous by
+                     design, so nothing in the tap marks it and both shells
+                     watch their track counter instead. The drain carrying a
+                     break is dropped rather than measured, since it holds
+                     audio from both sides of it.
 
                      A seek is a real container seek, which means discarding
                      the audio already queued. That takes a three-counter
@@ -94,7 +104,9 @@ app/                 React + TS + Vite. Same component tree renders in the
                      (M3's decision); ordering lives here.
                      audioSab.ts holds the one definition
                      of the SharedArrayBuffer all three web parties use --
-                     control block, playback ring, scope history -- including
+                     control block, playback ring, scope history, and the
+                     spectrum/meter/goniometer regions the worker publishes into
+                     -- including
                      the seek handshake that mirrors the native one, and the
                      boundary records that carry gapless track changes along
                      with the audio. One AudioContext rate serves the whole
@@ -103,14 +115,17 @@ app/                 React + TS + Vite. Same component tree renders in the
                      the worklet would zipper.
                      playlist.ts and analysis.ts are the two adapter modules
                      components actually call: playlist.ts picks the shell for
-                     playback, analysis.ts for metering. Spectrum.tsx draws
-                     bars from the dBFS its adapter hands it and computes
-                     nothing.
-                     gapless.html + gaplessSmoke.ts and spectrum.html +
-                     spectrumSmoke.ts are dev-only harnesses (served at
-                     /gapless.html and /spectrum.html, never bundled) running
-                     the same checks as the native gapless_smoke and
-                     spectrum_smoke examples.
+                     playback, analysis.ts for metering. Spectrum.tsx,
+                     Loudness.tsx and Goniometer.tsx draw the dBFS, LUFS and
+                     mid/side pairs their adapter hands them and compute
+                     nothing -- including the goniometer's 45-degree rotation,
+                     which is two lines of arithmetic and still lives in Rust
+                     so the two shells cannot draw different figures.
+                     gapless.html, spectrum.html and loudness.html (with their
+                     *Smoke.ts) are dev-only harnesses -- served at those
+                     paths, never bundled -- running the same checks as the
+                     native gapless_smoke, spectrum_smoke and loudness_smoke
+                     examples.
                      webScope.ts drives the web build's scope canvas
                      (WasmRenderer, via rAF) -- the web-side counterpart of
                      src-tauri's native redraw thread.
