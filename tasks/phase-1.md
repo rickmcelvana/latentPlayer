@@ -40,7 +40,8 @@ clean is not evidence.
   full size in RAM. Native and web (worker) both. **Done, verified live on
   both shells.**
 - **M3 -- Queue + gapless.** Playlist model, next/prev, gapless hand-off
-  between tracks, crossfade if it falls out cheaply.
+  between tracks, crossfade if it falls out cheaply. **Done, verified live
+  on both shells** (crossfade deferred, see the decisions below).
 - **M4 -- Analysis tap + spectrum analyzer.** The per-block tap every meter
   hangs off, plus the first consumer (FFT spectrum, log/linear).
 - **M5 -- Loudness + phase metering.** LUFS (integrated/short/momentary, per
@@ -266,7 +267,14 @@ i.e. bit-exact. **User-confirmed passing on a real MP3 too** -- so the warning
 is what the reading above says it is, and none of the zeroed audio it refers to
 reaches playback.
 
-## M3 -- Queue + gapless: decisions (2026-08-15)
+## M3 -- Queue + gapless: done
+
+The player has a queue and crosses between tracks without a hole, on both
+shells. Crossfade was deliberately deferred (see below); everything else the
+milestone asked for is in and user-confirmed. Decisions, the hand-offs and
+their live checks follow.
+
+### Decisions (2026-08-15)
 
 1. **The engine holds current + next; the UI owns the playlist.** Gapless needs
    a one-deep lookahead in `player-core` and nothing more -- the decoder must be
@@ -479,3 +487,8 @@ into the file input, so React's own handlers run) against the dev server:
   no dev-server errors.
 - `/gapless.html` still reports **11/11** -- the engine underneath is unchanged,
   and this is the check that says so.
+
+**Native UI, user-confirmed live** (2026-08-16): "desktop test passes,
+everything works". That covers what the automated checks can't -- React driving
+the new `set_next`/`clear_next` commands, where a mismatched argument name fails
+silently at the IPC boundary -- and closes M3.
