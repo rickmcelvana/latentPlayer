@@ -54,8 +54,8 @@ whenever a continuous listen breaks -- a seek, a lap, or a gapless hand-off.
 `cargo run -p player-core --example loudness_smoke` and `/loudness.html` report
 15/15 each, agreeing to the hundredth of a dB.
 
-M6 (3D vectorscope v1) is built and verified live on both shells, pending a
-desktop check by the user: `player-render` now has a real 3D pipeline
+M6 (3D vectorscope v1) is done and user-confirmed on both shells:
+`player-render` now has a real 3D pipeline
 (`camera.rs`, `scene.rs` with a depth buffer and 4x MSAA) and `trace.rs`
 extrudes the XY figure along a time axis -- a fixed 120ms of history, on the
 goniometer's own axes. The scope window is resizable and the UI owns its size

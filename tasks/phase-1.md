@@ -848,6 +848,11 @@ sits in front of anyone reading pixels back from an sRGB target.
 - **The UI controls**, driven in-browser: the size buttons take the canvas from
   480 to 640 (CSS width follows), the current size is highlighted, and Hide
   toggles to Show with no errors.
+- **Native UI, user-confirmed live** (2026-08-16): "works as expected, no
+  issues or errors". That covers the two paths the automated checks cannot --
+  the real wgpu surface on a native window rather than an offscreen texture,
+  and React resizing that window live through `set_scope_size`, which the
+  renderer only notices via its own size poll.
 - **No regressions**: `/loudness.html` still ALL PASS, and the 73 `player-core`
   tests are joined by **16 in `player-render`** -- the camera's conventions
   (what the camera looks at lands in the middle, +x is right, +y is up, near
