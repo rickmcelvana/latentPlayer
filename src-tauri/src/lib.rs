@@ -8,6 +8,7 @@
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
+use player_core::eq::{self, EqSettings, BAND_FREQUENCIES, EQ_BANDS};
 use player_core::library::{Library, LibraryTrack, Playlist, ScanSummary};
 use player_core::{LocalFile, Playback};
 use tauri::Manager;
@@ -23,6 +24,20 @@ const SCOPE_LABEL: &str = "scope";
 const SCOPE_DEFAULT_SIZE: f64 = 480.0;
 
 type SharedPlayback = Arc<Mutex<Option<Playback>>>;
+
+/// Where the EQ's sliders are, independent of whether anything is playing.
+///
+/// The engine is rebuilt for every track (`Playback::open` builds a fresh one),
+/// so an EQ that lived only in the engine would flatten itself at every track
+/// change -- including a gapless one, where the listener would hear it happen.
+/// This is the source of truth; `load_file` hands it to each new engine.
+type SharedEq = Arc<Mutex<EqSettings>>;
+
+/// The rate the EQ's curve is drawn for when nothing is open. The filters are
+/// designed for the *output* device's rate, which is only known once a stream
+/// exists; 48kHz is the usual answer and the curve is redrawn against the real
+/// rate as soon as a track is loaded.
+const DEFAULT_EQ_RATE: u32 = 48_000;
 
 /// The music library (M7). Built in `setup` against the app data directory,
 /// so unlike the playback slot it is always present -- there is no "no library
@@ -83,10 +98,17 @@ impl TransportState {
 }
 
 #[tauri::command]
-fn load_file(path: String, state: tauri::State<SharedPlayback>) -> Result<TransportState, String> {
+fn load_file(
+    path: String,
+    state: tauri::State<SharedPlayback>,
+    eq: tauri::State<SharedEq>,
+) -> Result<TransportState, String> {
     // Streaming since Phase 1 M2: this returns once the decoder thread has a
     // prebuffer's worth of audio ready, not once the whole file is decoded.
     let playback = Playback::open(Box::new(LocalFile::new(path))).map_err(|e| e.to_string())?;
+    // Before the first sample plays: a new engine starts flat, and the listener
+    // set their EQ once, not once per track.
+    playback.set_eq(*eq.lock().unwrap());
     playback.play();
     let transport = TransportState::read(&playback);
     *state.lock().unwrap() = Some(playback);
@@ -271,6 +293,93 @@ fn delete_playlist(id: String, state: tauri::State<SharedLibrary>) -> Result<(),
         .map_err(|e| e.to_string())
 }
 
+/// The EQ as the UI sees it: where the sliders are, what they are labelled, and
+/// the curve they add up to (M8).
+///
+/// One struct rather than a command per part, for `TransportState`'s reason:
+/// the sliders and the curve drawn behind them describe one setting, and a UI
+/// that fetched them separately could draw a curve for a setting it isn't
+/// showing. The two axes are constants of the build, but they are cheap and
+/// sending them here means the UI never has a copy of them to disagree with.
+#[derive(serde::Serialize)]
+#[serde(rename_all = "camelCase")]
+struct EqState {
+    enabled: bool,
+    preamp_db: f32,
+    gains_db: Vec<f32>,
+    /// The sliders' centre frequencies, for their labels.
+    band_frequencies: Vec<f32>,
+    /// The curve: gain in dB at each of `response_frequencies`.
+    response_db: Vec<f32>,
+    response_frequencies: Vec<f32>,
+    /// How far a slider can travel either way, so the UI doesn't hold its own
+    /// idea of the range the engine will clamp to.
+    max_gain_db: f32,
+}
+
+impl EqState {
+    fn read(settings: EqSettings, sample_rate: u32) -> Self {
+        Self {
+            enabled: settings.enabled,
+            preamp_db: settings.preamp_db,
+            gains_db: settings.gains_db.to_vec(),
+            band_frequencies: BAND_FREQUENCIES.to_vec(),
+            response_db: eq::magnitude_response(&settings, sample_rate),
+            response_frequencies: eq::response_frequencies(),
+            max_gain_db: eq::MAX_GAIN_DB,
+        }
+    }
+}
+
+/// The rate the running engine's filters are designed for, or the default when
+/// nothing is open.
+fn eq_rate(playback: &SharedPlayback) -> u32 {
+    playback
+        .lock()
+        .unwrap()
+        .as_ref()
+        .map(|p| p.output_sample_rate())
+        .unwrap_or(DEFAULT_EQ_RATE)
+}
+
+#[tauri::command]
+fn eq_state(state: tauri::State<SharedPlayback>, eq: tauri::State<SharedEq>) -> EqState {
+    let settings = *eq.lock().unwrap();
+    EqState::read(settings, eq_rate(state.inner()))
+}
+
+/// Moves the sliders, and returns the state that resulted -- including the
+/// clamping, so the UI shows what the engine will actually play rather than
+/// what was asked for.
+#[tauri::command]
+fn set_eq(
+    enabled: bool,
+    preamp_db: f32,
+    gains_db: Vec<f32>,
+    state: tauri::State<SharedPlayback>,
+    eq: tauri::State<SharedEq>,
+) -> EqState {
+    let mut gains = [0.0f32; EQ_BANDS];
+    // Taking what fits rather than rejecting a wrong-length list: this crosses
+    // an IPC boundary where a mismatch is a silent failure, and a missing band
+    // is a slider that doesn't move rather than a player that stops.
+    for (slot, &db) in gains.iter_mut().zip(gains_db.iter()) {
+        *slot = db;
+    }
+    let settings = EqSettings {
+        enabled,
+        preamp_db,
+        gains_db: gains,
+    }
+    .clamped();
+
+    *eq.lock().unwrap() = settings;
+    if let Some(playback) = state.lock().unwrap().as_ref() {
+        playback.set_eq(settings);
+    }
+    EqState::read(settings, eq_rate(state.inner()))
+}
+
 /// The scope window's geometry, as the UI sees it.
 #[derive(serde::Serialize)]
 #[serde(rename_all = "camelCase")]
@@ -410,6 +519,7 @@ pub fn run() {
     tauri::Builder::default()
         .plugin(tauri_plugin_dialog::init())
         .manage(SharedPlayback::default())
+        .manage(SharedEq::new(Mutex::new(EqSettings::flat())))
         .invoke_handler(tauri::generate_handler![
             load_file,
             set_next,
@@ -418,6 +528,8 @@ pub fn run() {
             transport,
             seek,
             set_volume,
+            eq_state,
+            set_eq,
             spectrum,
             spectrum_bands,
             meters,

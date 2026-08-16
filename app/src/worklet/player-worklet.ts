@@ -8,13 +8,19 @@
 // mixer-worklet.ts's own comment), so predev/prebuild rebuild it
 // automatically here from the start.
 //
-// Unlike mixer-worklet.ts, this processor makes no wasm calls at all: a
-// plain player has no per-block DSP to run, so there's nothing for wasm to
-// do here. It reads already-decoded interleaved f32 PCM out of a ring in a
-// SharedArrayBuffer that worker.ts keeps topped up, and copies it to the
-// output. Since M3 that PCM is already in the output's rate and channel
-// count, so this really is a copy. See audioSab.ts for the layout, which this
-// shares with the worker and playerEngine.
+// Unlike mixer-worklet.ts, this processor makes no wasm calls at all. It reads
+// already-decoded interleaved f32 PCM out of a ring in a SharedArrayBuffer that
+// worker.ts keeps topped up, and copies it to the output. Since M3 that PCM is
+// already in the output's rate and channel count, so it really is a copy. See
+// audioSab.ts for the layout, which this shares with the worker and
+// playerEngine.
+//
+// Since M8 there is one piece of DSP here: the EQ. Its *coefficients* are still
+// designed in Rust, in the worker, and arrive through the shared buffer -- what
+// happens here is the difference equation and nothing else (see eqFilter.ts for
+// why the line is drawn there). It has to be here rather than in the worker
+// because the worker writes a ring holding two seconds of audio, and an EQ a
+// listener cannot hear move is not an EQ.
 //
 // Its responsibilities beyond copying samples: it is the consumer end of the
 // seek handshake, it owns the authoritative play position, it applies track
@@ -28,10 +34,12 @@ import {
   BOUNDARY_SLOTS,
   BOUNDARY_TOTAL_FRAMES,
   CONTROL,
+  EQ_FIELDS,
   SCOPE_MASK,
   audioViews,
   framesUntil,
 } from "../audioSab";
+import { EqFilter } from "../eqFilter";
 
 const BLOCK_FRAMES = 128;
 
@@ -41,6 +49,16 @@ class PlayerWorklet extends AudioWorkletProcessor {
   private scope: Float32Array;
   private ringFrames: number;
   private channels: number;
+  /// The EQ, and the coefficients the worker publishes for it.
+  private eqCoefficients: Float64Array;
+  private eq: EqFilter;
+  /// The generation of the cascade currently loaded, against
+  /// `CONTROL.eqGeneration`.
+  private eqGeneration = 0;
+  /// One frame and one cascade, both reused: the worklet may not allocate on
+  /// the audio path any more than the native callback may.
+  private frame: Float64Array;
+  private eqSnapshot = new Float64Array(EQ_FIELDS);
 
   // `any` here matches the sibling repos' own worklet convention
   // (CONVENTIONS.md): this is a separate esbuild bundle with ambient-typed
@@ -54,11 +72,34 @@ class PlayerWorklet extends AudioWorkletProcessor {
     this.scope = views.scope;
     this.ringFrames = views.ringFrames;
     this.channels = views.channels;
+    this.eqCoefficients = views.eq;
+    this.eq = new EqFilter(views.channels);
+    this.frame = new Float64Array(views.channels);
+  }
+
+  /// Picks up a new cascade if the worker has published one.
+  ///
+  /// The seqlock: read the generation, copy, read it again. If it moved during
+  /// the copy the coefficients may be half of one curve and half of another, so
+  /// the copy is abandoned and retried next block -- 2.7ms later, which nobody
+  /// can hear, and far better than running a cascade that was never designed.
+  private refreshEq(): void {
+    const published = Atomics.load(this.control, CONTROL.eqGeneration);
+    if (published === this.eqGeneration) return;
+    this.eqSnapshot.set(this.eqCoefficients);
+    if (Atomics.load(this.control, CONTROL.eqGeneration) !== published) return;
+    this.eq.set(this.eqSnapshot);
+    this.eqGeneration = published;
   }
 
   process(_inputs: Float32Array[][], outputs: Float32Array[][]): boolean {
     const output = outputs[0];
     const c = this.control;
+
+    // Before any of the early returns below, for the reason the native callback
+    // drains its own queue there: a listener who moves a slider while paused,
+    // or mid-seek, must have the EQ they asked for when the music comes back.
+    this.refreshEq();
 
     // Step 3 of the handshake (see audioSab.ts). Once the worker says it has
     // moved, everything queued is from where the track no longer is.
@@ -84,6 +125,9 @@ class PlayerWorklet extends AudioWorkletProcessor {
         Atomics.store(c, CONTROL.scopeFilled, 0);
         Atomics.store(c, CONTROL.scopeIndex, 0);
         Atomics.store(c, CONTROL.tapWritten, 0);
+        // The filters' memory belongs to where the track was, not where it is
+        // going -- same reason, same place, as the native callback's reset.
+        this.eq.reset();
         Atomics.store(c, CONTROL.drainedSeq, requested);
       }
       // Either way, play nothing this block.
@@ -124,13 +168,27 @@ class PlayerWorklet extends AudioWorkletProcessor {
         continue;
       }
       const base = ((readIndex + frame) % this.ringFrames) * this.channels;
-      // A straight copy: the ring is already in the output's channel layout,
-      // adapted in the worker (M3), so these indices line up one to one.
-      for (let ch = 0; ch < output.length; ch++) {
-        output[ch][frame] = this.ring[base + ch] ?? 0;
-      }
-      for (let s = 0; s < this.channels; s++) {
-        this.scope[(scopeIndex + s) & SCOPE_MASK] = this.ring[base + s];
+      // The ring is already in the output's channel layout, adapted in the
+      // worker (M3), so these indices line up one to one. What happens between
+      // the ring and the output is the EQ and nothing else -- volume rides the
+      // GainNode after this node, which is why the tap below holds EQ'd audio
+      // at the monitoring level it was measured at (M8 decision 2).
+      if (this.eq.bypassed) {
+        for (let ch = 0; ch < output.length; ch++) {
+          output[ch][frame] = this.ring[base + ch] ?? 0;
+        }
+        for (let s = 0; s < this.channels; s++) {
+          this.scope[(scopeIndex + s) & SCOPE_MASK] = this.ring[base + s];
+        }
+      } else {
+        for (let s = 0; s < this.channels; s++) this.frame[s] = this.ring[base + s];
+        this.eq.process(this.frame);
+        for (let ch = 0; ch < output.length; ch++) {
+          output[ch][frame] = this.frame[ch] ?? 0;
+        }
+        for (let s = 0; s < this.channels; s++) {
+          this.scope[(scopeIndex + s) & SCOPE_MASK] = this.frame[s];
+        }
       }
       scopeIndex += this.channels;
     }

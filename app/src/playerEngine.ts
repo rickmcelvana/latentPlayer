@@ -11,6 +11,8 @@
 // shell it's in.
 import {
   CONTROL,
+  EQ_BANDS,
+  EQ_MAX_GAIN_DB,
   LOUDNESS_FLOOR_LUFS,
   METER,
   SCOPE_MASK,
@@ -47,8 +49,59 @@ export interface TransportState {
   trackIndex: number;
 }
 
+/// The load in flight, if any. One at a time by construction -- a second load
+/// replaces the first -- so this is a slot rather than a queue.
+let pendingLoad: {
+  resolve: (loaded: LoadedMessage) => void;
+  reject: (error: Error) => void;
+} | null = null;
+
+interface LoadedMessage {
+  sab: SharedArrayBuffer;
+  channels: number;
+  sampleRate: number;
+  durationSeconds: number;
+  bandCentres: Float32Array;
+}
+
+/// The worker, with one message handler for the life of the session.
+///
+/// It used to be set per load, which worked while "loaded" and "error" were the
+/// only messages there were. The EQ's curve arrives whenever a slider moves,
+/// including between loads, so the routing has to outlive any one of them.
 function getWorker(): Worker {
-  worker ??= new Worker(new URL("./worker.ts", import.meta.url), { type: "module" });
+  if (!worker) {
+    worker = new Worker(new URL("./worker.ts", import.meta.url), { type: "module" });
+    worker.onmessage = (e: MessageEvent) => {
+      const message = e.data;
+      if (message.type === "loaded") {
+        pendingLoad?.resolve(message as LoadedMessage);
+        pendingLoad = null;
+      } else if (message.type === "error") {
+        const waiting = pendingLoad;
+        pendingLoad = null;
+        // An error with nothing waiting on it is a decode that failed after
+        // the load returned -- a queued track that wouldn't open, say. It has
+        // nowhere to be thrown, so it is reported rather than swallowed.
+        if (waiting) waiting.reject(new Error(message.message));
+        else console.error("player worker:", message.message);
+      } else if (message.type === "eqResponse") {
+        // The settings come back through Rust's clamp, so what is shown is what
+        // the filters are running -- the desktop shell's `set_eq` answers the
+        // same way.
+        eqSettings = {
+          enabled: eqSettings.enabled,
+          preampDb: message.preampDb,
+          gainsDb: Array.from(message.gainsDb as number[]),
+        };
+        eqResponseDb = new Float32Array(message.responseDb);
+        eqResponseHz = new Float32Array(message.responseFrequencies);
+        eqBandHz = new Float32Array(message.bandFrequencies);
+        eqMaxGain = message.maxGainDb;
+        eqCurveVersion += 1;
+      }
+    };
+  }
   return worker;
 }
 
@@ -84,18 +137,9 @@ export async function loadFile(file: File): Promise<TransportState> {
   const { bytes, extensionHint } = await readFile(file);
   const ctx = await getAudioContext();
 
-  const loaded = await new Promise<{
-    sab: SharedArrayBuffer;
-    channels: number;
-    sampleRate: number;
-    durationSeconds: number;
-    bandCentres: Float32Array;
-  }>((resolve, reject) => {
+  const loaded = await new Promise<LoadedMessage>((resolve, reject) => {
     const w = getWorker();
-    w.onmessage = (e: MessageEvent) => {
-      if (e.data.type === "loaded") resolve(e.data);
-      else if (e.data.type === "error") reject(new Error(e.data.message));
-    };
+    pendingLoad = { resolve, reject };
     // Not transferred: the worker keeps the encoded bytes so it can reopen the
     // track, which a seek arriving mid-hand-off has to do.
     w.postMessage({
@@ -228,6 +272,86 @@ export function seek(seconds: number): TransportState {
 export function setVolume(next: number): void {
   volume = Math.min(1, Math.max(0, next));
   if (gainNode) gainNode.gain.value = volume;
+}
+
+/// Where the EQ's sliders are (M8). Mirrors `EqSettings` in
+/// player-core/src/eq.rs and `EqState` in src-tauri/src/lib.rs.
+export interface EqSettings {
+  enabled: boolean;
+  preampDb: number;
+  gainsDb: number[];
+}
+
+/// The EQ as a display needs it: the sliders, their labels, and the curve they
+/// add up to. One shape for both shells, like `TransportState`.
+export interface EqState extends EqSettings {
+  /// The sliders' centre frequencies.
+  bandFrequencies: Float32Array;
+  /// The curve: gain in dB at each of `responseFrequencies`.
+  responseDb: Float32Array;
+  responseFrequencies: Float32Array;
+  maxGainDb: number;
+}
+
+let eqSettings: EqSettings = {
+  enabled: true,
+  preampDb: 0,
+  gainsDb: new Array(EQ_BANDS).fill(0),
+};
+/// The curve and its axes, as the worker last computed them in Rust. Empty
+/// until the first `setEq` or `eqState` -- the UI asks once on mount.
+let eqResponseDb = new Float32Array(0);
+let eqResponseHz = new Float32Array(0);
+let eqBandHz = new Float32Array(0);
+let eqMaxGain = EQ_MAX_GAIN_DB;
+/// Curves the worker has sent, so a caller can tell its own answer from the
+/// one before it.
+let eqCurveVersion = 0;
+
+/// Moves the sliders. The worker designs the coefficients and publishes them
+/// into the shared buffer; the worklet picks them up on its next block, so this
+/// is audible within one 128-frame block (2.7ms at 48kHz) rather than after the
+/// ring drains.
+export async function setEq(settings: EqSettings): Promise<EqState> {
+  eqSettings = {
+    enabled: settings.enabled,
+    preampDb: settings.preampDb,
+    gainsDb: settings.gainsDb.slice(0, EQ_BANDS),
+  };
+  const before = eqCurveVersion;
+  getWorker().postMessage({ type: "eq", ...eqSettings });
+  return waitForCurve(before);
+}
+
+/// The current setting and its curve.
+export async function eqState(): Promise<EqState> {
+  // Asking is what triggers the first curve, since the worker owns the Rust
+  // that computes it and may not have been asked for one yet.
+  const before = eqCurveVersion;
+  getWorker().postMessage({ type: "eq", ...eqSettings });
+  return waitForCurve(before);
+}
+
+/// Waits for the worker's answer to the setting just posted.
+///
+/// A version counter rather than a per-request id: the curve is a function of
+/// the settings alone, so two answers in flight cannot disagree about anything
+/// except which is newer, and the newer one always lands last. Waiting for the
+/// *count* to move is what stops a slider drag drawing the previous position's
+/// curve. A timeout returns the last curve there was, which is the honest
+/// degradation -- a stale curve beats a blank panel.
+async function waitForCurve(after: number): Promise<EqState> {
+  for (let attempt = 0; attempt < 50 && eqCurveVersion === after; attempt++) {
+    await new Promise((resolve) => setTimeout(resolve, 10));
+  }
+  return {
+    ...eqSettings,
+    gainsDb: eqSettings.gainsDb.slice(),
+    bandFrequencies: eqBandHz,
+    responseDb: eqResponseDb,
+    responseFrequencies: eqResponseHz,
+    maxGainDb: eqMaxGain,
+  };
 }
 
 /// Current transport state, matching the native adapter's shape.

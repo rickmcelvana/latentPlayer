@@ -110,6 +110,66 @@ export async function goniometer(): Promise<Float32Array> {
   return new Float32Array(await invoke<number[]>("goniometer"));
 }
 
+/// Where the EQ's sliders are (M8). Mirrors `EqSettings` in
+/// player-core/src/eq.rs and playerEngine.ts's copy.
+export interface EqSettings {
+  enabled: boolean;
+  preampDb: number;
+  gainsDb: number[];
+}
+
+/// The EQ as a display needs it: the sliders, their labels, and the curve they
+/// add up to -- read in one round trip, because a UI that fetched them
+/// separately could draw a curve for a setting it isn't showing. Mirrors
+/// `EqState` in src-tauri/src/lib.rs.
+export interface EqState extends EqSettings {
+  bandFrequencies: Float32Array;
+  responseDb: Float32Array;
+  responseFrequencies: Float32Array;
+  maxGainDb: number;
+}
+
+/// The arrays cross the JSON boundary as plain number lists; the components
+/// draw from typed arrays, as they do on the web side.
+interface RawEqState {
+  enabled: boolean;
+  preampDb: number;
+  gainsDb: number[];
+  bandFrequencies: number[];
+  responseDb: number[];
+  responseFrequencies: number[];
+  maxGainDb: number;
+}
+
+function eqStateFrom(raw: RawEqState): EqState {
+  return {
+    enabled: raw.enabled,
+    preampDb: raw.preampDb,
+    gainsDb: raw.gainsDb,
+    bandFrequencies: new Float32Array(raw.bandFrequencies),
+    responseDb: new Float32Array(raw.responseDb),
+    responseFrequencies: new Float32Array(raw.responseFrequencies),
+    maxGainDb: raw.maxGainDb,
+  };
+}
+
+export async function eqState(): Promise<EqState> {
+  return eqStateFrom(await invoke<RawEqState>("eq_state"));
+}
+
+/// Moves the sliders and returns what the engine settled on, clamping
+/// included -- so the display shows what is being played rather than what was
+/// asked for.
+export async function setEq(settings: EqSettings): Promise<EqState> {
+  return eqStateFrom(
+    await invoke<RawEqState>("set_eq", {
+      enabled: settings.enabled,
+      preampDb: settings.preampDb,
+      gainsDb: settings.gainsDb,
+    }),
+  );
+}
+
 /// Geometry of the scope's own window. Mirrors `ScopeState` in
 /// src-tauri/src/lib.rs; see scope.ts for why this is an adapter rather than
 /// something components call directly.

@@ -14,6 +14,7 @@ import {
   type PlaylistTrack,
   type TransportState,
 } from "./playlist";
+import { Equalizer } from "./Equalizer";
 import { Goniometer } from "./Goniometer";
 import { LibraryPanel } from "./LibraryPanel";
 import { Loudness } from "./Loudness";
@@ -304,6 +305,10 @@ function App() {
         </div>
 
         <Spectrum active={loaded} />
+
+        {/* Mounted whether or not a track is loaded: the EQ is a setting, not
+            a reading, and the listener may well set it before pressing play. */}
+        <Equalizer onError={setError} />
 
         <div className="meters">
           <Goniometer active={loaded} />

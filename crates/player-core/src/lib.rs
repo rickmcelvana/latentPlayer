@@ -5,6 +5,7 @@
 pub mod analysis;
 pub mod channels;
 pub mod decode;
+pub mod eq;
 pub mod error;
 /// The desktop shell's library. Native only: a browser has handles rather than
 /// paths, so the two shells cannot share a scanner (M7 decision 3).
@@ -24,6 +25,9 @@ pub mod tap;
 pub use analysis::{MeterSnapshot, Meters, BAND_COUNT, FFT_SIZE, GONIOMETER_POINTS};
 pub use channels::{adapt_channels, ChannelShape};
 pub use decode::{decode_all, DecodedAudio};
+pub use eq::{
+    magnitude_response, EqCoefficients, EqProcessor, EqSettings, BAND_FREQUENCIES, EQ_BANDS,
+};
 pub use error::PlayerError;
 #[cfg(not(target_arch = "wasm32"))]
 pub use library::{Library, LibraryTrack, Playlist, ScanSummary};

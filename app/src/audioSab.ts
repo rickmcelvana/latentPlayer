@@ -122,6 +122,16 @@ export const CONTROL = {
   /// of audio to plot -- drawing the whole buffer then would draw the zeros
   /// behind it as a dot in the centre.
   goniometerPoints: 22,
+
+  /// Bumped by the worker after it writes a new set of EQ coefficients (M8).
+  ///
+  /// The worklet keeps its own copy of the cascade and refreshes it only when
+  /// this changes, which is what keeps a fifty-double read off the audio path
+  /// in the steady state. It is also the seqlock that makes the read safe: the
+  /// worklet re-reads this after copying and tries again next block if it moved
+  /// underneath, so a slider moved mid-copy can never leave half of one curve
+  /// and half of another running.
+  eqGeneration: 23,
 } as const;
 
 /// Where the boundary records start, and how many there can be at once. One
@@ -192,6 +202,23 @@ export const TRUE_PEAK_FLOOR_DB = -120;
 /// `GONIOMETER_POINTS` in player-core/src/analysis.rs. Two floats each.
 export const GONIOMETER_POINTS = 256;
 
+/// The EQ's cascade as the worker writes it and the worklet reads it (M8),
+/// mirroring `EqCoefficients::to_array` in player-core/src/eq.rs -- which is
+/// the one place the order is decided. Doubles, not floats: the 31Hz band's
+/// poles sit close enough to the unit circle at a 96kHz output rate that f32
+/// coefficients lose the difference between them.
+export const EQ_BANDS = 10;
+export const EQ_ENABLED = 0;
+export const EQ_PREAMP = 1;
+export const EQ_HEADER = 2;
+/// Five coefficients per band, after the two header fields.
+export const EQ_FIELDS = EQ_HEADER + EQ_BANDS * 5;
+
+/// How far a slider may travel either way, mirroring `MAX_GAIN_DB`. Only used
+/// to size a control before the engine has answered; the engine's own clamp is
+/// what actually holds.
+export const EQ_MAX_GAIN_DB = 12;
+
 export interface AudioViews {
   control: Int32Array;
   /// Interleaved PCM waiting to be played, in the output's shape.
@@ -206,8 +233,20 @@ export interface AudioViews {
   /// Goniometer points, interleaved side/mid. Only the first
   /// `CONTROL.goniometerPoints` pairs are valid.
   goniometer: Float32Array;
+  /// The EQ's cascade, designed in Rust by the worker and applied by the
+  /// worklet. Read through `CONTROL.eqGeneration`, never directly.
+  eq: Float64Array;
   ringFrames: number;
   channels: number;
+}
+
+/// Byte offset of the EQ region, given everything before it. Rounded up to
+/// eight because a `Float64Array` view must start on an 8-byte boundary, and
+/// `METER_FIELDS` is odd -- so without this the region's start depends on the
+/// meter count, which is exactly the sort of thing that works until someone
+/// adds a meter.
+function eqOffset(after: number): number {
+  return Math.ceil(after / 8) * 8;
 }
 
 /// Allocates the buffer for a session. `channels` and `sampleRate` are the
@@ -216,12 +255,15 @@ export interface AudioViews {
 export function createAudioSab(channels: number, sampleRate: number): SharedArrayBuffer {
   const ringFrames = Math.ceil(sampleRate * RING_SECONDS);
   const bytes =
-    CONTROL_INTS * 4 +
-    ringFrames * channels * 4 +
-    SCOPE_SAMPLES * 4 +
-    SPECTRUM_BANDS * 4 +
-    METER_FIELDS * 4 +
-    GONIOMETER_POINTS * 2 * 4;
+    eqOffset(
+      CONTROL_INTS * 4 +
+        ringFrames * channels * 4 +
+        SCOPE_SAMPLES * 4 +
+        SPECTRUM_BANDS * 4 +
+        METER_FIELDS * 4 +
+        GONIOMETER_POINTS * 2 * 4,
+    ) +
+    EQ_FIELDS * 8;
   const sab = new SharedArrayBuffer(bytes);
   const control = new Int32Array(sab, 0, CONTROL_INTS);
   control[CONTROL.ringFrames] = ringFrames;
@@ -251,6 +293,12 @@ export function audioViews(sab: SharedArrayBuffer): AudioViews {
   const spectrum = new Float32Array(sab, spectrumBytes, SPECTRUM_BANDS);
   const meterBytes = spectrumBytes + SPECTRUM_BANDS * 4;
   const meters = new Float32Array(sab, meterBytes, METER_FIELDS);
-  const goniometer = new Float32Array(sab, meterBytes + METER_FIELDS * 4, GONIOMETER_POINTS * 2);
-  return { control, ring, scope, spectrum, meters, goniometer, ringFrames, channels };
+  const goniometerBytes = meterBytes + METER_FIELDS * 4;
+  const goniometer = new Float32Array(sab, goniometerBytes, GONIOMETER_POINTS * 2);
+  const eq = new Float64Array(
+    sab,
+    eqOffset(goniometerBytes + GONIOMETER_POINTS * 2 * 4),
+    EQ_FIELDS,
+  );
+  return { control, ring, scope, spectrum, meters, goniometer, eq, ringFrames, channels };
 }

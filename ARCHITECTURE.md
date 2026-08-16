@@ -44,6 +44,21 @@ crates/
                      break is dropped rather than measured, since it holds
                      audio from both sides of it.
 
+                     eq.rs (M8) is the ten-band graphic EQ: band layout, the
+                     RBJ derivations of the peak and the two shelves, the
+                     clamp, the magnitude response the UI draws, and
+                     EqProcessor -- the cascade as the native callback runs it.
+                     It sits between the ring and the output, *before* the tap
+                     and before the volume, so every meter measures what the
+                     listener is played while monitoring level still changes
+                     nothing. It is the one DSP module the web build does not
+                     run: over there the audio path is an AudioWorklet, so the
+                     difference equation is mirrored in app/src/eqFilter.ts and
+                     only the coefficients come from here (see below).
+                     Coefficients reach the audio thread through an rtrb queue,
+                     never a lock, and are taken before any early return so a
+                     slider moved while paused still lands.
+
                      A seek is a real container seek, which means discarding
                      the audio already queued. That takes a three-counter
                      handshake between the caller, the decoder thread and the
@@ -106,7 +121,11 @@ src-tauri/           Tauri 2 desktop shell. Two windows: the React webview
                      Transport (play/pause/seek/volume/position) is exposed
                      as `#[tauri::command]`s returning one `TransportState`
                      struct rather than a command per field, so the seek
-                     bar, clock and play button can't disagree mid-poll.
+                     bar, clock and play button can't disagree mid-poll. The
+                     EQ answers the same way (`EqState`: sliders, labels and
+                     the curve in one round trip) and is *held here* rather
+                     than in the engine -- `Playback` is rebuilt per track, so
+                     `load_file` hands the stored setting to each new one.
 
                      The library's commands live here too (M7), with the scan
                      itself on a blocking thread rather than the main one --
@@ -140,22 +159,33 @@ app/                 React + TS + Vite. Same component tree renders in the
                      (M3's decision); ordering lives here.
                      audioSab.ts holds the one definition
                      of the SharedArrayBuffer all three web parties use --
-                     control block, playback ring, scope history, and the
-                     spectrum/meter/goniometer regions the worker publishes into
-                     -- including
+                     control block, playback ring, scope history, the
+                     spectrum/meter/goniometer regions the worker publishes
+                     into, and the EQ's coefficients (a Float64Array, written
+                     by the worker and read by the worklet behind a generation
+                     counter it treats as a seqlock) -- including
                      the seek handshake that mirrors the native one, and the
                      boundary records that carry gapless track changes along
                      with the audio. One AudioContext rate serves the whole
                      session; the worker resamples every track to it. Web
                      volume rides a GainNode, since Web Audio smooths it and
                      the worklet would zipper.
-                     playlist.ts, analysis.ts, scope.ts and library.ts are the
-                     four adapter modules components actually call: playlist.ts
-                     picks the shell for playback, analysis.ts for metering,
-                     scope.ts for the scope's size and visibility (a separate
-                     OS window natively, a canvas on the web -- one component,
-                     ScopeControls, drives both), and library.ts for the
-                     library. The web build's library lives in IndexedDB
+                     playlist.ts, analysis.ts, scope.ts, library.ts and eq.ts
+                     are the five adapter modules components actually call:
+                     playlist.ts picks the shell for playback, analysis.ts for
+                     metering, scope.ts for the scope's size and visibility (a
+                     separate OS window natively, a canvas on the web -- one
+                     component, ScopeControls, drives both), library.ts for the
+                     library, and eq.ts for the equaliser (which also owns
+                     remembering the setting between sessions, in localStorage
+                     -- ten numbers and a flag, unlike the library).
+                     eqFilter.ts is the one piece of DSP in this app that
+                     exists twice: the worklet's copy of player-core's biquad
+                     difference equation, deliberately holding nothing but that
+                     -- band shapes, Q, centres, the preamp and the drawn curve
+                     all arrive from Rust as finished coefficients, and
+                     /eq.html holds the two copies to each other sample for
+                     sample (they agree exactly). The web build's library lives in IndexedDB
                      (libraryStore.ts): rows, cover blobs, playlists, and the
                      scanned folder's `FileSystemDirectoryHandle` -- that last
                      one being the property that decided the choice, since it
@@ -173,12 +203,12 @@ app/                 React + TS + Vite. Same component tree renders in the
                      nothing -- including the goniometer's 45-degree rotation,
                      which is two lines of arithmetic and still lives in Rust
                      so the two shells cannot draw different figures.
-                     gapless.html, spectrum.html, loudness.html, scope.html and
-                     library.html
+                     gapless.html, spectrum.html, loudness.html, scope.html,
+                     library.html and eq.html
                      (with their *Smoke.ts) are dev-only harnesses -- served at
                      those paths, never bundled -- running the same checks as
                      the native gapless_smoke, spectrum_smoke, loudness_smoke,
-                     scope_smoke and library_smoke examples.
+                     scope_smoke, library_smoke and eq_smoke examples.
                      webScope.ts drives the web build's scope canvas
                      (WasmRenderer, via rAF) -- the web-side counterpart of
                      src-tauri's native redraw thread.
@@ -395,6 +425,17 @@ at the correct rate, re-verified with the same probe.
   whether another still references an image; `deleteFolder` deliberately leaves
   them. Costs kilobytes per orphaned image and needs a sweep (or reference
   counts) if a library is added and removed repeatedly.
+- **EQ coefficient changes are swapped, not smoothed** (M8, both shells). The
+  filters keep their state across a change, which is what makes a slider drag
+  sound like a sweep rather than a series of restarts, but the coefficients
+  themselves change between one sample and the next. A large jump -- a preset
+  applied in one go, or a slider dragged to the end of its travel by keyboard --
+  can therefore click. Not observed in the live checks (a pointer drag moves in
+  small steps, and the checks measured level rather than listening for
+  transients), and the usual fix is to interpolate the coefficients over a few
+  milliseconds or to crossfade the two cascades. Worth doing if a preset list
+  ever lands, which is when whole-curve jumps become normal rather than
+  exceptional.
 - **The decoder polls rather than parks.** Both the native decoder thread and
   the web Worker sleep on a short timer when the ring is full (2ms and 20ms)
   instead of waiting on a condvar or `Atomics.waitAsync`. It costs a wakeup

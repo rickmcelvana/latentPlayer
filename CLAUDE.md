@@ -76,7 +76,22 @@ IPC boundary (a `cover://` URI scheme protocol natively, object URLs on the
 web). Scanning runs off both the audio path and the UI thread: a blocking
 thread natively, a *second* worker on the web. `cargo run -p player-core
 --example library_smoke` reports 9/9 and `/library.html` 12/12, agreeing figure
-for figure. M8 (basic EQ) is next.
+for figure.
+
+M8 (basic EQ) is built, with the web shell verified live and the desktop UI
+awaiting the usual live confirmation: `eq.rs` is a ten-band
+graphic EQ (ISO octave centres, shelves at the ends, peaks between, a preamp and
+a bypass) running **between the ring and the output, before the analysis tap and
+before the volume** -- so every meter measures what the listener is played while
+monitoring level still changes nothing. It is the one place the "all DSP is Rust
+on both shells" rule gives way, because the web's audio path is an AudioWorklet:
+the *design* stays in `player-core::eq` (band shapes, Q, the clamp, the curve
+the UI draws) and only the difference equation is mirrored, in
+`app/src/eqFilter.ts`, with `/eq.html` holding the two to each other -- they
+agree exactly. `cargo run -p player-core --example eq_smoke` reports 14/14 and
+`/eq.html` 15/15, measuring the EQ *through the spectrum analyser*, which only
+works because the filters sit ahead of the tap. Once the desktop session
+confirms it, Phase 1's milestone list is closed.
 
 `cargo run -p player-core --example seek_smoke -- <path>` checks that seeking a given file yields
 the same audio as playing through to that point — written for MP3, whose bit reservoir makes

@@ -15,7 +15,16 @@
 // ring's geometry is the session's and does not change at a track boundary.
 //
 // Buffer layout lives in audioSab.ts, shared with the worklet and the engine.
-import init, { WasmAnalyzer, WasmDecoder } from "./wasm/player_rt_wasm.js";
+import init, {
+  WasmAnalyzer,
+  WasmDecoder,
+  eqBandFrequencies,
+  eqClamped,
+  eqCoefficients,
+  eqMaxGainDb,
+  eqResponse,
+  eqResponseFrequencies,
+} from "./wasm/player_rt_wasm.js";
 import {
   BOUNDARY_AT,
   BOUNDARY_BASE,
@@ -23,6 +32,7 @@ import {
   BOUNDARY_SLOTS,
   BOUNDARY_TOTAL_FRAMES,
   CONTROL,
+  EQ_BANDS,
   SCOPE_MASK,
   SCOPE_SAMPLES,
   audioViews,
@@ -70,7 +80,17 @@ interface WakeRequest {
   type: "wake";
 }
 
-type Request = LoadRequest | QueueRequest | WakeRequest;
+/// Moves the EQ's sliders (M8). Designing the filters is this worker's job
+/// because it is the side that has wasm; applying them is the worklet's,
+/// because it is the side that has the audio.
+interface EqRequest {
+  type: "eq";
+  enabled: boolean;
+  preampDb: number;
+  gainsDb: number[];
+}
+
+type Request = LoadRequest | QueueRequest | WakeRequest | EqRequest;
 
 interface LoadedResponse {
   type: "loaded";
@@ -87,6 +107,22 @@ interface LoadedResponse {
 interface ErrorResponse {
   type: "error";
   message: string;
+}
+
+/// The EQ's curve, sent back whenever the setting changes. Computed in Rust
+/// (M8 decision 1) and only when a slider moves, so the display costs nothing
+/// per frame.
+interface EqResponseMessage {
+  type: "eqResponse";
+  responseDb: Float32Array;
+  responseFrequencies: Float32Array;
+  bandFrequencies: Float32Array;
+  maxGainDb: number;
+  /// The settings as the engine will use them -- clamped, the way the desktop
+  /// shell's `set_eq` answers -- so a display shows what is being played rather
+  /// than what was asked for.
+  preampDb: number;
+  gainsDb: number[];
 }
 
 let wasmReady: Promise<unknown> | null = null;
@@ -108,6 +144,14 @@ let outRate = 44_100;
 let outChannels = 2;
 /// The seek this worker has already acted on.
 let seq = 0;
+/// Where the EQ's sliders are. Held here, not only in the engine, because the
+/// shared buffer is rebuilt for every track and the coefficients have to be
+/// written into the new one before the first frame comes out of it -- the same
+/// job `load_file` does on the desktop shell by handing the stored settings to
+/// each new `Playback`.
+let eqEnabled = true;
+let eqPreampDb = 0;
+let eqGainsDb: number[] = new Array(EQ_BANDS).fill(0);
 let timer: ReturnType<typeof setTimeout> | null = null;
 
 /// The track being decoded, and the one queued behind it.
@@ -125,6 +169,19 @@ let previous: { index: number; source: Source } | null = null;
 self.onmessage = async (e: MessageEvent<Request>) => {
   if (e.data.type === "wake") {
     pump();
+    return;
+  }
+  if (e.data.type === "eq") {
+    eqEnabled = e.data.enabled;
+    eqPreampDb = e.data.preampDb;
+    eqGainsDb = e.data.gainsDb;
+    // The sliders can be touched before any track is loaded, so this may be
+    // what starts wasm. The curve goes back to the UI either way; the
+    // coefficients only reach a buffer once there is one (`load` publishes
+    // them into each new buffer it makes).
+    wasmReady ??= init();
+    await wasmReady;
+    publishEq();
     return;
   }
   if (e.data.type === "queue") {
@@ -164,6 +221,9 @@ self.onmessage = async (e: MessageEvent<Request>) => {
     // see StreamingDecoder::duration_seconds for when that happens.
     views.control[CONTROL.totalFrames] = Math.round(durationSeconds * outRate);
     seq = 0;
+    // Into the *new* buffer, before the worklet reading it plays a frame: a
+    // listener sets their EQ once, not once per track.
+    publishEq();
 
     const response: LoadedResponse = {
       type: "loaded",
@@ -180,6 +240,37 @@ self.onmessage = async (e: MessageEvent<Request>) => {
     self.postMessage(response);
   }
 };
+
+/// Designs the cascade for the current settings, writes it where the worklet
+/// will find it, and sends the curve back to the UI.
+///
+/// The generation counter is bumped *after* the coefficients are in place and
+/// with an `Atomics.store`, which is what makes the worklet's seqlock read
+/// correct: a reader that sees the new generation can see every coefficient
+/// that belongs to it.
+function publishEq(): void {
+  const gains = new Float32Array(eqGainsDb);
+  if (views) {
+    views.eq.set(eqCoefficients(eqEnabled, eqPreampDb, gains, outRate));
+    Atomics.add(views.control, CONTROL.eqGeneration, 1);
+  }
+  // The clamp lives in Rust, so the settings this worker keeps are replaced by
+  // what came back through it -- otherwise a value the filters ignored would
+  // survive here and be re-sent at the next track.
+  const clamped = eqClamped(eqPreampDb, gains);
+  eqPreampDb = clamped[0];
+  eqGainsDb = Array.from(clamped.slice(1));
+  const message: EqResponseMessage = {
+    type: "eqResponse",
+    responseDb: eqResponse(eqEnabled, eqPreampDb, gains, outRate),
+    responseFrequencies: eqResponseFrequencies(),
+    bandFrequencies: eqBandFrequencies(),
+    maxGainDb: eqMaxGainDb(),
+    preampDb: eqPreampDb,
+    gainsDb: eqGainsDb,
+  };
+  self.postMessage(message);
+}
 
 function openTrack(source: Source): WasmDecoder {
   return WasmDecoder.create(

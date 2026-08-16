@@ -40,6 +40,7 @@ use cpal::{SampleFormat, StreamConfig};
 
 use crate::analysis::{MeterSnapshot, Meters, GONIOMETER_POINTS};
 use crate::channels::{adapt_channels, ChannelShape};
+use crate::eq::{EqCoefficients, EqProcessor, EqSettings};
 use crate::error::PlayerError;
 use crate::resample::StreamingResampler;
 use crate::source::PlaybackSource;
@@ -172,6 +173,21 @@ struct Boundary {
     src_channels: u16,
 }
 
+/// Samples the callback filters at a time.
+///
+/// The EQ works in place, and the callback's own output buffer is whatever
+/// sample format the device takes (`i16` on some), so filtered audio needs
+/// somewhere f32-shaped to live for the length of a block. Allocated once when
+/// the stream is built -- the callback may not allocate -- and large enough
+/// that a device asking for a big period still crosses it in one pass; a bigger
+/// one is simply handled in two.
+const EQ_SCRATCH_SAMPLES: usize = 8192;
+
+/// Coefficient sets that can be waiting for the callback at once. A slider drag
+/// posts one per pointer event and the callback takes all of them every block,
+/// so this only has to outlast one callback period's worth of events.
+const MAX_PENDING_EQ: usize = 64;
+
 /// Hand-offs that can be in flight at once. One is the realistic maximum --
 /// the caller only ever queues a single track ahead -- so this is slack for
 /// the pathological case of several tracks shorter than the ring passing
@@ -217,6 +233,16 @@ pub struct Playback {
     /// Output sample rate -- what `position_frames` counts in.
     sample_rate: u32,
     next: NextSlot,
+    /// Where the EQ's sliders currently are, and the way new coefficients reach
+    /// the callback.
+    ///
+    /// The settings are kept rather than derived so the UI can read back what
+    /// it set, and the coefficients travel through an SPSC queue for the same
+    /// reason M3's track boundaries do: the callback applies them, and the
+    /// callback may not take a lock. The `Mutex` is on the *producer*, which
+    /// only ever blocks whoever moved a slider.
+    eq: Mutex<EqSettings>,
+    eq_updates: Mutex<rtrb::Producer<EqCoefficients>>,
     /// Everything the analysis thread publishes. A `Mutex` is fine here where
     /// it would not be in `Shared`: neither end of this is the audio callback.
     meters: Arc<Mutex<Published>>,
@@ -260,6 +286,7 @@ impl Playback {
         let (producer, consumer) = rtrb::RingBuffer::<f32>::new(ring_samples);
         let (boundary_producer, boundary_consumer) =
             rtrb::RingBuffer::<Boundary>::new(MAX_PENDING_BOUNDARIES);
+        let (eq_producer, eq_consumer) = rtrb::RingBuffer::<EqCoefficients>::new(MAX_PENDING_EQ);
 
         let shared = Arc::new(Shared {
             playing: AtomicBool::new(false),
@@ -312,6 +339,7 @@ impl Playback {
                 Arc::clone(&shared),
                 consumer,
                 boundary_consumer,
+                eq_consumer,
                 |s| s,
             ),
             SampleFormat::I16 => build_stream::<i16>(
@@ -320,6 +348,7 @@ impl Playback {
                 Arc::clone(&shared),
                 consumer,
                 boundary_consumer,
+                eq_consumer,
                 |s| (s.clamp(-1.0, 1.0) * i16::MAX as f32) as i16,
             ),
             other => return Err(PlayerError::UnsupportedOutputFormat(format!("{other:?}"))),
@@ -349,6 +378,8 @@ impl Playback {
             sample_rate: config.sample_rate,
             next,
             shared,
+            eq: Mutex::new(EqSettings::flat()),
+            eq_updates: Mutex::new(eq_producer),
             meters,
             band_centres: crate::analysis::band_centres(config.sample_rate),
             decoder: Some(decoder_thread),
@@ -429,6 +460,50 @@ impl Playback {
 
     pub fn volume(&self) -> f32 {
         self.shared.volume()
+    }
+
+    /// Moves the EQ's sliders (M8).
+    ///
+    /// The design happens here, on the caller's thread, and only the finished
+    /// coefficients cross to the callback -- ten bilinear transforms are not
+    /// work for a real-time thread, and doing them here means a slider drag
+    /// costs the audio path one queue pop per block whatever the UI does.
+    ///
+    /// Audible immediately, which is why the filters live in the callback at
+    /// all: anything earlier is behind a ring holding two seconds of audio that
+    /// has already been filtered with the old curve.
+    pub fn set_eq(&self, settings: EqSettings) {
+        let settings = settings.clamped();
+        let coefficients = EqCoefficients::design(&settings, self.sample_rate);
+        match self.eq.lock() {
+            Ok(mut held) => *held = settings,
+            Err(poisoned) => *poisoned.into_inner() = settings,
+        }
+        if let Ok(mut producer) = self.eq_updates.lock() {
+            // A full queue needs `MAX_PENDING_EQ` slider events inside a single
+            // callback period -- 64 of them in ~10ms, which no pointer device
+            // or UI produces. If it ever did happen the newest setting would be
+            // dropped and the display would disagree with the audio until the
+            // next change; the callback drains this queue before every early
+            // return precisely so that a paused or seeking player cannot let it
+            // fill up.
+            let _ = producer.push(coefficients);
+        }
+    }
+
+    /// Where the EQ's sliders are, as the UI last set them.
+    pub fn eq(&self) -> EqSettings {
+        match self.eq.lock() {
+            Ok(settings) => *settings,
+            Err(poisoned) => *poisoned.into_inner(),
+        }
+    }
+
+    /// The EQ's curve for the display: gain in dB at each of
+    /// `eq::response_frequencies`, for the *output* rate, since that is the
+    /// rate the filters actually run at.
+    pub fn eq_response(&self) -> Vec<f32> {
+        crate::eq::magnitude_response(&self.eq(), self.sample_rate)
     }
 
     /// Jumps to `seconds` from the start, clamped to the track.
@@ -963,6 +1038,7 @@ fn build_stream<T>(
     shared: Arc<Shared>,
     mut consumer: rtrb::Consumer<f32>,
     mut boundaries: rtrb::Consumer<Boundary>,
+    mut eq_updates: rtrb::Consumer<EqCoefficients>,
     convert: fn(f32) -> T,
 ) -> Result<cpal::Stream, PlayerError>
 where
@@ -970,6 +1046,10 @@ where
 {
     let out_channels = config.channels.max(1) as usize;
     let sample_rate = config.sample_rate as f64;
+    // The EQ and the buffer it works in, both built here rather than in the
+    // callback for the obvious reason.
+    let mut eq = EqProcessor::new(config.sample_rate, config.channels);
+    let mut scratch = vec![0.0f32; EQ_SCRATCH_SAMPLES];
     // Output samples taken off the ring since the stream opened, counting the
     // ones a seek threw away. Only this closure touches it, so it needs no
     // atomic; it exists to be compared against `Boundary::at_sample`, which
@@ -983,6 +1063,22 @@ where
                 // Real-time thread. Everything below is lock-free and
                 // allocation-free by construction -- no `Vec`, no `Mutex`, no
                 // logging.
+
+                // Before any of the early returns below: a listener who moves a
+                // slider while paused, or mid-seek, must still have the EQ they
+                // asked for when the music comes back -- and a queue nothing
+                // drains is a queue that eventually fills. Taking all of them
+                // and keeping the last is what makes a drag land on its final
+                // position rather than on whichever value a block happened to
+                // catch.
+                let mut latest = None;
+                while let Ok(coefficients) = eq_updates.pop() {
+                    latest = Some(coefficients);
+                }
+                if let Some(coefficients) = latest {
+                    eq.set(coefficients);
+                }
+
                 let requested = shared.seek_seq.load(Ordering::Acquire);
                 if requested != shared.drained_seq.load(Ordering::Relaxed) {
                     // Step 3 of the handshake (see `Shared`): once the decoder
@@ -1011,6 +1107,10 @@ where
                         // Otherwise the next scope frame is spliced together
                         // from both sides of the seek.
                         shared.tap.clear();
+                        // The filters' memory belongs to where the track was,
+                        // not where it is going: carrying it over rings the new
+                        // position with the old one's tail.
+                        eq.reset();
                         shared.drained_seq.store(requested, Ordering::Release);
                     }
                     // Either way, play nothing this block: what's queued is
@@ -1044,22 +1144,32 @@ where
                     if let Ok(chunk) = consumer.read_chunk(usable) {
                         let (first, second) = chunk.as_slices();
                         let split = first.len().min(usable);
-                        for (out, sample) in data.iter_mut().zip(&first[..split]) {
-                            *out = convert(sample * volume);
-                        }
-                        for (out, sample) in data[split..usable]
-                            .iter_mut()
-                            .zip(&second[..usable - split])
-                        {
-                            *out = convert(sample * volume);
-                        }
-
-                        // The scope shows what was played, which since M3 means
-                        // the output's channel layout rather than the source's.
-                        // It is the layout that stays put across a queue.
-                        shared.tap.push(&first[..split]);
+                        // Two slices because a ring read that wraps arrives in
+                        // two pieces, and the split need not land on a frame
+                        // boundary -- which is why `EqProcessor` carries its
+                        // own channel phase rather than assuming each call
+                        // starts on the left.
+                        play_samples(
+                            &first[..split],
+                            data,
+                            0,
+                            &mut scratch,
+                            &mut eq,
+                            &shared.tap,
+                            volume,
+                            convert,
+                        );
                         if usable > split {
-                            shared.tap.push(&second[..usable - split]);
+                            play_samples(
+                                &second[..usable - split],
+                                data,
+                                split,
+                                &mut scratch,
+                                &mut eq,
+                                &shared.tap,
+                                volume,
+                                convert,
+                            );
                         }
 
                         filled = usable;
@@ -1127,5 +1237,43 @@ where
 {
     for sample in data.iter_mut() {
         *sample = convert(0.0);
+    }
+}
+
+/// Plays `src` -- audio straight off the ring -- into `data[at..]`: EQ, then
+/// the tap, then the volume.
+///
+/// The order is the whole of M8 decision 2. The EQ is part of what the player
+/// produces, so the tap holds it and every meter measures it; the volume is
+/// monitoring level, so it comes after the tap and changes nothing anyone
+/// measures. Called from the audio callback, so it works in a buffer the stream
+/// allocated at build time and in slices of it, never in one it makes.
+#[allow(clippy::too_many_arguments)]
+fn play_samples<T>(
+    src: &[f32],
+    data: &mut [T],
+    at: usize,
+    scratch: &mut [f32],
+    eq: &mut EqProcessor,
+    tap: &AnalysisTap,
+    volume: f32,
+    convert: fn(f32) -> T,
+) where
+    T: cpal::SizedSample,
+{
+    let mut done = 0;
+    while done < src.len() {
+        let n = (src.len() - done).min(scratch.len());
+        let block = &mut scratch[..n];
+        block.copy_from_slice(&src[done..done + n]);
+        eq.process(block);
+        for (out, sample) in data[at + done..at + done + n].iter_mut().zip(block.iter()) {
+            *out = convert(sample * volume);
+        }
+        // The scope shows what was played, which since M3 means the output's
+        // channel layout rather than the source's -- and since M8, the audio as
+        // the EQ left it.
+        tap.push(block);
+        done += n;
     }
 }

@@ -346,6 +346,109 @@ input[type="range"] {
   height: auto;
 }
 
+/* The ten-band EQ (M8): the curve above, the sliders that made it below, in
+   the same order left to right so a bell can be read against its own control. */
+.eq {
+  width: min(560px, 100%);
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+
+  header {
+    display: flex;
+    align-items: center;
+    gap: 10px;
+  }
+
+  h2 {
+    margin: 0;
+    color: var(--text-h);
+    font-size: 15px;
+    font-weight: 600;
+    flex: 1;
+  }
+
+  button {
+    font-size: 12px;
+    padding: 4px 10px;
+  }
+}
+
+/* Bypassed: the panel stays legible and stops looking live, so it is obvious
+   the sliders below are not doing anything. */
+.eq.off .eq-bands {
+  opacity: 0.45;
+}
+
+.eq-toggle {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  font-size: 12px;
+  text-transform: uppercase;
+  letter-spacing: 0.04em;
+  color: var(--text);
+}
+
+.eq-curve {
+  border-radius: 8px;
+  border: 1px solid var(--border);
+  width: 100%;
+  height: auto;
+}
+
+.eq-bands {
+  display: flex;
+  align-items: flex-end;
+  justify-content: space-between;
+  gap: 4px;
+}
+
+.eq-band {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: 4px;
+  flex: 1;
+
+  /* Vertical sliders, which is what a graphic EQ is. `writing-mode` is the
+     standard way to orient a range input; the old `appearance:
+     slider-vertical` is deprecated and gone from recent Chromium. */
+  input[type="range"] {
+    writing-mode: vertical-lr;
+    direction: rtl;
+    width: 20px;
+    height: 96px;
+    accent-color: var(--accent);
+  }
+
+  .eq-gain {
+    font-family: var(--mono);
+    font-size: 11px;
+    color: var(--text);
+    font-variant-numeric: tabular-nums;
+  }
+
+  .eq-label {
+    font-family: var(--mono);
+    font-size: 10px;
+    color: var(--text);
+    opacity: 0.7;
+  }
+}
+
+/* The preamp is not one of the ten bands -- it is what you reach for after
+   boosting six of them -- so it sits apart from the row. */
+.eq-band.preamp {
+  margin-right: 8px;
+  padding-right: 10px;
+  border-right: 1px solid var(--border);
+
+  input[type="range"] {
+    accent-color: var(--text-h);
+  }
+}
+
 /* The library (M7). Shares the playlist's row idiom -- rows are buttons, long
    names ellipsize -- with a cover thumbnail and a second line of metadata. */
 .library {

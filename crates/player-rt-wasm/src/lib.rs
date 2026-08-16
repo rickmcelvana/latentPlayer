@@ -10,6 +10,7 @@
 //! because there's no real-time mixing/DSP happening here.
 
 use js_sys::Float32Array;
+use player_core::eq::{self, EqCoefficients, EqSettings, EQ_BANDS};
 use player_core::resample::StreamingResampler;
 use player_core::{
     adapt_channels, read_tags, ChannelShape, InMemorySource, Meters, StreamingDecoder, TrackTags,
@@ -362,6 +363,115 @@ impl WasmAnalyzer {
     pub fn goniometer(&self) -> Vec<f32> {
         self.meters.goniometer(GONIOMETER_POINTS)
     }
+}
+
+/// The EQ's design side, driven from worker.ts (M8).
+///
+/// This is the half of the equaliser that stays in Rust on both shells: what a
+/// slider position means, what each band's shape and Q are, and what curve the
+/// whole cascade adds up to. The *application* of the resulting coefficients is
+/// the AudioWorklet's, in TypeScript, because on this shell the audio path is
+/// TypeScript -- see app/src/eqFilter.ts, which is held to `EqProcessor` sample
+/// for sample by `/eq.html`.
+///
+/// Free functions rather than a struct: there is no state to keep. Coefficients
+/// are designed when a slider moves and written straight into the shared buffer
+/// the worklet reads.
+#[wasm_bindgen(js_name = eqCoefficients)]
+pub fn eq_coefficients(
+    enabled: bool,
+    preamp_db: f32,
+    gains_db: &[f32],
+    sample_rate: u32,
+) -> Vec<f64> {
+    EqCoefficients::design(&settings_from(enabled, preamp_db, gains_db), sample_rate)
+        .to_array()
+        .to_vec()
+}
+
+/// The curve the UI draws: gain in dB at each of [`eq_response_frequencies`].
+///
+/// Computed when a setting changes rather than per frame, and in the same Rust
+/// the filters come from -- a display drawn from a second implementation of the
+/// response would eventually disagree with what is being heard.
+#[wasm_bindgen(js_name = eqResponse)]
+pub fn eq_response(enabled: bool, preamp_db: f32, gains_db: &[f32], sample_rate: u32) -> Vec<f32> {
+    eq::magnitude_response(&settings_from(enabled, preamp_db, gains_db), sample_rate)
+}
+
+/// The frequencies that curve is reported against.
+#[wasm_bindgen(js_name = eqResponseFrequencies)]
+pub fn eq_response_frequencies() -> Vec<f32> {
+    eq::response_frequencies()
+}
+
+/// The sliders' centre frequencies, for their labels.
+#[wasm_bindgen(js_name = eqBandFrequencies)]
+pub fn eq_band_frequencies() -> Vec<f32> {
+    eq::BAND_FREQUENCIES.to_vec()
+}
+
+/// The settings as the engine will actually use them: the preamp followed by
+/// the ten band gains, clamped.
+///
+/// The desktop shell's `set_eq` returns this as part of its answer, so the web
+/// build has to as well -- a display that showed the +99 someone typed while
+/// the audio ran +12 would be lying about the same thing on one shell and not
+/// the other.
+#[wasm_bindgen(js_name = eqClamped)]
+pub fn eq_clamped(preamp_db: f32, gains_db: &[f32]) -> Vec<f32> {
+    let settings = settings_from(true, preamp_db, gains_db);
+    let mut out = Vec::with_capacity(1 + EQ_BANDS);
+    out.push(settings.preamp_db);
+    out.extend_from_slice(&settings.gains_db);
+    out
+}
+
+/// Runs the Rust EQ over `samples` and hands back the result.
+///
+/// Exists for `/eq.html`, which holds app/src/eqFilter.ts to it sample for
+/// sample. That comparison is the whole justification for M8's one departure
+/// from "the DSP is Rust on both shells": the difference equation is written
+/// twice, so something has to prove the two copies agree, and a claim that they
+/// look the same is not that.
+#[wasm_bindgen(js_name = eqProcess)]
+pub fn eq_process(
+    samples: &[f32],
+    channels: u16,
+    enabled: bool,
+    preamp_db: f32,
+    gains_db: &[f32],
+    sample_rate: u32,
+) -> Vec<f32> {
+    let settings = settings_from(enabled, preamp_db, gains_db);
+    let mut processor = player_core::EqProcessor::new(sample_rate, channels);
+    processor.set(EqCoefficients::design(&settings, sample_rate));
+    let mut audio = samples.to_vec();
+    processor.process(&mut audio);
+    audio
+}
+
+/// How far a slider or the preamp may travel, in dB either way.
+#[wasm_bindgen(js_name = eqMaxGainDb)]
+pub fn eq_max_gain_db() -> f32 {
+    eq::MAX_GAIN_DB
+}
+
+/// The settings a caller sent, with a short or long list of gains taken as far
+/// as it goes -- the same forgiveness `set_eq` shows on the desktop shell, and
+/// for the same reason: this is a boundary where a length mismatch is otherwise
+/// a silent failure.
+fn settings_from(enabled: bool, preamp_db: f32, gains_db: &[f32]) -> EqSettings {
+    let mut gains = [0.0f32; EQ_BANDS];
+    for (slot, &db) in gains.iter_mut().zip(gains_db.iter()) {
+        *slot = db;
+    }
+    EqSettings {
+        enabled,
+        preamp_db,
+        gains_db: gains,
+    }
+    .clamped()
 }
 
 /// wasm-bindgen wrapper around `player_render::Renderer`, the same render

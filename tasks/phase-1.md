@@ -52,7 +52,9 @@ clean is not evidence.
 - **M7 -- Library + tags + playlists.** Folder scan, ID3/Vorbis comment
   reading, album art, search, persisted playlists. **Done, verified live on
   both shells.**
-- **M8 -- Basic EQ.** Biquad chain in the DSP path.
+- **M8 -- Basic EQ.** Biquad chain in the DSP path. **Built and verified live on
+  the web shell and against the native engine; the desktop UI is awaiting the
+  usual live confirmation.**
 
 Ordering rationale: M1-M3 are the engine, M4 is the seam everything visual
 hangs off, M5-M6 are the differentiator (PLAN.md §4), M7-M8 are table
@@ -1067,3 +1069,191 @@ never fatal.
   which panics on a dead surface). It is written up in ARCHITECTURE.md's known
   gaps, unfixed, because deciding what the scope's lifecycle should be when its
   window is closed is scope work, not library work.
+
+## M8 -- Basic EQ
+
+The last milestone of Phase 1, and the first one where the audio the listener
+hears is not the audio the file holds. Ten bands, a preamp and a bypass, in the
+audio path on both shells. Decisions first, since one of them gives way on a
+rule the last four milestones set.
+
+### Decisions (2026-08-16)
+
+1. **A ten-band graphic EQ, not a parametric one.** ISO octave centres from
+   31.25Hz to 16kHz, +-12dB each, plus a preamp -- the layout a listener coming
+   from any other player already knows how to read, and what PLAN.md's "basic
+   EQ" means in the company it keeps there (§7's Phase 1 list, beside the tag
+   editor and the library). The ends are a low and a high **shelf** rather than
+   peaks: a peaking filter at 31Hz leaves everything below it alone, so "more
+   bass" would do nothing to the lowest octave a system reproduces. Q for the
+   eight peaks is `sqrt(2)`, one octave of bandwidth, matching the band spacing
+   so a row of equal boosts sums to something close to a flat lift instead of a
+   comb.
+2. **The EQ runs before the analysis tap, and the volume still runs after it.**
+   The chain is ring -> EQ -> tap -> volume -> device, identically on both
+   shells. That keeps M4 decision 1's invariant exactly as it was -- the tap
+   holds what reached the output -- and it is what makes the spectrum show the
+   curve doing its work and the loudness meter report what the listener is
+   actually being played, clipping included. Monitoring level is not part of the
+   programme and the tap is the line between the two.
+3. **The filters live on the audio thread**, in the cpal callback and in the
+   AudioWorklet, not in the decoder thread or the worker. This is the one place
+   the rule "nothing but output on the audio thread" gives way, and the reason
+   is that everything upstream sits behind a ring holding two seconds of audio
+   that has *already been filtered* -- an EQ a listener cannot hear move is not
+   an EQ. A ten-biquad cascade is bounded, branch-free, allocation-free work,
+   which is the kind of thing an audio callback may do; a flat setting is
+   detected and skipped entirely.
+4. **The design is Rust; the difference equation is written twice.** M4 decision
+   3, M5 decision 7 and M7 decision 1 all say the DSP is Rust and both shells
+   run it. That cannot be literally true here, because on the web the audio path
+   *is* TypeScript (`player-rt-wasm`'s own header: no per-block wasm calls on
+   the audio path, and an AudioWorklet cannot host wasm-bindgen glue). So the
+   line is drawn where the bugs live: everything that could be *decided*
+   differently -- what a slider position means, each band's shape and Q, the
+   centres, the preamp, the curve the UI draws -- stays in `player-core::eq`,
+   and what is duplicated is five multiply-adds. `/eq.html` then holds the two
+   copies to each other sample for sample, which is what makes the duplication
+   acceptable rather than a hope.
+   - The alternative considered and rejected: chaining Web Audio's own
+     `BiquadFilterNode`s after the worklet. No TypeScript DSP at all, but the
+     two shells would then run different filter implementations, and the tap
+     sits *before* those nodes -- so the meters and the vectorscope could not
+     see the EQ, which is decision 2 gone.
+5. **Coefficients cross to the audio thread as data, never behind a lock.**
+   Natively they ride an `rtrb` SPSC queue, the way M3's track boundaries do,
+   and the callback takes the newest of them before any of its early returns --
+   so a slider moved while paused or mid-seek is still there when the music
+   comes back, and a queue nothing drains cannot fill. On the web they sit in
+   the shared buffer behind a generation counter the worklet reads as a seqlock:
+   read the generation, copy, read it again, retry next block if it moved. The
+   worklet keeps its own copy and refreshes only on a change, so the steady
+   state costs one atomic load per block.
+6. **The setting outlives the engine.** A new `Playback` is built per track, so
+   an EQ that lived only in the engine would flatten itself at every track
+   change -- audibly, at a gapless one. The desktop shell keeps it beside the
+   playback slot and hands it to each new engine; the worker writes it into
+   every shared buffer it creates. Persisting it between *sessions* is the UI's
+   job (`eq.ts`, localStorage): ten numbers and a flag is exactly what
+   localStorage is for, which is the same argument M7 decision 4 used for
+   sending the library somewhere else.
+
+### What it is
+
+**One design, two appliers.** `player-core/src/eq.rs` holds the band layout, the
+RBJ-cookbook derivations of the peak and the two shelves, the clamp, the flat
+wire format both shells store coefficients in, `magnitude_response` for the
+curve the UI draws, and `EqProcessor` -- the cascade as the native callback runs
+it. `app/src/eqFilter.ts` is the worklet's copy of the difference equation and
+nothing else: it is handed finished coefficients and never computes one.
+
+**f64 all the way across**, including the shared buffer's EQ region (a
+`Float64Array`, aligned deliberately rather than by luck). The lowest band is
+31.25Hz, which at a 96kHz output rate -- what several of this machine's devices
+run at -- is 0.0003 of the sample rate, and in f32 the difference between that
+pole pair and the unit circle is a handful of representable values wide. Same
+argument `loudness.rs` makes about its 38Hz high-pass, one band lower down.
+
+**The curve is computed where the filters are.** `magnitude_response` evaluates
+`|H(e^jw)|` over the actual cascade at the *output device's* rate, recomputed
+when a slider moves and never per frame. So the picture behind the sliders is
+the response of the filters that are running rather than a second drawing of the
+same intention -- and both smoke checks compare the two directly, measuring the
+audio and then asking the curve what it claims at that frequency.
+
+**A flat EQ is bit-transparent, not nearly transparent.** A zero-gain band is
+skipped at design time rather than turned into a unity biquad, and both
+processors check for a transparent cascade and return without touching a sample.
+Worth having as an equality rather than an approximation: it is the difference
+between a player that is transparent with the EQ untouched and one that is only
+very close to it, and the M4/M5 harnesses reporting exactly their old figures is
+the evidence.
+
+### Three things the checks caught
+
+**An infinity is not an extreme.** The clamp's first version turned any
+non-finite gain into zero while the unit test asserted `+inf` should clamp to
++12dB. Neither is obviously right, and the test failing is what forced the
+choice: an infinity arriving over an IPC boundary is a bug upstream, and the
+safe reading of a bug is "leave this control alone" rather than "move it as far
+as it goes". It is in `clamped`'s own doc comment, because the next person will
+wonder.
+
+**The top band fell off a low-rate device.** 16kHz is above Nyquist at a 32kHz
+output rate, where a centre frequency means nothing at all -- and this player
+takes whatever rate the device offers rather than choosing one. The design now
+pulls any centre down to 0.45 of the rate, so the top slider still reaches the
+top of what the device can carry instead of silently doing nothing. Same class
+of bug as M5's 48kHz-only K-weighting table and M6's fixed sample count, caught
+the same way: by asking what happens at a rate nobody tested on.
+
+**The curve mirrored back down past Nyquist.** Found immediately after, since
+the axis runs to 20kHz whatever the rate: a discrete filter's response folds
+around Nyquist, so on that same 32kHz device the drawn curve would have swept
+back up through frequencies the device cannot carry. It holds its last real
+value instead, which is honest about there being nothing there to draw.
+
+And one thing writing the web harness caught, which was a divergence rather than
+a bug: `set_eq` on the desktop shell answers with the *clamped* setting, so the
+display shows what is being played. The web path answered with what was asked
+for. Both now return the clamped values out of the same Rust clamp -- the check
+that sends +99 to a slider and reads +12 back passes on both shells for the same
+reason.
+
+### Verified
+
+- **Native**, `cargo run -p player-core --example eq_smoke` (new): **14/14**
+  against the real default output device at 48kHz, with the spectrum analyser as
+  the measuring instrument -- which is only possible because the EQ runs ahead
+  of the tap, so a build with those two the other way round fails every check in
+  it. A +12dB slider moves its own band by exactly **+12.00dB** and its
+  neighbour five octaves away by **+0.11dB**; a -12 cut reads **-12.00**; a -6dB
+  preamp moves both bands by **-6.00** and the momentary loudness from **-7.04
+  to -13.04 LUFS**; the volume control still moves the meters by 0.00dB; bypass
+  returns the audio to the flat baseline to the hundredth and flattens the curve
+  while the sliders stay where they were; +99 clamps to +12 and a NaN to 0; and
+  the setting survives a seek.
+- **Web**, `/eq.html` (new, the counterpart harness, same claims, same
+  synthesised tones): **15/15**, agreeing with the native run figure for figure
+  -- the same -12.67dBFS baseline, the same +12.00/-12.00/-6.00, the same
+  -7.04 -> -13.04 LUFS. The fifteenth check is the one with no native
+  counterpart, and the reason this harness matters more than the others:
+  eqFilter.ts against `EqProcessor` over the same 4096-frame stereo signal
+  through a cascade with both shelves, six peaks and a preamp in it -- **worst
+  sample differs by 0.00e+0**. Not "within tolerance": identical.
+- **The UI**, driven in-browser through React's own handlers against the dev
+  server:
+  - Moving the 1kHz slider to +12 moved the momentary readout from **-7.0 to
+    +0.5 LUFS** and put the curve's peak at **x=271, y=19** of a 480x120 canvas.
+    Both are arithmetic: 1kHz sits at 0.566 of a 20Hz..20kHz log axis (x=272),
+    and +12dB on a +-18dB scale is y=20.
+  - A -6dB preamp moved the readout by exactly **-6.0 LU** and flattened the
+    curve to **y=79**, where 0dB is y=60 and -6dB is y=80.
+  - Bypass moved the loudness **-13.0 -> -7.0 -> -13.0** with the sliders
+    untouched, greying the panel rather than resetting it.
+  - The setting survived a **full page reload**: preamp -6 and 63Hz +9 came back
+    on the sliders, in the readouts and in the curve, whose highest point sat at
+    **x=77, y=49** -- 62.5Hz is x=79 on that axis, and +9 through a -6 preamp is
+    +3dB, which is y=50.
+- **No regressions**, which matters more here than in any earlier milestone
+  because M8 puts new arithmetic in the path of every sample on both shells:
+  `/loudness.html` **15/15** and the native `loudness_smoke` unchanged to the
+  hundredth (-23.00/-33.00), `/spectrum.html` and `spectrum_smoke` **10/10**
+  each (-3.39dBFS in band 28, the same number M4 and M5 recorded), and
+  `/gapless.html` and `gapless_smoke` **11/11** each. A flat EQ really is
+  transparent.
+- **Not yet done: the desktop UI, live.** Everything above covers the native
+  *engine* (through `eq_smoke`, against a real output device) and the web shell
+  end to end, but not React driving the new `eq_state`/`set_eq` commands across
+  the IPC boundary -- where a mismatched argument name fails silently -- nor an
+  EQ judged against real music by ear rather than against tones by assertion.
+  That is the check every milestone in this phase has closed on, and M8 is not
+  closed until it passes.
+- **101 unit tests in `player-core`**, up from 89, twelve of them the EQ's: each
+  band reaching its own gain at its own centre measured *on the audio* rather
+  than on its coefficients, a bell leaving two octaves out alone, the measured
+  response agreeing with the drawn curve, the preamp, flat being bit-exact,
+  bypass ignoring the sliders, rate independence across 44.1/48/96kHz, channels
+  filtered independently, a block split mid-frame filtering identically to a
+  whole one (the wrapped-ring case), a reset matching a fresh processor, the
+  clamp, and the top band on a 32kHz device.
