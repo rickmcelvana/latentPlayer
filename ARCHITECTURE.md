@@ -337,6 +337,38 @@ at the correct rate, re-verified with the same probe.
   rather than as `0:00`, which is at least honest about the difference. What M7
   did *not* add is the estimate or the decode-to-measure pass, either of which
   would need the scan to do real work per file rather than a probe.
+- **Closing the scope window by hand panics the redraw thread** (observed live
+  2026-08-16, in a ~90-minute desktop session; pre-existing M6 code, surfaced
+  while M7 was being confirmed). The log:
+
+  ```
+  [wgpu_hal::vulkan::swapchain::native][ERROR]
+      get_physical_device_surface_capabilities: ERROR_SURFACE_LOST_KHR
+  [wgpu::backend::wgpu_core][ERROR] Handling wgpu errors as fatal by default
+  thread '<unnamed>' panicked at wgpu-30.0.0 .../wgpu_core.rs:3981:
+    wgpu error: Validation Error
+    Caused by: In Surface::configure
+      Surface does not support the adapter's queue family
+  ```
+
+  `draw_frame` handles `CurrentSurfaceTexture::Lost` deliberately and well --
+  it returns `SurfaceUnavailable` for the caller to deal with, because
+  recreating a surface needs the window handle the renderer doesn't keep. The
+  trouble is that a *destroyed* window does not arrive as `Lost`: it arrives as
+  `Outdated`, and M6's fix for `Outdated` (call `surface.configure()` and skip
+  the frame, which was the right fix for a resize) does not return an error on
+  a dead surface -- it panics inside wgpu, since wgpu treats validation errors
+  as fatal by default. The same panic is reachable from the `needs_reconfigure`
+  branch at the top of `draw_frame`.
+
+  Consequences are contained but real: the redraw thread dies and the scope
+  goes permanently dark, while the rest of the app carries on -- the same
+  session decoded another MP3 31 seconds after the panic. `set_scope_visible`
+  only ever *hides* the window precisely because the renderer holds a surface
+  built from its handle, but nothing stops the user closing it with its own
+  close button. A fix needs both halves: stop the redraw loop (or rebuild the
+  surface) when the window is gone, and prevent or intercept the manual close
+  rather than assuming the UI is the only thing that can hide the window.
 - **Play at the end of a track pauses instead of restarting** (both shells,
   found live during M7 but *not* caused by it -- the transport is untouched by
   that milestone). When a track finishes, `TransportState::playing` stays true,
