@@ -119,7 +119,8 @@ fn main() {
         ),
     );
 
-    let playback = Playback::open(&LocalFile::new(&short)).expect("failed to open output device");
+    let playback =
+        Playback::open(Box::new(LocalFile::new(&short))).expect("failed to open output device");
     playback.set_volume(0.1); // be kind to whoever is at the keyboard
     println!(
         "device:  {} ch @ {} Hz (resampled from {SRC_RATE})",
@@ -263,7 +264,8 @@ fn main() {
 /// How long `Playback::open` takes, including its prebuffer wait.
 fn time_open(path: &PathBuf) -> Duration {
     let start = Instant::now();
-    let playback = Playback::open(&LocalFile::new(path)).expect("failed to open output device");
+    let playback =
+        Playback::open(Box::new(LocalFile::new(path))).expect("failed to open output device");
     let elapsed = start.elapsed();
     drop(playback);
     elapsed

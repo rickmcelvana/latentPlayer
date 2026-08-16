@@ -31,7 +31,7 @@
 #![cfg(not(target_arch = "wasm32"))]
 
 use std::sync::atomic::{AtomicBool, AtomicU32, AtomicU64, Ordering};
-use std::sync::Arc;
+use std::sync::{Arc, Mutex};
 use std::thread::JoinHandle;
 use std::time::{Duration, Instant};
 
@@ -110,8 +110,23 @@ struct Shared {
     decoder_ready_seq: AtomicU64,
     drained_seq: AtomicU64,
 
-    /// The decoder has produced the last sample of the track. Distinct from
-    /// `finished`: audio can still be queued when this is set.
+    // --- what is currently audible ---
+    //
+    // Republished by the callback as each boundary lands (see `Boundary`), so
+    // all three describe the track the device is playing rather than the one
+    // the decoder has moved on to.
+    /// Length of the current track in seconds, `0.0` when unknown.
+    duration_seconds: AtomicU64,
+    /// Channels the current track has before adaptation, for display.
+    src_channels: AtomicU32,
+    /// How many gapless hand-offs have reached the device. Not an index into
+    /// any playlist -- the engine only ever knows two tracks -- just a counter
+    /// the caller can watch to know the music moved on.
+    track_index: AtomicU64,
+
+    /// The decoder has produced the last sample of the queue, with nothing
+    /// behind it. Distinct from `finished`: audio can still be queued when
+    /// this is set.
     eos: AtomicBool,
     /// End of stream *and* the ring is empty -- i.e. the track is really over.
     /// The distinction matters because an empty ring on its own means an
@@ -129,17 +144,52 @@ impl Shared {
     fn volume(&self) -> f32 {
         f32::from_bits(self.volume.load(Ordering::Relaxed))
     }
+
+    fn duration(&self) -> f64 {
+        f64::from_bits(self.duration_seconds.load(Ordering::Relaxed))
+    }
 }
+
+/// A track change riding in the stream, one queue slot per hand-off.
+///
+/// Boundaries travel alongside the audio rather than being announced out of
+/// band because the only honest answer to "which track is playing" is
+/// "whichever one the sample the device just consumed came from". The decoder
+/// runs up to a ring ahead, so anything it published directly would be up to
+/// two seconds early -- the title would change while the previous song was
+/// still coming out of the speakers.
+#[derive(Clone, Copy)]
+struct Boundary {
+    /// Total output samples pushed into the audio ring before this track's
+    /// first sample. The callback compares its own running consume total
+    /// against this; the two stay in step because a seek drain counts what it
+    /// throws away.
+    at_sample: u64,
+    duration_seconds: f64,
+    src_channels: u16,
+}
+
+/// Hand-offs that can be in flight at once. One is the realistic maximum --
+/// the caller only ever queues a single track ahead -- so this is slack for
+/// the pathological case of several tracks shorter than the ring passing
+/// through before the device consumes any of them.
+const MAX_PENDING_BOUNDARIES: usize = 16;
+
+/// Where the caller leaves the track to play after the current one.
+///
+/// A `Mutex` and not an atomic handshake, deliberately: this is touched by
+/// the caller and the decoder thread only. The cpal callback never sees it,
+/// so there is no real-time path to keep lock-free here, and a lock is the
+/// honest tool for moving an owned `Box` between two threads.
+type NextSlot = Arc<Mutex<Option<Box<dyn PlaybackSource>>>>;
 
 pub struct Playback {
     shared: Arc<Shared>,
     /// Output channels, which need not match the source's.
     channels: u16,
-    src_channels: u16,
     /// Output sample rate -- what `position_frames` counts in.
     sample_rate: u32,
-    /// `None` when the container doesn't state a length.
-    duration: Option<f64>,
+    next: NextSlot,
     decoder: Option<JoinHandle<()>>,
     // Kept alive only to keep the stream running -- cpal stops the stream
     // when this is dropped. Never read directly.
@@ -155,7 +205,7 @@ impl Playback {
     /// Decoding starts before this returns and runs until the ring is
     /// `PREBUFFER_FRACTION` full, so callers that play straight away don't
     /// open on an empty buffer.
-    pub fn open(source: &dyn PlaybackSource) -> Result<Self, PlayerError> {
+    pub fn open(source: Box<dyn PlaybackSource>) -> Result<Self, PlayerError> {
         let host = cpal::default_host();
         let device = host
             .default_output_device()
@@ -164,28 +214,18 @@ impl Playback {
         let supported = device_config(&device)?;
         let sample_format = supported.sample_format();
         let config: StreamConfig = supported.config();
+        let out_channels = config.channels.max(1);
 
         // Opened here rather than on the decoder thread so a bad file is an
         // error from `open`, not a thread that quietly dies.
-        let decoder = StreamingDecoder::open(source)?;
-        let src_channels = decoder.channels().max(1);
-        if src_channels as usize > MAX_CHANNELS {
-            return Err(PlayerError::UnsupportedOutputFormat(format!(
-                "{src_channels} source channels (this player handles at most {MAX_CHANNELS})"
-            )));
-        }
-        let duration = decoder.duration_seconds();
-
-        // The device dictates the rate (again: see `device_config`), so the
-        // audio has to move to meet it. Without this, a 44.1kHz file on a
-        // 96kHz device plays at 2.177x -- found live on Windows, 2026-08-15.
-        let resampler =
-            StreamingResampler::new(src_channels, decoder.sample_rate(), config.sample_rate)?;
+        let track = open_track(&*source, out_channels, config.sample_rate)?;
 
         // Sized in *output* frames, since that is what the ring now carries.
         let ring_samples =
-            (config.sample_rate as f64 * RING_SECONDS) as usize * config.channels.max(1) as usize;
+            (config.sample_rate as f64 * RING_SECONDS) as usize * usize::from(out_channels);
         let (producer, consumer) = rtrb::RingBuffer::<f32>::new(ring_samples);
+        let (boundary_producer, boundary_consumer) =
+            rtrb::RingBuffer::<Boundary>::new(MAX_PENDING_BOUNDARIES);
 
         let shared = Arc::new(Shared {
             playing: AtomicBool::new(false),
@@ -195,6 +235,9 @@ impl Playback {
             seek_seq: AtomicU64::new(0),
             decoder_ready_seq: AtomicU64::new(0),
             drained_seq: AtomicU64::new(0),
+            duration_seconds: AtomicU64::new(track.duration_seconds.to_bits()),
+            src_channels: AtomicU32::new(u32::from(track.shape.src_channels)),
+            track_index: AtomicU64::new(0),
             eos: AtomicBool::new(false),
             finished: AtomicBool::new(false),
             primed: AtomicBool::new(false),
@@ -203,21 +246,25 @@ impl Playback {
         });
 
         let prime_target = (ring_samples as f64 * PREBUFFER_FRACTION) as usize;
-        let out_channels = config.channels.max(1);
+        let next: NextSlot = Arc::new(Mutex::new(None));
         let decoder_thread = {
             let shared = Arc::clone(&shared);
+            let next = Arc::clone(&next);
+            let rate = config.sample_rate;
             std::thread::Builder::new()
                 .name("player-decode".to_string())
                 .spawn(move || {
                     decoder_loop(
-                        decoder,
-                        resampler,
-                        producer,
-                        shared,
-                        Shape {
-                            src_channels,
+                        Decoding {
+                            track,
+                            source,
                             out_channels,
+                            out_rate: rate,
                         },
+                        producer,
+                        boundary_producer,
+                        shared,
+                        next,
                         prime_target,
                     )
                 })
@@ -225,14 +272,22 @@ impl Playback {
         };
 
         let stream = match sample_format {
-            SampleFormat::F32 => {
-                build_stream::<f32>(&device, &config, Arc::clone(&shared), consumer, |s| s)
-            }
-            SampleFormat::I16 => {
-                build_stream::<i16>(&device, &config, Arc::clone(&shared), consumer, |s| {
-                    (s.clamp(-1.0, 1.0) * i16::MAX as f32) as i16
-                })
-            }
+            SampleFormat::F32 => build_stream::<f32>(
+                &device,
+                &config,
+                Arc::clone(&shared),
+                consumer,
+                boundary_consumer,
+                |s| s,
+            ),
+            SampleFormat::I16 => build_stream::<i16>(
+                &device,
+                &config,
+                Arc::clone(&shared),
+                consumer,
+                boundary_consumer,
+                |s| (s.clamp(-1.0, 1.0) * i16::MAX as f32) as i16,
+            ),
             other => return Err(PlayerError::UnsupportedOutputFormat(format!("{other:?}"))),
         }?;
         stream
@@ -241,15 +296,51 @@ impl Playback {
 
         let playback = Self {
             channels: config.channels,
-            src_channels,
             sample_rate: config.sample_rate,
-            duration,
+            next,
             shared,
             decoder: Some(decoder_thread),
             _stream: stream,
         };
         playback.wait_for_prebuffer();
         Ok(playback)
+    }
+
+    /// Queues the track to play when the current one ends, replacing whatever
+    /// was queued before.
+    ///
+    /// The engine holds exactly this much of a playlist: what is playing and
+    /// what is next. Which track that is, and what happens after it, stay the
+    /// caller's business -- watch `track_index` for the hand-off and queue the
+    /// one after it. Queuing early is the point: the decoder picks the track
+    /// up when it runs out of the current one, so the seam is filled before
+    /// the device reaches it. Queuing after the music has already stopped
+    /// works too, and simply starts it.
+    pub fn set_next(&self, source: Box<dyn PlaybackSource>) {
+        self.store_next(Some(source));
+    }
+
+    /// Forgets any queued track, so the current one is the last.
+    pub fn clear_next(&self) {
+        self.store_next(None);
+    }
+
+    fn store_next(&self, source: Option<Box<dyn PlaybackSource>>) {
+        match self.next.lock() {
+            Ok(mut slot) => *slot = source,
+            // Only reachable if the decoder thread panicked holding the lock,
+            // in which case there is nothing left to hand the track to.
+            Err(e) => eprintln!("next-track slot is poisoned: {e}"),
+        }
+    }
+
+    /// How many gapless hand-offs have reached the device.
+    ///
+    /// Increments at the moment the new track's first sample is played, not
+    /// when the decoder opened it -- so a caller that redraws on a change
+    /// redraws in time with the music rather than up to a ring early.
+    pub fn track_index(&self) -> u64 {
+        self.shared.track_index.load(Ordering::Acquire)
     }
 
     /// Blocks until the decoder has filled the ring enough to play from, or
@@ -297,9 +388,11 @@ impl Playback {
     /// preserve. The reported position updates immediately regardless, so the
     /// seek bar doesn't snap back under the user's finger.
     pub fn seek(&self, seconds: f64) {
-        let target = match self.duration {
-            Some(duration) => seconds.clamp(0.0, duration),
-            None => seconds.max(0.0),
+        let duration = self.shared.duration();
+        let target = if duration > 0.0 {
+            seconds.clamp(0.0, duration)
+        } else {
+            seconds.max(0.0)
         };
         self.shared
             .seek_target_seconds
@@ -319,20 +412,22 @@ impl Playback {
         self.shared.position_frames.load(Ordering::Relaxed) as f64 / self.sample_rate as f64
     }
 
-    /// Total length in seconds, or `0.0` when the container doesn't state one
-    /// (a VBR MP3 with no Xing header, say). Phase 0 always had a real number
-    /// here because it had decoded the whole file and could measure it; that
-    /// is exactly the cost this milestone removed, so callers now have to cope
-    /// with not knowing.
+    /// Length of the track currently playing, or `0.0` when the container
+    /// doesn't state one (a VBR MP3 with no Xing header, say). Phase 0 always
+    /// had a real number here because it had decoded the whole file and could
+    /// measure it; that is exactly the cost M2 removed, so callers now have to
+    /// cope with not knowing.
     pub fn duration_seconds(&self) -> f64 {
-        self.duration.unwrap_or(0.0)
+        self.shared.duration()
     }
 
-    /// Whether playback has run off the end of the track.
+    /// Whether playback has run off the end of the *queue*.
     ///
-    /// Specifically end of stream *with an empty ring* -- an empty ring on its
-    /// own is an underrun, and reporting that as "finished" would stop the
-    /// transport every time the decoder fell behind for a moment.
+    /// Specifically end of stream with an empty ring and nothing queued behind
+    /// it. An empty ring on its own is an underrun, and reporting that as
+    /// "finished" would stop the transport every time the decoder fell behind
+    /// for a moment; a track ending with another queued is a hand-off, which
+    /// is not an ending at all.
     pub fn is_finished(&self) -> bool {
         self.shared.finished.load(Ordering::Relaxed)
     }
@@ -345,11 +440,11 @@ impl Playback {
         self.sample_rate
     }
 
-    /// Channels the track itself has, before adaptation to the device. For
-    /// display only -- `scope_window` is in the *output* layout, so use
-    /// `output_channels` to de-interleave it.
+    /// Channels the currently playing track has, before adaptation to the
+    /// device. For display only -- `scope_window` is in the *output* layout,
+    /// so use `output_channels` to de-interleave it.
     pub fn source_channels(&self) -> u16 {
-        self.src_channels
+        self.shared.src_channels.load(Ordering::Relaxed) as u16
     }
 
     /// The most recently played `n` interleaved samples, for the scope render
@@ -406,47 +501,156 @@ fn adapt_channels(src: &[f32], shape: &Shape, dst: &mut Vec<f32>) {
     }
 }
 
-/// Decode -> resample -> channel adaptation -> ring, until the track ends or
-/// `Playback` is dropped.
-///
-/// Runs on its own thread and owns the only handles to the decoder and the
-/// producer end of the ring, so nothing here needs a lock.
-fn decoder_loop(
-    mut decoder: StreamingDecoder,
-    mut resampler: StreamingResampler,
-    mut producer: rtrb::Producer<f32>,
-    shared: Arc<Shared>,
+/// One track's worth of decoding machinery, plus the device shape it is being
+/// converted to. Rebuilt from scratch at every hand-off, since a new track can
+/// arrive at any rate and any channel count.
+struct Track {
+    decoder: StreamingDecoder,
+    resampler: StreamingResampler,
     shape: Shape,
+    /// `0.0` when the container states no length.
+    duration_seconds: f64,
+}
+
+/// Opens `source` and builds everything needed to play it on a device of
+/// `out_channels` at `out_rate`.
+///
+/// The device dictates the rate (see `device_config`), so the audio has to
+/// move to meet it. Without that, a 44.1kHz file on a 96kHz device plays at
+/// 2.177x -- found live on Windows, 2026-08-15.
+fn open_track(
+    source: &dyn PlaybackSource,
+    out_channels: u16,
+    out_rate: u32,
+) -> Result<Track, PlayerError> {
+    let decoder = StreamingDecoder::open(source)?;
+    let src_channels = decoder.channels().max(1);
+    if usize::from(src_channels) > MAX_CHANNELS {
+        return Err(PlayerError::UnsupportedOutputFormat(format!(
+            "{src_channels} source channels (this player handles at most {MAX_CHANNELS})"
+        )));
+    }
+    let resampler = StreamingResampler::new(src_channels, decoder.sample_rate(), out_rate)?;
+    Ok(Track {
+        duration_seconds: decoder.duration_seconds().unwrap_or(0.0),
+        decoder,
+        resampler,
+        shape: Shape {
+            src_channels,
+            out_channels,
+        },
+    })
+}
+
+/// What the decoder thread starts with: the first track, the source it came
+/// from (kept so a seek can reopen it -- see the rewind in `decoder_loop`),
+/// and the device shape every track has to be converted to.
+struct Decoding {
+    track: Track,
+    source: Box<dyn PlaybackSource>,
+    out_channels: u16,
+    out_rate: u32,
+}
+
+/// Decode -> resample -> channel adaptation -> ring, across as many tracks as
+/// the caller queues, until `Playback` is dropped.
+///
+/// Runs on its own thread and owns the only handles to the decoders and the
+/// producer ends of both rings, so the only lock here is the one on the
+/// next-track slot -- which the callback never touches.
+///
+/// # The seam
+///
+/// When a track runs out, the outgoing resampler's tail is flushed into the
+/// ring first and only then is the next track opened, so the last partial
+/// window of the old track and the first sample of the new one are adjacent
+/// in the ring with nothing between them. The callback cannot tell a track
+/// change from any other block of audio, which is the whole point -- there is
+/// no seam to hear because there is no seam in the buffer.
+fn decoder_loop(
+    start: Decoding,
+    mut producer: rtrb::Producer<f32>,
+    mut boundaries: rtrb::Producer<Boundary>,
+    shared: Arc<Shared>,
+    next_slot: NextSlot,
     prime_target: usize,
 ) {
+    let Decoding {
+        mut track,
+        mut source,
+        out_channels,
+        out_rate,
+    } = start;
+
     let mut seq = 0u64;
     // Resampler output, still in the source's channel layout.
     let mut resampled: Vec<f32> = Vec::new();
     // Output-shaped audio waiting for room in the ring.
     let mut carry: Vec<f32> = Vec::new();
     let mut carry_pos = 0usize;
-    let mut source_done = false;
+    // The current track has produced its last sample and is waiting for
+    // something to follow it. Replaces M2's `source_done`: with a queue,
+    // running out of track is a question ("what's next?") rather than an
+    // ending.
+    let mut awaiting_handoff = false;
     let mut pushed_total = 0usize;
+
+    // Which track the decoder is on, against `shared.track_index`, which is
+    // the one the listener is on. They differ for as long as a hand-off sits
+    // undelivered in the ring.
+    let mut decoding_index = 0u64;
+    // The track still being heard after the decoder has moved past it. Held
+    // only until its successor's boundary lands, and only so a seek arriving
+    // in that window can rewind to it.
+    let mut previous: Option<(u64, Box<dyn PlaybackSource>)> = None;
 
     loop {
         if shared.stop.load(Ordering::Relaxed) {
             return;
         }
 
+        // The listener has caught up; the old track can go.
+        if previous.is_some() && shared.track_index.load(Ordering::Acquire) >= decoding_index {
+            previous = None;
+        }
+
         let requested = shared.seek_seq.load(Ordering::Acquire);
         if requested != seq {
+            // The decoder can be a whole ring ahead, so a seek can arrive when
+            // it has already moved on to the next track while the listener is
+            // still hearing the previous one. Seeking the track being decoded
+            // would scrub a song the user cannot hear yet -- and the seek bar
+            // they dragged belongs to the one they can. Rewind, and hand the
+            // upcoming track back to the queue so gapless still works after
+            // the seek lands.
+            if let Some((prev_index, prev_source)) = previous.take() {
+                let upcoming = std::mem::replace(&mut source, prev_source);
+                match next_slot.lock() {
+                    Ok(mut slot) => *slot = Some(upcoming),
+                    Err(e) => eprintln!("next-track slot is poisoned: {e}"),
+                }
+                decoding_index = prev_index;
+                match open_track(&*source, out_channels, out_rate) {
+                    Ok(reopened) => track = reopened,
+                    // Nothing safe to fall back to: the track being decoded is
+                    // the wrong one and its predecessor won't reopen. Seek what
+                    // we have rather than going silent.
+                    Err(e) => eprintln!("rewinding to the track being heard failed: {e}"),
+                }
+            }
+
             let target = f64::from_bits(shared.seek_target_seconds.load(Ordering::Relaxed));
-            if let Err(e) = decoder.seek(target) {
+            if let Err(e) = track.decoder.seek(target) {
                 // A container that can't seek shouldn't kill playback; stay
                 // where we are and keep going.
                 eprintln!("seek to {target}s failed: {e}");
             }
             // The samples either side of a seek are unrelated, so the filter's
             // history has to go with them.
-            resampler.reset();
+            track.resampler.reset();
             carry.clear();
             carry_pos = 0;
-            source_done = false;
+            awaiting_handoff = false;
             shared.eos.store(false, Ordering::Release);
 
             // Step 2 of the handshake (see `Shared`): from here until the
@@ -468,8 +672,61 @@ fn decoder_loop(
             continue;
         }
 
-        // Everything decoded and handed over: park until a seek or shutdown.
-        if source_done && carry_pos >= carry.len() {
+        // --- the seam ---
+        //
+        // The outgoing track's tail is already in `carry` and pushed by the
+        // time we get here, so `pushed_total` is exactly the sample index the
+        // incoming track starts at. Opening it now rather than earlier is what
+        // keeps the two adjacent in the ring.
+        if awaiting_handoff && carry_pos >= carry.len() {
+            let queued = match next_slot.lock() {
+                Ok(mut slot) => slot.take(),
+                Err(e) => {
+                    eprintln!("next-track slot is poisoned: {e}");
+                    None
+                }
+            };
+            if let Some(queued) = queued {
+                match open_track(&*queued, out_channels, out_rate) {
+                    Ok(opened) => {
+                        let boundary = Boundary {
+                            at_sample: pushed_total as u64,
+                            duration_seconds: opened.duration_seconds,
+                            src_channels: opened.shape.src_channels,
+                        };
+                        if boundaries.push(boundary).is_err() {
+                            // Only reachable with more tracks in flight than
+                            // the ring can hold audio for. Publishing here
+                            // instead means the change is reported early
+                            // rather than lost -- the audio is unaffected.
+                            eprintln!(
+                                "more than {MAX_PENDING_BOUNDARIES} track changes in flight; \
+                                 reporting this one early"
+                            );
+                            publish_track(&shared, &boundary);
+                        }
+                        previous = Some((decoding_index, std::mem::replace(&mut source, queued)));
+                        decoding_index += 1;
+                        track = opened;
+                        // Order matters: clearing `eos` first stops the
+                        // callback latching `finished` in between.
+                        shared.eos.store(false, Ordering::Release);
+                        shared.finished.store(false, Ordering::Relaxed);
+                        awaiting_handoff = false;
+                    }
+                    Err(e) => {
+                        // A bad file ends the queue rather than stalling it.
+                        // The caller sees `is_finished` and can queue another.
+                        eprintln!("opening the queued track failed: {e}");
+                    }
+                }
+            }
+        }
+
+        // Out of track with nothing queued: park until something is, or until
+        // a seek or shutdown. Queuing late still works -- the branch above runs
+        // every time round.
+        if awaiting_handoff && carry_pos >= carry.len() {
             shared.eos.store(true, Ordering::Release);
             shared.primed.store(true, Ordering::Release);
             std::thread::sleep(Duration::from_millis(10));
@@ -489,25 +746,30 @@ fn decoder_loop(
             carry.clear();
             carry_pos = 0;
             resampled.clear();
-            match decoder.next_block() {
+            match track.decoder.next_block() {
                 Ok(Some(block)) => {
-                    if let Err(e) = resampler.process(block, &mut resampled) {
+                    if let Err(e) = track.resampler.process(block, &mut resampled) {
                         eprintln!("resample failed: {e}");
-                        source_done = true;
+                        awaiting_handoff = true;
                     }
                 }
                 Ok(None) => {
-                    if let Err(e) = resampler.finish(&mut resampled) {
+                    // The tail the resampler is still holding belongs to this
+                    // track and has to reach the ring before the next track's
+                    // first sample does, or the seam swallows it.
+                    if let Err(e) = track.resampler.finish(&mut resampled) {
                         eprintln!("resampler flush failed: {e}");
                     }
-                    source_done = true;
+                    awaiting_handoff = true;
                 }
                 Err(e) => {
+                    // Treat a broken track as a finished one, so a corrupt
+                    // file in a playlist moves on instead of stopping it.
                     eprintln!("decode failed: {e}");
-                    source_done = true;
+                    awaiting_handoff = true;
                 }
             }
-            adapt_channels(&resampled, &shape, &mut carry);
+            adapt_channels(&resampled, &track.shape, &mut carry);
         }
 
         if carry_pos < carry.len() {
@@ -519,6 +781,24 @@ fn decoder_loop(
             }
         }
     }
+}
+
+/// Makes a boundary's track the one the world sees.
+///
+/// Called from the cpal callback, so: no allocation, no locks, and
+/// `track_index` last with a `Release` so a caller that notices the counter
+/// move sees the duration and channel count that go with it.
+fn publish_track(shared: &Shared, boundary: &Boundary) {
+    shared
+        .duration_seconds
+        .store(boundary.duration_seconds.to_bits(), Ordering::Relaxed);
+    shared
+        .src_channels
+        .store(u32::from(boundary.src_channels), Ordering::Relaxed);
+    // A hand-off is the opposite of an ending, whatever the callback may have
+    // latched while the ring ran dry across the seam.
+    shared.finished.store(false, Ordering::Relaxed);
+    shared.track_index.fetch_add(1, Ordering::Release);
 }
 
 /// The device's own mix format -- the only config that can actually be
@@ -572,6 +852,7 @@ fn build_stream<T>(
     config: &StreamConfig,
     shared: Arc<Shared>,
     mut consumer: rtrb::Consumer<f32>,
+    mut boundaries: rtrb::Consumer<Boundary>,
     convert: fn(f32) -> T,
 ) -> Result<cpal::Stream, PlayerError>
 where
@@ -579,6 +860,11 @@ where
 {
     let out_channels = config.channels.max(1) as usize;
     let sample_rate = config.sample_rate as f64;
+    // Output samples taken off the ring since the stream opened, counting the
+    // ones a seek threw away. Only this closure touches it, so it needs no
+    // atomic; it exists to be compared against `Boundary::at_sample`, which
+    // the decoder measures the same way from the other end.
+    let mut consumed_total = 0u64;
 
     device
         .build_output_stream(
@@ -599,6 +885,13 @@ where
                                 chunk.commit_all();
                             }
                         }
+                        // Count what was discarded, or every boundary after
+                        // this one lands `stale` samples late.
+                        consumed_total += stale as u64;
+                        // Any hand-off queued behind the drain described audio
+                        // that no longer exists. The decoder is blocked until
+                        // `drained_seq` below, so nothing new can arrive here.
+                        while boundaries.pop().is_ok() {}
                         let target =
                             f64::from_bits(shared.seek_target_seconds.load(Ordering::Relaxed));
                         shared
@@ -662,14 +955,44 @@ where
                 for out in data.iter_mut().skip(filled) {
                     *out = convert(0.0);
                 }
+                if filled < data.len() {
+                    // The scope draws what the device received, and during an
+                    // underrun that is this silence. Leaving it out froze the
+                    // trace on the last good audio -- hiding a dropout at the
+                    // exact moment the scope would have shown it.
+                    shared.scope.push_silence(data.len() - filled);
+                }
                 if filled > 0 {
+                    consumed_total += filled as u64;
                     shared
                         .position_frames
                         .fetch_add((filled / out_channels) as u64, Ordering::Relaxed);
                 }
 
-                // Finished only when the decoder is done *and* nothing is left
-                // to play. Either alone is an ordinary mid-track state.
+                // --- track changes land here ---
+                //
+                // Not when the decoder opened the file: this is the moment the
+                // new track's first sample reaches the device. Noticing it a
+                // block late costs nothing, because the position is derived
+                // from how far past the boundary we are rather than from when
+                // we looked. A loop, since a track shorter than one callback
+                // block would be crossed entirely within it.
+                loop {
+                    let boundary = match boundaries.peek() {
+                        Ok(boundary) if boundary.at_sample <= consumed_total => *boundary,
+                        _ => break,
+                    };
+                    let _ = boundaries.pop();
+                    shared.position_frames.store(
+                        (consumed_total - boundary.at_sample) / out_channels as u64,
+                        Ordering::Relaxed,
+                    );
+                    publish_track(&shared, &boundary);
+                }
+
+                // Finished only when the decoder has run out of queue *and*
+                // nothing is left to play. Either alone is an ordinary
+                // mid-track state.
                 if shared.eos.load(Ordering::Acquire) && consumer.slots() < out_channels {
                     shared.finished.store(true, Ordering::Relaxed);
                 }

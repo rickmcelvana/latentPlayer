@@ -59,7 +59,7 @@ impl TransportState {
 fn load_file(path: String, state: tauri::State<SharedPlayback>) -> Result<TransportState, String> {
     // Streaming since Phase 1 M2: this returns once the decoder thread has a
     // prebuffer's worth of audio ready, not once the whole file is decoded.
-    let playback = Playback::open(&LocalFile::new(path)).map_err(|e| e.to_string())?;
+    let playback = Playback::open(Box::new(LocalFile::new(path))).map_err(|e| e.to_string())?;
     playback.play();
     let transport = TransportState::read(&playback);
     *state.lock().unwrap() = Some(playback);

@@ -336,3 +336,60 @@ One real limitation falls out of the same investigation, now in
 ARCHITECTURE.md's "Known gaps": symphonia's `isomp4` demuxer sets neither trim
 field and its AAC decoder applies neither, so **M4A/AAC keeps its priming
 frames** and gapless will only be truly gapless for MP3, Ogg, FLAC and WAV.
+
+### The native hand-off (2026-08-15)
+
+The engine holds two tracks: what is playing and what is next
+(`Playback::set_next` / `clear_next`). Everything about *which* track that is
+stays with the caller, which watches `Playback::track_index` -- a counter of
+hand-offs, not a playlist index -- and queues the one after it.
+
+**Track changes ride in the audio stream.** A second `rtrb` queue carries a
+`Boundary { at_sample, duration_seconds, src_channels }` alongside the audio,
+and the cpal callback applies one when its running consume total reaches
+`at_sample`. The alternative -- having the decoder publish "now playing" when
+it opens the file -- is wrong by up to a whole ring, so the title would change
+while the previous song was still coming out of the speakers. The two counters
+stay in step because the seek drain adds what it discards.
+
+**The seam itself** is just ordering: at end of track the outgoing resampler's
+tail is flushed into the ring *before* the next track is opened, so the last
+partial window of one track and the first sample of the next are adjacent with
+nothing between them. The callback cannot tell a track change from any other
+block of audio, which is the point.
+
+**Seeking in the last two seconds of a track had to be handled explicitly.**
+The decoder runs up to a ring ahead, so near the end of a track it has already
+moved on to the next one while the listener is still hearing the current one.
+Seeking the track being *decoded* would scrub a song the user cannot hear yet.
+The decoder therefore keeps the outgoing track's source until its successor's
+boundary is actually consumed, and a seek arriving in that window rewinds to
+it, handing the upcoming track back to the queue so gapless still works
+afterwards.
+
+#### The scope was hiding dropouts
+
+Verifying "no silence at the seam" meant sabotaging the hand-off and checking
+the test noticed. It didn't: stalling the decoder for three seconds -- well
+past the ring's two -- still measured zero silence.
+
+The cause was in `scope.rs`, not the test. The callback pushed to the scope
+only what it read *from the ring*; the silence it synthesises during an
+underrun went straight to the device and was never recorded. So a dropout left
+the scope frozen on the last good audio instead of showing the hole -- the one
+moment the scope is most useful was the one it hid. `ScopeRing::push_silence`
+fixes it, and with the fix the sabotage fails the check as it should (4096
+samples of silence).
+
+Worth keeping from the same experiment: a **500ms** stall at the seam is
+absorbed entirely by the ring and never reaches the speakers. That is the
+buffer doing its job, and it sets the real margin for opening the next file.
+
+The second sabotage -- disabling the seek rewind -- makes the seek test report
+a 439Hz tone where it wants 220Hz, i.e. it scrubbed the queued track. Both
+checks are load-bearing.
+
+`cargo run -p player-core --example gapless_smoke` is the live check: two
+synthesised tracks with different tone frequencies and lengths, so which track
+is playing is measured from the audio (zero-crossing rate) rather than taken
+from the engine's own reports.

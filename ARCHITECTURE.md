@@ -28,6 +28,12 @@ crates/
                      handshake between the caller, the decoder thread and the
                      callback -- see `Shared` in playback.rs; the web build
                      runs the identical protocol in app/src/audioSab.ts.
+
+                     The engine knows two tracks: playing and next
+                     (Playback::set_next). Track changes travel in a second
+                     rtrb queue alongside the audio and are applied by the
+                     callback when the device reaches them, so "now playing"
+                     changes with the music rather than a ring early.
   player-render/    wgpu render engine. Takes any wgpu::SurfaceTarget
                      (native window handle or web canvas) -- knows nothing
                      about Tauri or the browser. Currently a 2D XY

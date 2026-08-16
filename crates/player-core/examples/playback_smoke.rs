@@ -12,7 +12,8 @@ fn main() {
         .nth(1)
         .expect("usage: playback_smoke <path>");
 
-    let playback = Playback::open(&LocalFile::new(&path)).expect("failed to open output device");
+    let playback =
+        Playback::open(Box::new(LocalFile::new(&path))).expect("failed to open output device");
     println!(
         "output device ready: {} ch @ {} Hz, track is {:.3}s",
         playback.output_channels(),

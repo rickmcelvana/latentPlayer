@@ -21,8 +21,9 @@
 
 use std::sync::atomic::{AtomicUsize, Ordering};
 
-/// Interleaved samples, in the source's own channel layout (so a stereo track
-/// gives the scope real L/R pairs to plot against each other).
+/// Interleaved samples, in the output device's channel layout (M3 moved
+/// channel adaptation ahead of the audio ring, so this is what the device
+/// actually received).
 pub struct ScopeRing {
     samples: Box<[std::sync::atomic::AtomicU32]>,
     /// Total samples ever written, not an index -- the modulo happens at read
@@ -61,6 +62,23 @@ impl ScopeRing {
         // Release: the samples above must be visible to any reader that sees
         // this new count.
         self.written.store(start + block.len(), Ordering::Release);
+    }
+
+    /// Appends `n` samples of silence -- what the callback sends the device
+    /// when the ring has run dry.
+    ///
+    /// Recording this matters more than it looks. Without it the scope only
+    /// ever sees samples that *arrived*, so a dropout leaves the trace frozen
+    /// on the last good audio instead of showing the hole: the one moment the
+    /// scope is most useful is the one it used to hide. It also made a live
+    /// test of the gapless seam vacuous -- stalling the decoder for three
+    /// seconds produced no measurable silence at all (found 2026-08-15).
+    pub fn push_silence(&self, n: usize) {
+        let start = self.written.load(Ordering::Relaxed);
+        for i in 0..n {
+            self.samples[(start + i) & self.mask].store(0f32.to_bits(), Ordering::Relaxed);
+        }
+        self.written.store(start + n, Ordering::Release);
     }
 
     /// The most recent `n` samples, oldest first. Shorter than `n` early on,
@@ -121,6 +139,15 @@ mod tests {
             8,
             "a window can never exceed the ring"
         );
+    }
+
+    #[test]
+    fn silence_is_recorded_like_any_other_audio() {
+        let ring = ScopeRing::new(16);
+        ring.push(&[1.0, 2.0]);
+        ring.push_silence(3);
+        ring.push(&[3.0]);
+        assert_eq!(ring.window(6), vec![1.0, 2.0, 0.0, 0.0, 0.0, 3.0]);
     }
 
     #[test]
