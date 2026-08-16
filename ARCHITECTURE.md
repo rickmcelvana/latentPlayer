@@ -55,6 +55,22 @@ crates/
                      rtrb queue alongside the audio and are applied by the
                      callback when the device reaches them, so "now playing"
                      changes with the music rather than a ring early.
+
+                     tags.rs (M7) reads what a file says about itself --
+                     title/artist/album/year/cover and the stream's own
+                     properties -- off symphonia's probe without decoding any
+                     audio. Cross-target, so the desktop shell and the web
+                     worker get identical answers. Revisions are applied
+                     oldest-first so the newest wins: symphonia probes trailing
+                     metadata *before* the container, so an MP3 yields
+                     [ID3v1, ID3v2] and first-wins would prefer the truncated
+                     ID3v1 title.
+                     library.rs is the desktop library and is native-only by
+                     necessity -- a browser has directory handles, not paths.
+                     It walks folders, keeps a versioned JSON index plus a
+                     content-hashed cover cache in a directory it is handed,
+                     and is idempotent under rescan (rows keyed by path), which
+                     is what lets saved playlists reference rows by id.
   player-render/    wgpu render engine. Takes any wgpu::SurfaceTarget
                      (native window handle or web canvas) -- knows nothing
                      about Tauri or the browser. Since M6 it is PLAN.md §4's
@@ -92,6 +108,18 @@ src-tauri/           Tauri 2 desktop shell. Two windows: the React webview
                      struct rather than a command per field, so the seek
                      bar, clock and play button can't disagree mid-poll.
 
+                     The library's commands live here too (M7), with the scan
+                     itself on a blocking thread rather than the main one --
+                     a folder of a few thousand tracks is tens of seconds of
+                     IO. Cover art does *not* travel through a command: a
+                     `cover://` URI scheme protocol serves the cached image
+                     straight to the webview, because a 50KB JPEG through
+                     `invoke` is a JSON array of 50,000 numbers, per row. That
+                     response must carry `Cross-Origin-Resource-Policy:
+                     cross-origin` -- the COEP header below is `require-corp`
+                     for the SharedArrayBuffer's sake, and a subresource
+                     without CORP is blocked under it.
+
 app/                 React + TS + Vite. Same component tree renders in the
                      Tauri webview and (eventually) the plain web build --
                      matches ../latent-mixing/app/ exactly. isTauri() gates
@@ -121,22 +149,36 @@ app/                 React + TS + Vite. Same component tree renders in the
                      session; the worker resamples every track to it. Web
                      volume rides a GainNode, since Web Audio smooths it and
                      the worklet would zipper.
-                     playlist.ts, analysis.ts and scope.ts are the three
-                     adapter modules components actually call: playlist.ts
+                     playlist.ts, analysis.ts, scope.ts and library.ts are the
+                     four adapter modules components actually call: playlist.ts
                      picks the shell for playback, analysis.ts for metering,
                      scope.ts for the scope's size and visibility (a separate
                      OS window natively, a canvas on the web -- one component,
-                     ScopeControls, drives both). Spectrum.tsx,
+                     ScopeControls, drives both), and library.ts for the
+                     library. The web build's library lives in IndexedDB
+                     (libraryStore.ts): rows, cover blobs, playlists, and the
+                     scanned folder's `FileSystemDirectoryHandle` -- that last
+                     one being the property that decided the choice, since it
+                     is what lets a later session reopen the real files instead
+                     of asking for the folder again. localStorage is
+                     synchronous and ~5MB; OPFS would mean copying the user's
+                     music into browser-private storage. Tag reading runs in
+                     libraryWorker.ts, a *second* worker, because worker.ts
+                     owns the decoder pump and a few thousand files of tag
+                     parsing sharing it would be audible. Search is one
+                     function for both shells, since by that point both hold
+                     the same array of rows. Spectrum.tsx,
                      Loudness.tsx and Goniometer.tsx draw the dBFS, LUFS and
                      mid/side pairs their adapter hands them and compute
                      nothing -- including the goniometer's 45-degree rotation,
                      which is two lines of arithmetic and still lives in Rust
                      so the two shells cannot draw different figures.
-                     gapless.html, spectrum.html, loudness.html and scope.html
+                     gapless.html, spectrum.html, loudness.html, scope.html and
+                     library.html
                      (with their *Smoke.ts) are dev-only harnesses -- served at
                      those paths, never bundled -- running the same checks as
-                     the native gapless_smoke, spectrum_smoke, loudness_smoke
-                     and scope_smoke examples.
+                     the native gapless_smoke, spectrum_smoke, loudness_smoke,
+                     scope_smoke and library_smoke examples.
                      webScope.ts drives the web build's scope canvas
                      (WasmRenderer, via rAF) -- the web-side counterpart of
                      src-tauri's native redraw thread.
@@ -289,6 +331,38 @@ at the correct rate, re-verified with the same probe.
   decoding an hour of audio to find out how long it is, which is the thing M2
   removed. A real fix is a duration *estimate* (bitrate x file size) or a
   background scan, and belongs with the library work in M7.
+  **Still open after M7.** The library scan reads the length from the same
+  container field the transport does, so a file that does not state one is
+  unknown in the library too -- the library view renders that as an em dash
+  rather than as `0:00`, which is at least honest about the difference. What M7
+  did *not* add is the estimate or the decode-to-measure pass, either of which
+  would need the scan to do real work per file rather than a probe.
+- **Play at the end of a track pauses instead of restarting** (both shells,
+  found live during M7 but *not* caused by it -- the transport is untouched by
+  that milestone). When a track finishes, `TransportState::playing` stays true,
+  so the button still reads "Pause"; clicking it therefore calls
+  `set_playing(false)` and the position sits at the end. Measured on the web
+  build: position parked at 3.000 on a 3s track, the label flipping
+  Pause -> Play but never moving. M2's own check exercised the engine's `play()`
+  directly and so never saw this -- it is a UI-level disagreement between
+  `playing` and `finished`, not an engine one. A fix is small (treat `finished`
+  as not-playing when labelling the button, and make play-from-finished seek to
+  zero first) but it belongs with transport work rather than being smuggled into
+  a library milestone.
+- **The web library reads each file whole to scan it.** `WasmTags::read` takes
+  the file's bytes, because a browser hands over a `File` rather than something
+  seekable a decoder can read a few hundred bytes of. Reading a prefix instead
+  is not correct in general: MP4 can carry its `moov` box at the end and ID3v1
+  lives in the last 128 bytes. Files are read one at a time and released, so
+  memory is bounded by the largest single file, but a large library is read off
+  disk in full to be scanned -- the native side, which streams through real file
+  handles, has no such cost. A real fix means teaching the wasm source to read
+  through `Blob.slice` on demand rather than owning a `Vec<u8>`.
+- **Cover blobs are never garbage collected on the web.** They are keyed by
+  content hash and shared between rows, so removing one folder cannot know
+  whether another still references an image; `deleteFolder` deliberately leaves
+  them. Costs kilobytes per orphaned image and needs a sweep (or reference
+  counts) if a library is added and removed repeatedly.
 - **The decoder polls rather than parks.** Both the native decoder thread and
   the web Worker sleep on a short timer when the ring is full (2ms and 20ms)
   instead of waiting on a condvar or `Atomics.waitAsync`. It costs a wakeup

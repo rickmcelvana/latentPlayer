@@ -47,16 +47,27 @@ export interface PlaylistTrack {
   path: string | null;
   /// Web: the picked file, whose bytes the worker decodes.
   file: File | null;
+  /// The library row this came from, when it came from the library at all
+  /// (M7). Null for a track added straight from the file picker, which has no
+  /// library row to point at. A saved playlist stores these rather than the
+  /// tracks themselves, so fixing a tag fixes it everywhere the track appears.
+  libraryId: string | null;
 }
 
 let nextId = 0;
 
 export function trackFromPath(path: string): PlaylistTrack {
-  return { id: nextId++, name: path.split(/[\\/]/).pop() ?? path, path, file: null };
+  return {
+    id: nextId++,
+    name: path.split(/[\\/]/).pop() ?? path,
+    path,
+    file: null,
+    libraryId: null,
+  };
 }
 
 export function trackFromFile(file: File): PlaylistTrack {
-  return { id: nextId++, name: file.name, path: null, file };
+  return { id: nextId++, name: file.name, path: null, file, libraryId: null };
 }
 
 /// Starts `track` immediately, replacing whatever was playing and dropping

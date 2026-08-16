@@ -50,7 +50,7 @@ clean is not evidence.
 - **M6 -- 3D vectorscope v1.** PLAN.md §4's hero feature: extrude the 2D XY
   scope along a time axis. `player-render` grows a real 3D pipeline.
 - **M7 -- Library + tags + playlists.** Folder scan, ID3/Vorbis comment
-  reading, album art, search, persisted playlists.
+  reading, album art, search, persisted playlists. **In progress.**
 - **M8 -- Basic EQ.** Biquad chain in the DSP path.
 
 Ordering rationale: M1-M3 are the engine, M4 is the seam everything visual
@@ -860,3 +860,188 @@ sits in front of anyone reading pixels back from an sRGB target.
   the trace's (a duration not a sample count, bounded point count, age falling
   towards the newest sample, mono up the centre, inverted flat, and the
   amplitudes matching the goniometer's).
+
+## M7 -- Library + tags + playlists: decisions (2026-08-16)
+
+The first milestone in this phase that is not about audio. Phase 1's opening
+note says tags are "probed by Symphonia and then discarded"; this is where they
+stop being discarded, and where the player gets something to play *from*
+besides a file picker.
+
+1. **Tag reading is Rust, cross-target** (`player-core::tags`), for the third
+   time and the same reason as M4 decision 3 and M5 decision 7: one
+   implementation, two hosts. There is a real temptation to reach for a
+   JS tag library on the web side, because they exist and they are easy; that
+   is precisely the mistake Phase 0's two worst bugs were. Symphonia already
+   opens every one of these files to play it, and its 0.6 metadata API hands
+   back parsed `StandardTag`s across ID3v2, Vorbis comments, RIFF INFO and MP4
+   `ilst` alike -- so one reader covers every format the player supports, and
+   both shells get the same answer by construction.
+2. **Metadata revisions are applied oldest-first, so the newest wins.**
+   Symphonia keeps a *log* of revisions, not one tag set, and the order is not
+   arbitrary: `Probe::probe` calls `probe_trailing` **before** it scans forward
+   for the container, so an MP3 carrying both tags yields `[ID3v1, ID3v2]`.
+   First-wins would therefore let ID3v1's 30-character truncated title beat the
+   real one. Verified by reading symphonia 0.6.1's `formats/probe.rs` rather
+   than assumed from the shape of the API.
+3. **The scan belongs to the shell; the index belongs to the UI.** Same split
+   M3 decision 1 made for the queue. `player-core` answers "what are this
+   source's tags" and, natively, "walk this folder" -- it has a filesystem.
+   The browser does not: it has *handles*. So the two shells cannot share a
+   scanner, and pretending otherwise would mean a lowest-common-denominator
+   one. What they do share is everything above it -- rows, search, playlists --
+   which is one TS module (`library.ts`, the fourth adapter beside playlist.ts,
+   analysis.ts and scope.ts) over a per-shell store.
+4. **Where the web build's library lives: IndexedDB, folder handle included.**
+   The one genuinely open question in this milestone, so the reasoning is worth
+   stating rather than just the answer:
+   - *localStorage* is synchronous, capped around 5MB, and stores strings. A
+     library index is neither small nor stringy, and writing it on the main
+     thread would stutter the scope's own rAF loop -- the thing this app is
+     built to show off.
+   - *OPFS* would mean copying the user's music into browser-private storage:
+     gigabytes duplicated, and an index that silently goes stale against the
+     real folder the moment anything changes on disk.
+   - *IndexedDB* is asynchronous, structured-clone capable, and -- the property
+     that actually decides it -- can store a `FileSystemDirectoryHandle`. That
+     is what makes a persisted library possible on the web *at all*: the rows
+     survive a reload and so does the ability to reopen the real files, subject
+     to a permission check on a user gesture. Cover art rides along as Blobs,
+     deduplicated by content hash so an album's twelve tracks hold one image.
+   - Where `showDirectoryPicker` is missing (Firefox, Safari) the scan falls
+     back to `<input webkitdirectory>`: the rows still persist, the handles do
+     not, so those rows are marked as needing a rescan rather than pretending
+     to be playable. Acceptable as a fallback rather than a gap because the web
+     build already requires WebGPU and `crossOriginIsolated` -- it is a
+     Chromium build today whatever this milestone does.
+5. **Cover art never crosses the JSON IPC boundary.** A 50KB JPEG through
+   `invoke` is a JSON array of 50,000 numbers -- ~150KB of text, per row, for a
+   list that might show two hundred of them. Natively the art is cached to the
+   app data directory and served to the webview through a `cover://` URI scheme
+   protocol; on the web it is an object URL over the IndexedDB blob. Both hand
+   `<img src>` an ordinary URL, so one component draws art on both shells and
+   neither one ships an image through a command.
+6. **Scanning runs off the audio path *and* off the UI thread.** Natively that
+   is a background thread; on the web it is a **second** worker rather than
+   worker.ts, which owns the decoder pump and the meters. A five-thousand-file
+   tag sweep sharing that worker would stall ring refills, i.e. it would be
+   audible. This is M4 decision 2's rule ("analysis never runs on the audio
+   thread") one layer out: nothing the library does may reach the speakers.
+7. **Playlists persist as references, not copies** -- a name and a list of
+   library ids. A playlist that copied its rows would go stale against the
+   library the first time a tag was fixed.
+
+### What it is
+
+**One tag reader, two shells.** `player-core/src/tags.rs` reads title, artist,
+album, album artist, genre, track/disc number, year, cover art and the stream's
+own properties out of whatever symphonia's probe found -- ID3v2, Vorbis
+comments, RIFF INFO and MP4 `ilst` alike, because 0.6's metadata API hands back
+parsed `StandardTag`s rather than raw strings. It decodes no audio, which is
+what makes scanning a few thousand files reasonable. `player-rt-wasm`'s
+`WasmTags` is the web's way in; `src-tauri` calls straight in. Same code, so
+the two shells cannot disagree about what a file is called.
+
+**The desktop library** (`player-core/src/library.rs`) walks a folder, reads
+each file's tags, and keeps a versioned JSON index plus a `covers/` cache in the
+app data directory. Cover files are named by the *content* hash of the image, so
+an album's twelve tracks share one file. Rows are keyed by path, which is what
+makes a rescan idempotent -- a file still there is updated, a deleted one drops
+out, a new one appears -- and what lets a saved playlist survive a rescan. The
+index is written through a temporary file and renamed, so a crash mid-write
+leaves the previous index rather than half of a new one.
+
+**The web library** is IndexedDB (`app/src/libraryStore.ts`), holding the rows,
+the cover blobs, the playlists, and the scanned folder's
+`FileSystemDirectoryHandle`. That last one is the whole reason for the choice:
+it is what lets a later session reopen the real files rather than asking for the
+folder again. `libraryWorker.ts` does the tag reading in a second worker, off
+both the UI thread and the decoder's.
+
+**Cover art never crosses a command.** Natively `src-tauri` registers a
+`cover://` URI scheme protocol serving the cached file; on the web it is an
+object URL over the stored blob. Both give `<img src>` an ordinary URL, so one
+component draws art on both shells.
+
+**Search is genuinely one implementation** rather than a shared intention: by
+the time either shell has rows, it has the same array of them, so `search` in
+library.ts filters both. Every word must match something, so "phosphor decay"
+finds the one track rather than everything on the album.
+
+### Three things the checks caught
+
+**The `cover://` response needs an explicit CORP header.** This app sets
+`Cross-Origin-Embedder-Policy: require-corp` so the audio path can have a
+`SharedArrayBuffer`, and under that header a subresource without
+`Cross-Origin-Resource-Policy` is blocked. Every cover would have failed to load
+and the symptom would have looked exactly like a wrong path. Set deliberately
+rather than discovered the hard way, because M2's COOP/COEP work made the
+interaction predictable -- but it is the kind of thing worth writing down.
+
+**One album's cover produced three object URLs.** Found by reading the DOM
+rather than by looking at it: three rows sharing one cover had three distinct
+`blob:` URLs. The cache in `coverUrl` was keyed on the *resolved* URL, so all
+three rows -- which render in the same tick and ask in the same tick -- missed
+it, and two of the three URLs were live references to a blob that nothing would
+ever revoke. Caching the promise instead of its result fixes it; re-measured at
+three rows, one URL.
+
+**One moved file stopped the library playing anything.** Clicking a row queues
+everything visible so the rest of the list follows gaplessly, and the resolve
+step was a `Promise.all` -- which rejects on the first row whose file has
+moved or whose folder permission has lapsed. So a single stale row broke every
+click. Found live by clicking a good row sitting next to stale ones. It is now
+`allSettled`: unopenable rows are skipped and counted, and only the row actually
+clicked failing is reported as an error, since that is the one the listener
+asked for. Same rule the scanner already followed -- one bad file is skipped,
+never fatal.
+
+### Verified
+
+- **Native**, `cargo run -p player-core --example library_smoke` (new): **9/9**
+  against a real directory tree, real ID3v2 tags and a real cover cache. Five
+  audio files found and a `.txt` and a `.jpg` correctly ignored; an album's
+  tags read back including the `"7/12"` track-number spelling; **3 covers, 1
+  distinct** file on disk holding exactly the 516 embedded bytes; an untagged
+  file still a usable row (44100Hz, 0.100s, falling back to its file name); a
+  rescan producing the same five ids rather than ten rows; and the index and a
+  playlist read back after the library was dropped and reopened.
+- **Web**, `/library.html` (new, the counterpart harness, same claims, same
+  synthesised files): **12/12**, agreeing with the native run figure for figure
+  -- 5 found, 3-track album, **1 distinct cover of 516 bytes**, untagged row at
+  44100Hz, rescan idempotent, playlist references still resolving. It also
+  covers the two things only the web has: the IndexedDB store surviving a
+  round trip, and search (4 rows -> 3 for an artist -> 1 for two words).
+- **The UI**, driven in-browser against the dev server:
+  - The panel renders from IndexedDB: 4 rows with durations formatted from the
+    tags (3:06/3:07/3:08), an em dash for the row whose length the container
+    never stated, and the folder marked "needs adding again to play" because
+    its handle was absent -- the fallback path's honest state.
+  - Search through React's own handlers: **4 tracks -> 3 of 4** for
+    "vectorscopes" -> **1** for "phosphor decay" -> back to 4 when cleared.
+  - Cover art really decodes: the blob URL resolves to a 1x1 image, and the
+    three rows sharing a cover now share **one** URL. (The inline `<img>`
+    reports `complete: false` in the automation pane for the same reason the
+    scope's rAF loop never ticks there -- a hidden tab does not composite, so
+    `loading="lazy"` never fires. The blob was fetched and decoded directly to
+    prove the pipeline.)
+  - **Playing from the library works end to end.** A real
+    `FileSystemDirectoryHandle` was obtained through OPFS -- the same type
+    `showDirectoryPicker` returns -- with a real 3s 440Hz WAV in it, stored as
+    the folder's handle, and the row clicked for real. The handle walk found
+    the file, the worker decoded it, and the position advanced **0.260 ->
+    0.760 -> 1.250 -> 1.760** across four 500ms samples: 0.5s of audio per
+    500ms of wall clock. The three stale rows beside it were skipped with a
+    status line rather than an error, which is the `allSettled` fix above
+    being load-bearing.
+- **No regressions**: `/loudness.html` still ALL PASS (15/15) and the native
+  `gapless_smoke` still **11/11**.
+- **89 unit tests in `player-core`**, up from 73: the tag reader's (the common
+  ID3v2 fields, stream properties with no tags at all, the front cover winning
+  over the other pictures in the file, a lone picture used when none is marked
+  front, a year taken out of a full ISO date, a malformed date leaving the year
+  unset) and the library's (recursive scan ignoring non-audio, a rescan
+  updating rather than duplicating, a bad file counted and skipped, the index
+  surviving a reopen, a corrupt index opening empty rather than refusing to
+  start, forgetting one folder leaving the others, playlists replaced by id,
+  content hashing, and album grouping sorted by disc then track).

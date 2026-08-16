@@ -62,7 +62,21 @@ goniometer's own axes. The scope window is resizable and the UI owns its size
 and visibility (`scope.ts`/`ScopeControls.tsx`, driving a native window on one
 shell and the canvas on the other). `cargo run -p player-render --example
 scope_smoke` and `/scope.html` report 8/8 each, against pixels read back rather
-than eyeballed. M7 (library + tags + playlists) is next.
+than eyeballed.
+
+M7 (library + tags + playlists) is built and checked on both shells, pending
+the user's live desktop confirmation: `tags.rs` reads ID3v2/Vorbis/RIFF/MP4
+metadata and cover art off symphonia's probe without decoding audio, and both
+shells use it. The desktop library (`library.rs`) walks folders into a
+versioned JSON index plus a content-hashed cover cache in the app data
+directory; the web build's library lives in **IndexedDB** -- rows, cover blobs,
+playlists and the scanned folder's `FileSystemDirectoryHandle`, which is what
+lets a later session reopen the real files. Cover art never crosses the JSON
+IPC boundary (a `cover://` URI scheme protocol natively, object URLs on the
+web). Scanning runs off both the audio path and the UI thread: a blocking
+thread natively, a *second* worker on the web. `cargo run -p player-core
+--example library_smoke` reports 9/9 and `/library.html` 12/12, agreeing figure
+for figure. M8 (basic EQ) is next.
 
 `cargo run -p player-core --example seek_smoke -- <path>` checks that seeking a given file yields
 the same audio as playing through to that point — written for MP3, whose bit reservoir makes

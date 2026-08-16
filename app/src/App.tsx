@@ -15,6 +15,7 @@ import {
   type TransportState,
 } from "./playlist";
 import { Goniometer } from "./Goniometer";
+import { LibraryPanel } from "./LibraryPanel";
 import { Loudness } from "./Loudness";
 import { ScopeControls } from "./ScopeControls";
 import { Spectrum } from "./Spectrum";
@@ -143,6 +144,27 @@ function App() {
     [current, play, tracks],
   );
 
+  /// Replaces the queue with a list from the library and starts at `index`.
+  /// Deliberately a replacement rather than an append: clicking a row in the
+  /// library means "play this now", the same as clicking a row in the queue.
+  const playFromLibrary = useCallback(
+    (list: PlaylistTrack[], index: number) => {
+      if (list.length === 0) return;
+      setTracks(list);
+      void play(index, list);
+    },
+    [play],
+  );
+
+  /// Appends to the queue without disturbing what is playing. The queue effect
+  /// picks the new tail up if it is what comes next.
+  const queueFromLibrary = useCallback(
+    (added: PlaylistTrack[]) => {
+      add(added);
+    },
+    [add],
+  );
+
   async function handleOpenNative() {
     setError(null);
     try {
@@ -222,7 +244,7 @@ function App() {
   return (
     <main className="player">
       <h1>latentPlayer</h1>
-      <p className="subtitle">Phase 1 &mdash; queue</p>
+      <p className="subtitle">Phase 1 &mdash; library</p>
 
       <div className="controls">
         {tauri ? (
@@ -310,6 +332,8 @@ function App() {
         )}
 
         {error && <p className="error">{error}</p>}
+
+        <LibraryPanel onPlay={playFromLibrary} onQueue={queueFromLibrary} queue={tracks} />
 
         <ScopeControls />
 

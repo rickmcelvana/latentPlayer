@@ -41,4 +41,10 @@ pub enum PlayerError {
 
     #[error("output device only offers an unsupported sample format: {0}")]
     UnsupportedOutputFormat(String),
+
+    /// The library index could not be written or made sense of. Reading a bad
+    /// index is deliberately *not* this error -- see `Library::open`, which
+    /// starts empty rather than refusing to open the app.
+    #[error("library error: {0}")]
+    Library(String),
 }

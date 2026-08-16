@@ -19,5 +19,11 @@ realfft = "3.5"
 [target.'cfg(not(target_arch = "wasm32"))'.dependencies]
 cpal = "0.18"
 rtrb = "0.3.4"
+# The library index (M7) is native-only for the same reason its scanner is:
+# a browser has directory handles, not paths, and persists its own index in
+# IndexedDB (see app/src/libraryStore.ts). Nothing on the wasm side needs
+# either of these.
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
 
 [dev-dependencies]

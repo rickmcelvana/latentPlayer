@@ -12,10 +12,110 @@
 use js_sys::Float32Array;
 use player_core::resample::StreamingResampler;
 use player_core::{
-    adapt_channels, ChannelShape, InMemorySource, Meters, StreamingDecoder, GONIOMETER_POINTS,
+    adapt_channels, read_tags, ChannelShape, InMemorySource, Meters, StreamingDecoder, TrackTags,
+    GONIOMETER_POINTS,
 };
 use wasm_bindgen::prelude::*;
 use web_sys::HtmlCanvasElement;
+
+/// One file's tags, read by the same `player_core::tags` the desktop shell
+/// calls directly (M7 decision 1).
+///
+/// Exposed as getters rather than serialised into a JS object, so no
+/// serialisation dependency is needed on either side and the cover's bytes are
+/// only copied across if something actually asks for them -- which, for a scan
+/// of several thousand files where most covers are duplicates of each other,
+/// is most of the cost avoided.
+#[wasm_bindgen]
+pub struct WasmTags {
+    inner: TrackTags,
+}
+
+#[wasm_bindgen]
+impl WasmTags {
+    /// Reads the tags of a file the browser handed over. Probes the container
+    /// but decodes no audio.
+    #[wasm_bindgen(js_name = read)]
+    pub fn read(bytes: Vec<u8>, extension_hint: Option<String>) -> Result<WasmTags, JsValue> {
+        let source = InMemorySource::new(bytes, extension_hint);
+        let inner = read_tags(&source).map_err(|e| JsValue::from_str(&e.to_string()))?;
+        Ok(WasmTags { inner })
+    }
+
+    #[wasm_bindgen(getter)]
+    pub fn title(&self) -> Option<String> {
+        self.inner.title.clone()
+    }
+
+    #[wasm_bindgen(getter)]
+    pub fn artist(&self) -> Option<String> {
+        self.inner.artist.clone()
+    }
+
+    #[wasm_bindgen(getter)]
+    pub fn album(&self) -> Option<String> {
+        self.inner.album.clone()
+    }
+
+    #[wasm_bindgen(getter, js_name = albumArtist)]
+    pub fn album_artist(&self) -> Option<String> {
+        self.inner.album_artist.clone()
+    }
+
+    #[wasm_bindgen(getter)]
+    pub fn genre(&self) -> Option<String> {
+        self.inner.genre.clone()
+    }
+
+    #[wasm_bindgen(getter, js_name = trackNumber)]
+    pub fn track_number(&self) -> Option<u32> {
+        self.inner.track_number
+    }
+
+    #[wasm_bindgen(getter, js_name = discNumber)]
+    pub fn disc_number(&self) -> Option<u32> {
+        self.inner.disc_number
+    }
+
+    #[wasm_bindgen(getter)]
+    pub fn year(&self) -> Option<u32> {
+        self.inner.year
+    }
+
+    /// Length in seconds, or `None` when the container doesn't state one --
+    /// the same `Option` `StreamingDecoder::duration_seconds` reports, kept as
+    /// an `Option` here because a library row showing `0:00` and a row showing
+    /// "unknown" are different things.
+    #[wasm_bindgen(getter, js_name = durationSeconds)]
+    pub fn duration_seconds(&self) -> Option<f64> {
+        self.inner.duration_seconds
+    }
+
+    #[wasm_bindgen(getter, js_name = sampleRate)]
+    pub fn sample_rate(&self) -> Option<u32> {
+        self.inner.sample_rate
+    }
+
+    #[wasm_bindgen(getter)]
+    pub fn channels(&self) -> Option<u16> {
+        self.inner.channels
+    }
+
+    #[wasm_bindgen(getter, js_name = coverMediaType)]
+    pub fn cover_media_type(&self) -> Option<String> {
+        self.inner
+            .cover
+            .as_ref()
+            .and_then(|cover| cover.media_type.clone())
+    }
+
+    /// The embedded image's bytes, if it has one. Copies, so callers ask once
+    /// and keep the result.
+    #[wasm_bindgen(getter, js_name = coverData)]
+    pub fn cover_data(&self) -> Option<Vec<u8>> {
+        self.inner.cover.as_ref().map(|cover| cover.data.clone())
+    }
+}
 
 /// A decoder held open across the life of a track, driven from worker.ts.
 ///
