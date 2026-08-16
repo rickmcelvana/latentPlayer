@@ -64,8 +64,8 @@ shell and the canvas on the other). `cargo run -p player-render --example
 scope_smoke` and `/scope.html` report 8/8 each, against pixels read back rather
 than eyeballed.
 
-M7 (library + tags + playlists) is built and checked on both shells, pending
-the user's live desktop confirmation: `tags.rs` reads ID3v2/Vorbis/RIFF/MP4
+M7 (library + tags + playlists) is done and user-confirmed on both shells:
+`tags.rs` reads ID3v2/Vorbis/RIFF/MP4
 metadata and cover art off symphonia's probe without decoding audio, and both
 shells use it. The desktop library (`library.rs`) walks folders into a
 versioned JSON index plus a content-hashed cover cache in the app data

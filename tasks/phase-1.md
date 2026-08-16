@@ -50,7 +50,8 @@ clean is not evidence.
 - **M6 -- 3D vectorscope v1.** PLAN.md §4's hero feature: extrude the 2D XY
   scope along a time axis. `player-render` grows a real 3D pipeline.
 - **M7 -- Library + tags + playlists.** Folder scan, ID3/Vorbis comment
-  reading, album art, search, persisted playlists. **In progress.**
+  reading, album art, search, persisted playlists. **Done, verified live on
+  both shells.**
 - **M8 -- Basic EQ.** Biquad chain in the DSP path.
 
 Ordering rationale: M1-M3 are the engine, M4 is the seam everything visual
@@ -861,12 +862,14 @@ sits in front of anyone reading pixels back from an sRGB target.
   towards the newest sample, mono up the centre, inverted flat, and the
   amplitudes matching the goniometer's).
 
-## M7 -- Library + tags + playlists: decisions (2026-08-16)
+## M7 -- Library + tags + playlists: done
 
 The first milestone in this phase that is not about audio. Phase 1's opening
 note says tags are "probed by Symphonia and then discarded"; this is where they
 stop being discarded, and where the player gets something to play *from*
 besides a file picker.
+
+### Decisions (2026-08-16)
 
 1. **Tag reading is Rust, cross-target** (`player-core::tags`), for the third
    time and the same reason as M4 decision 3 and M5 decision 7: one
@@ -1045,3 +1048,22 @@ never fatal.
   surviving a reopen, a corrupt index opening empty rather than refusing to
   start, forgetting one folder leaving the others, playlists replaced by id,
   content hashing, and album grouping sorted by disc then track).
+- **Native UI, user-confirmed live** (2026-08-16): "loading a folder works, as
+  does saving a playlist. It's there after app restart too. it loaded the meta
+  info and art." That covers what the automated checks cannot reach -- React
+  driving the seven new `#[tauri::command]`s across the IPC boundary, where a
+  mismatched argument name fails silently; a real folder of real MP3s rather
+  than synthesised WAVs; cover art arriving over the `cover://` protocol into
+  a real webview under the COEP header; and the index surviving a genuine
+  process restart rather than a `drop` and reopen in one process.
+
+  Two things about that session are worth keeping. The player's log shows
+  clusters of seven and eight MP3s opening inside the same second -- the
+  signature of the scan reading tags -- which is the scan doing in a second
+  what playing those files would take twenty minutes to do. And the session
+  ran ~90 minutes, during which the *scope* window's redraw thread panicked;
+  that is pre-existing M6 code rather than anything here (a destroyed window
+  arrives as `Outdated`, and M6's fix for `Outdated` calls `surface.configure`,
+  which panics on a dead surface). It is written up in ARCHITECTURE.md's known
+  gaps, unfixed, because deciding what the scope's lifecycle should be when its
+  window is closed is scope work, not library work.
