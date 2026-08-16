@@ -12,13 +12,17 @@
 import { invoke } from "@tauri-apps/api/core";
 import { open } from "@tauri-apps/plugin-dialog";
 
-/// Opens the native file picker. Returns null if the user cancelled.
-export async function pickAudioFile(): Promise<string | null> {
-  const path = await open({
-    multiple: false,
-    filters: [{ name: "Audio", extensions: ["mp3", "flac", "wav", "aac", "m4a", "ogg"] }],
-  });
-  return typeof path === "string" ? path : null;
+const AUDIO_FILTERS = [
+  { name: "Audio", extensions: ["mp3", "flac", "wav", "aac", "m4a", "ogg"] },
+];
+
+/// Opens the native file picker, allowing a whole selection at once so a
+/// playlist can be built in one go. Returns an empty array if the user
+/// cancelled.
+export async function pickAudioFiles(): Promise<string[]> {
+  const picked = await open({ multiple: true, filters: AUDIO_FILTERS });
+  if (Array.isArray(picked)) return picked;
+  return typeof picked === "string" ? [picked] : [];
 }
 
 /// Everything the transport UI needs, read in one round trip so the seek
@@ -32,11 +36,26 @@ export interface TransportState {
   playing: boolean;
   volume: number;
   finished: boolean;
+  /// Gapless hand-offs that have reached the output since the last
+  /// `loadFile`. Not a playlist index -- the engine only ever knows two
+  /// tracks -- so the UI adds it to the index it last loaded.
+  trackIndex: number;
 }
 
 /// Decodes and starts playing the file at `path`.
 export async function loadFile(path: string): Promise<TransportState> {
   return invoke<TransportState>("load_file", { path });
+}
+
+/// Queues the track to play when the current one ends, replacing whatever was
+/// queued before. Mirrors `setNext` in playerEngine.ts.
+export async function setNext(path: string): Promise<void> {
+  return invoke("set_next", { path });
+}
+
+/// Forgets any queued track, so the current one is the last.
+export async function clearNext(): Promise<void> {
+  return invoke("clear_next");
 }
 
 export async function setPlaying(playing: boolean): Promise<void> {

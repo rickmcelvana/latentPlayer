@@ -430,3 +430,52 @@ its zero-crossing rate says which track is audible, but it is also a direct
 check on the resampling that M1's pitched-audio bug was about: a broken
 44.1k -> 48k conversion would read 239Hz where the test wants 220Hz. Both
 shells measure within a few Hz.
+
+### The playlist UI (2026-08-16)
+
+The engine holds two tracks; something has to hold the rest. `playlist.ts` is
+that something, and it is also the only module that chooses between the two
+playback adapters -- it owns the list and turns "play track n" into the
+load/queue pair both shells already expose. The one difference left between
+them (a desktop track is a path for `LocalFile`, a web track is a `File` whose
+bytes go to the worker) stops there rather than spreading through the UI, which
+is the same argument nativePlayer/playerEngine already make with their shared
+`TransportState`.
+
+**`trackIndex` rides in the transport snapshot.** The native side gained
+`set_next`/`clear_next` commands and a `track_index` field on `TransportState`
+rather than a command of its own -- for the reason the struct exists at all: the
+UI decides which row is highlighted from the same snapshot it draws the clock
+from, so the two cannot disagree mid-poll. The counter is hand-offs since the
+last load, not a playlist index, so App.tsx adds it to the index it loaded. That
+keeps the engine's "I know two tracks" contract intact and means the row
+highlights when the audio actually changes, not when the decoder moved on (up to
+a ring earlier).
+
+**A load clears the queue, so ordering the two matters.** The first version
+queued the next track from an effect on the current index, which React runs as
+soon as the row highlights -- while the load is still in flight. Both shells
+clear the next slot as part of opening a track (`Playback::open` builds a fresh
+engine; worker.ts's `load` handler sets `queued = null` after its `await`), so a
+queue message that overtakes the load is silently dropped. Found live rather
+than by reading: the first track played, then stopped at its end and the second
+never started. The queue effect now waits on the load having settled.
+
+Everything else is ordinary UI: add several files at once (both pickers take
+multiple), click a row to jump, prev/next, remove. Deliberate jumps are *not*
+gapless -- they replace what is playing, because the listener asked for it now.
+
+**Verified live, web shell**, driving the real UI in-browser (files injected
+into the file input, so React's own handlers run) against the dev server:
+- Two synthesised tracks, 3s/220Hz and 5s/440Hz. The hand-off flipped the
+  highlighted row, the title and the duration (0:03 -> 0:05) at **t+3.15s**,
+  i.e. one 100ms poll after the first track's audio ran out, with the position
+  restarting at 0.07 rather than continuing.
+- After a deliberate jump back to track 1, the queue re-armed and the hand-off
+  happened again -- the case the load/queue ordering bug above would break.
+- Clicking a row, Next, Prev, pause (position held at 0.6 across 600ms), play,
+  removing the playing row (its successor took over), and removing the last row
+  (transport reset, list empty) all behave. No console errors on a fresh load,
+  no dev-server errors.
+- `/gapless.html` still reports **11/11** -- the engine underneath is unchanged,
+  and this is the check that says so.

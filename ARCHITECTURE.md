@@ -74,7 +74,14 @@ app/                 React + TS + Vite. Same component tree renders in the
                          plain TS -- see player-rt-wasm above)
                      Both adapters expose the *same* `TransportState` shape,
                      so App.tsx drives the transport without branching on
-                     which shell it's in. audioSab.ts holds the one definition
+                     which shell it's in. playlist.ts is the only module that
+                     picks between the two: it owns the track list and turns
+                     "play track n" into the load/queue pair both shells
+                     expose, so the one remaining difference between them --
+                     a desktop track is a path, a web track is a File --
+                     stops there. The engine still holds only current + next
+                     (M3's decision); ordering lives here.
+                     audioSab.ts holds the one definition
                      of the SharedArrayBuffer all three web parties use --
                      control block, playback ring, scope history -- including
                      the seek handshake that mirrors the native one, and the

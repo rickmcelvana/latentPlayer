@@ -115,6 +115,83 @@ input[type="range"] {
   }
 }
 
+/* The playlist. Rows are buttons so keyboard and screen readers get the
+   click target for free; the numbering comes from the <ol>'s own counter
+   rather than from React, so it can't disagree with the list. */
+.playlist {
+  list-style: none;
+  margin: 0;
+  padding: 0;
+  width: min(560px, 100%);
+  display: flex;
+  flex-direction: column;
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  overflow: hidden;
+
+  li {
+    display: flex;
+    align-items: center;
+    border-bottom: 1px solid var(--border);
+
+    &:last-child {
+      border-bottom: none;
+    }
+    &.playing .name {
+      color: var(--accent);
+    }
+  }
+
+  .row {
+    flex: 1;
+    min-width: 0;
+    display: flex;
+    align-items: center;
+    gap: 12px;
+    padding: 8px 12px;
+    border: none;
+    border-radius: 0;
+    background: none;
+    text-align: left;
+
+    &:hover:not(:disabled) {
+      background: var(--accent-bg);
+    }
+  }
+
+  .num {
+    color: var(--text);
+    font-family: var(--mono);
+    font-size: 13px;
+    font-variant-numeric: tabular-nums;
+    width: 2ch;
+    text-align: right;
+  }
+
+  /* Long file names ellipsize rather than widening the whole panel. */
+  .name {
+    color: var(--text-h);
+    font-size: 14px;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+  }
+
+  .remove {
+    padding: 8px 12px;
+    border-radius: 0;
+    background: none;
+    color: var(--text);
+    font-size: 18px;
+    line-height: 1;
+
+    &:hover:not(:disabled) {
+      border-color: transparent;
+      color: var(--accent);
+    }
+  }
+}
+
 .scope {
   border-radius: 8px;
   border: 1px solid var(--border);

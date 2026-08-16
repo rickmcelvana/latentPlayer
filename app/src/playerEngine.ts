@@ -34,6 +34,7 @@ export interface TransportState {
   playing: boolean;
   volume: number;
   finished: boolean;
+  trackIndex: number;
 }
 
 function getWorker(): Worker {
@@ -218,7 +219,7 @@ export function setVolume(next: number): void {
 /// Current transport state, matching the native adapter's shape.
 export function transport(): TransportState {
   if (!views) {
-    return { position: 0, duration: 0, playing: false, volume, finished: false };
+    return { position: 0, duration: 0, playing: false, volume, finished: false, trackIndex: 0 };
   }
   const { control } = views;
   // 0 means the container didn't state a length -- the same "unknown" the
@@ -231,6 +232,7 @@ export function transport(): TransportState {
     playing: isPlaying(),
     volume,
     finished: isFinished(),
+    trackIndex: trackIndex(),
   };
 }
 

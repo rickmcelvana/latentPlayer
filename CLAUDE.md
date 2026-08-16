@@ -32,10 +32,12 @@ foundation before metering; web parity lockstep per milestone). M1 (transport: r
 resampling, seek, volume, position, transport UI) is done and user-confirmed on both shells.
 M2 (streaming decode: `StreamingDecoder` + a decoder thread feeding an `rtrb` ring natively, a
 Worker topping up a SharedArrayBuffer ring on the web) is done and user-confirmed on both shells.
-M3 is queue + gapless; the native half is built (engine holds current + next,
-track changes ride a second ring alongside the audio, verified by
-`cargo run -p player-core --example gapless_smoke`), with the web path and the
-playlist UI still to come.
+M3 (queue + gapless) is built on both shells -- the engine holds current + next,
+track changes ride a second ring alongside the audio
+(`cargo run -p player-core --example gapless_smoke` natively, `/gapless.html` on
+the web, 11/11 each), and `app/src/playlist.ts` + the playlist UI own the
+ordering. The web half is verified live; the native UI is not yet
+user-confirmed.
 `cargo run -p player-core --example seek_smoke -- <path>` checks that seeking a given file yields
 the same audio as playing through to that point — written for MP3, whose bit reservoir makes
 symphonia log an underflow warning on every seek (expected; see `tasks/phase-1.md`). See `ARCHITECTURE.md`'s "Known gaps" for tracked limitations (Opus,

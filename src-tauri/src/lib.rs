@@ -30,6 +30,11 @@ struct TransportState {
     playing: bool,
     volume: f32,
     finished: bool,
+    /// Gapless hand-offs that have reached the device since `load_file`. Rides
+    /// in this struct rather than in a command of its own for the same reason
+    /// the rest of it does: the UI resolves "which track is playing" from the
+    /// same snapshot it draws the clock from, so the two cannot disagree.
+    track_index: u64,
 }
 
 impl TransportState {
@@ -40,6 +45,7 @@ impl TransportState {
             playing: playback.is_playing(),
             volume: playback.volume(),
             finished: playback.is_finished(),
+            track_index: playback.track_index(),
         }
     }
 
@@ -51,6 +57,7 @@ impl TransportState {
             playing: false,
             volume: 1.0,
             finished: false,
+            track_index: 0,
         }
     }
 }
@@ -64,6 +71,24 @@ fn load_file(path: String, state: tauri::State<SharedPlayback>) -> Result<Transp
     let transport = TransportState::read(&playback);
     *state.lock().unwrap() = Some(playback);
     Ok(transport)
+}
+
+/// Queues the track to play when the current one ends, replacing whatever was
+/// queued before. The engine holds one track of lookahead and no more; the
+/// playlist itself lives in the UI (see `Playback::set_next`).
+#[tauri::command]
+fn set_next(path: String, state: tauri::State<SharedPlayback>) {
+    if let Some(playback) = state.lock().unwrap().as_ref() {
+        playback.set_next(Box::new(LocalFile::new(path)));
+    }
+}
+
+/// Forgets any queued track, so the current one is the last.
+#[tauri::command]
+fn clear_next(state: tauri::State<SharedPlayback>) {
+    if let Some(playback) = state.lock().unwrap().as_ref() {
+        playback.clear_next();
+    }
 }
 
 #[tauri::command]
@@ -113,6 +138,8 @@ pub fn run() {
         .manage(SharedPlayback::default())
         .invoke_handler(tauri::generate_handler![
             load_file,
+            set_next,
+            clear_next,
             set_playing,
             transport,
             seek,
