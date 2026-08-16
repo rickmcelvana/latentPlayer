@@ -593,6 +593,10 @@ at the release rate instead -- measured at exactly 30dB in one second on both.
   146 available -- which is exactly where -3.4dBFS lands on a -90..0 scale. (The
   Browser pane doesn't composite, so `requestAnimationFrame` never fires there;
   the check drives the component's own loop with a timer instead.)
+- **Native UI, user-confirmed live** (2026-08-16): "tested and works
+  perfectly". That covers the path the automated checks can't -- React driving
+  the new `spectrum`/`spectrum_bands` commands across the IPC boundary, and a
+  display judged by eye rather than by an assertion.
 - 49 unit tests in `player-core`, including the spectrum's analytic ones (a
   full-scale sine at 0dBFS, halving amplitude costing 6.02dB, leakage two
   octaves out, the release rate, mono and stereo of the same signal agreeing)

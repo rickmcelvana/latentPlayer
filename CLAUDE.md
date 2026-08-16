@@ -38,7 +38,7 @@ holds current + next, track changes ride a second ring alongside the audio
 the web, 11/11 each), and `app/src/playlist.ts` + the playlist UI own the
 ordering.
 
-M4 (analysis tap + spectrum analyzer) is done and verified live on both shells:
+M4 (analysis tap + spectrum analyzer) is done and user-confirmed on both shells:
 `tap.rs` is the one tap the scope and every meter read (snapshots for displays,
 cursors for meters that must see every sample), `analysis.rs`/`spectrum.rs` are
 the cross-target meters, and they run off the audio thread on both shells --
