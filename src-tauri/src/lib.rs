@@ -73,6 +73,35 @@ fn load_file(path: String, state: tauri::State<SharedPlayback>) -> Result<Transp
     Ok(transport)
 }
 
+/// The latest spectrum: one dBFS level per display band, as of whenever the
+/// analysis thread last ran.
+///
+/// A separate command from `transport` rather than a field on it, unlike
+/// `track_index`: this is 64 floats polled at frame rate by one component,
+/// where the transport is five scalars polled at 10Hz by all of them. Bundling
+/// them would make every clock tick carry a spectrum.
+#[tauri::command]
+fn spectrum(state: tauri::State<SharedPlayback>) -> Vec<f32> {
+    state
+        .lock()
+        .unwrap()
+        .as_ref()
+        .map(|playback| playback.spectrum())
+        .unwrap_or_default()
+}
+
+/// Centre frequency of each band `spectrum` returns. Fixed once a track is
+/// open, so the UI fetches it once rather than per frame.
+#[tauri::command]
+fn spectrum_bands(state: tauri::State<SharedPlayback>) -> Vec<f32> {
+    state
+        .lock()
+        .unwrap()
+        .as_ref()
+        .map(|playback| playback.spectrum_band_centres().to_vec())
+        .unwrap_or_default()
+}
+
 /// Queues the track to play when the current one ends, replacing whatever was
 /// queued before. The engine holds one track of lookahead and no more; the
 /// playlist itself lives in the UI (see `Playback::set_next`).
@@ -143,7 +172,9 @@ pub fn run() {
             set_playing,
             transport,
             seek,
-            set_volume
+            set_volume,
+            spectrum,
+            spectrum_bands
         ])
         .setup(|app| {
             if cfg!(debug_assertions) {

@@ -6,7 +6,7 @@
 //!
 //! ```text
 //!   decoder thread                                ring (rtrb)   cpal callback
-//!   StreamingDecoder -> resampler -> channels -> [ ~2s ] -> output + ScopeRing
+//!   StreamingDecoder -> resampler -> channels -> [ ~2s ] -> output + AnalysisTap
 //! ```
 //!
 //! Everything left of the ring is the decoder thread's, and it hands over
@@ -38,12 +38,13 @@ use std::time::{Duration, Instant};
 use cpal::traits::{DeviceTrait, HostTrait, StreamTrait};
 use cpal::{SampleFormat, StreamConfig};
 
+use crate::analysis::Meters;
 use crate::channels::{adapt_channels, ChannelShape};
 use crate::error::PlayerError;
 use crate::resample::StreamingResampler;
-use crate::scope::ScopeRing;
 use crate::source::PlaybackSource;
 use crate::stream::StreamingDecoder;
+use crate::tap::{AnalysisTap, TapCursor};
 
 /// Upper bound on source channels, rejected at `open` rather than discovered
 /// in the callback. Well past anything Symphonia decodes (22.2 surround is
@@ -56,10 +57,11 @@ const MAX_CHANNELS: usize = 32;
 /// much away and memory stays trivial (~768KB at 48kHz stereo).
 const RING_SECONDS: f64 = 2.0;
 
-/// Samples of playback history kept for the scope. 32768 is ~170ms of 48kHz
-/// stereo -- far more than the 2048 a frame draws, so a slow render thread
-/// still reads intact data.
-const SCOPE_RING_SAMPLES: usize = 32_768;
+/// Samples of playback history the analysis tap holds. 32768 is ~170ms of
+/// 48kHz stereo -- far more than the 2048 a scope frame or an FFT window
+/// draws, so a slow render or analysis thread still reads intact data
+/// (`tap.rs`).
+const TAP_SAMPLES: usize = 32_768;
 
 /// How full the ring must be before `open` returns, as a fraction of it.
 /// Without this, a caller that plays immediately after loading (which is
@@ -138,7 +140,7 @@ struct Shared {
     primed: AtomicBool,
     /// Tells the decoder thread to exit (set by `Drop`).
     stop: AtomicBool,
-    scope: ScopeRing,
+    tap: AnalysisTap,
 }
 
 impl Shared {
@@ -191,7 +193,15 @@ pub struct Playback {
     /// Output sample rate -- what `position_frames` counts in.
     sample_rate: u32,
     next: NextSlot,
+    /// Latest spectrum levels in dBFS, published by the analysis thread. A
+    /// `Mutex` is fine here where it would not be in `Shared`: neither end of
+    /// this is the audio callback.
+    levels: Arc<Mutex<Vec<f32>>>,
+    /// The frequency axis those levels are against. Fixed for the session, so
+    /// it is computed once rather than sent with every frame.
+    band_centres: Vec<f32>,
     decoder: Option<JoinHandle<()>>,
+    analysis: Option<JoinHandle<()>>,
     // Kept alive only to keep the stream running -- cpal stops the stream
     // when this is dropped. Never read directly.
     _stream: cpal::Stream,
@@ -243,7 +253,7 @@ impl Playback {
             finished: AtomicBool::new(false),
             primed: AtomicBool::new(false),
             stop: AtomicBool::new(false),
-            scope: ScopeRing::new(SCOPE_RING_SAMPLES),
+            tap: AnalysisTap::new(TAP_SAMPLES),
         });
 
         let prime_target = (ring_samples as f64 * PREBUFFER_FRACTION) as usize;
@@ -295,12 +305,34 @@ impl Playback {
             .play()
             .map_err(|e| PlayerError::OutputStream(e.to_string()))?;
 
+        // The meters live off the audio thread (M4 decision 2): a meter that
+        // overruns its budget must degrade into a stale reading, never into a
+        // dropout. This thread only ever *reads* the tap, so nothing it does
+        // can block the callback.
+        let levels = Arc::new(Mutex::new(vec![
+            crate::spectrum::FLOOR_DB;
+            crate::analysis::BAND_COUNT
+        ]));
+        let analysis_thread = {
+            let shared = Arc::clone(&shared);
+            let levels = Arc::clone(&levels);
+            let rate = config.sample_rate;
+            let channels = config.channels;
+            std::thread::Builder::new()
+                .name("player-analysis".to_string())
+                .spawn(move || analysis_loop(shared, levels, rate, channels))
+                .map_err(|e| PlayerError::OutputStream(format!("analysis thread: {e}")))?
+        };
+
         let playback = Self {
             channels: config.channels,
             sample_rate: config.sample_rate,
             next,
             shared,
+            levels,
+            band_centres: crate::analysis::band_centres(config.sample_rate),
             decoder: Some(decoder_thread),
+            analysis: Some(analysis_thread),
             _stream: stream,
         };
         playback.wait_for_prebuffer();
@@ -450,22 +482,82 @@ impl Playback {
 
     /// The most recently played `n` interleaved samples, for the scope render
     /// loop to draw a live trace from. Read from the history the callback
-    /// keeps (`scope.rs`) rather than from a decoded buffer -- with streaming
+    /// keeps (`tap.rs`) rather than from a decoded buffer -- with streaming
     /// there is no longer any such buffer to look back into.
     pub fn scope_window(&self, n: usize) -> Vec<f32> {
-        self.shared.scope.window(n)
+        self.shared.tap.window(n)
+    }
+
+    /// The latest spectrum, one dBFS level per display band, as of whenever the
+    /// analysis thread last ran (~60Hz). Reading it never waits on audio.
+    pub fn spectrum(&self) -> Vec<f32> {
+        match self.levels.lock() {
+            Ok(levels) => levels.clone(),
+            // Only reachable if the analysis thread panicked mid-publish. A
+            // frozen display beats propagating that to a caller who only wanted
+            // to draw a frame.
+            Err(poisoned) => poisoned.into_inner().clone(),
+        }
+    }
+
+    /// Centre frequency of each band in `spectrum`, for the axis. Constant for
+    /// the life of this `Playback`.
+    pub fn spectrum_band_centres(&self) -> &[f32] {
+        &self.band_centres
     }
 }
 
 impl Drop for Playback {
     fn drop(&mut self) {
-        // The decoder thread parks in sleeps rather than blocking, so setting
-        // this is enough to bring it down; joining keeps it from outliving the
-        // ring it writes into.
+        // Both threads park in sleeps rather than blocking, so setting this is
+        // enough to bring them down; joining keeps them from outliving the ring
+        // and the tap they work on.
         self.shared.stop.store(true, Ordering::Relaxed);
         if let Some(handle) = self.decoder.take() {
             let _ = handle.join();
         }
+        if let Some(handle) = self.analysis.take() {
+            let _ = handle.join();
+        }
+    }
+}
+
+/// Drains the tap into the meters and publishes what they read.
+///
+/// Runs at roughly display rate rather than as fast as it can: the spectrum is
+/// a display, and a meter that consumes a core to redraw the same frame twice
+/// is a worse player, not a better one. Everything it drains is handed over,
+/// though, not just the newest window -- M5's integrated loudness has to see
+/// every sample, and this loop is where it will read them.
+fn analysis_loop(
+    shared: Arc<Shared>,
+    levels: Arc<Mutex<Vec<f32>>>,
+    sample_rate: u32,
+    channels: u16,
+) {
+    const INTERVAL: Duration = Duration::from_millis(16);
+
+    let mut meters = Meters::new(sample_rate, channels);
+    let mut cursor = TapCursor::new(&shared.tap);
+    let mut drained = Vec::new();
+    let mut last = Instant::now();
+
+    while !shared.stop.load(Ordering::Relaxed) {
+        drained.clear();
+        let read = shared.tap.read(&mut cursor, &mut drained);
+        meters.ingest(&drained, read.discontinuity);
+
+        let now = Instant::now();
+        let dt = now.duration_since(last).as_secs_f32();
+        last = now;
+        let current = meters.update(dt);
+
+        if let Ok(mut published) = levels.lock() {
+            published.clear();
+            published.extend_from_slice(current);
+        }
+
+        std::thread::sleep(INTERVAL);
     }
 }
 
@@ -868,7 +960,7 @@ where
                         shared.finished.store(false, Ordering::Relaxed);
                         // Otherwise the next scope frame is spliced together
                         // from both sides of the seek.
-                        shared.scope.clear();
+                        shared.tap.clear();
                         shared.drained_seq.store(requested, Ordering::Release);
                     }
                     // Either way, play nothing this block: what's queued is
@@ -879,6 +971,14 @@ where
 
                 if !shared.playing.load(Ordering::Relaxed) {
                     silence(data, convert);
+                    // Paused audio is still audio the device received, and the
+                    // tap holds what the device received. Without this the
+                    // meters freeze on the last frame before the pause and hold
+                    // it indefinitely -- a spectrum standing still under a
+                    // stopped transport reads as a hung analyser, which is the
+                    // same class of lie as the dropout `push_silence` exists to
+                    // stop hiding (found by the M4 smoke check, 2026-08-16).
+                    shared.tap.push_silence(data.len());
                     return;
                 }
 
@@ -907,9 +1007,9 @@ where
                         // The scope shows what was played, which since M3 means
                         // the output's channel layout rather than the source's.
                         // It is the layout that stays put across a queue.
-                        shared.scope.push(&first[..split]);
+                        shared.tap.push(&first[..split]);
                         if usable > split {
-                            shared.scope.push(&second[..usable - split]);
+                            shared.tap.push(&second[..usable - split]);
                         }
 
                         filled = usable;
@@ -928,7 +1028,7 @@ where
                     // underrun that is this silence. Leaving it out froze the
                     // trace on the last good audio -- hiding a dropout at the
                     // exact moment the scope would have shown it.
-                    shared.scope.push_silence(data.len() - filled);
+                    shared.tap.push_silence(data.len() - filled);
                 }
                 if filled > 0 {
                     consumed_total += filled as u64;

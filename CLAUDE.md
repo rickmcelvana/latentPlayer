@@ -36,7 +36,15 @@ M3 (queue + gapless) is done and user-confirmed on both shells -- the engine
 holds current + next, track changes ride a second ring alongside the audio
 (`cargo run -p player-core --example gapless_smoke` natively, `/gapless.html` on
 the web, 11/11 each), and `app/src/playlist.ts` + the playlist UI own the
-ordering. M4 (analysis tap + spectrum analyzer) is next.
+ordering.
+
+M4 (analysis tap + spectrum analyzer) is done and verified live on both shells:
+`tap.rs` is the one tap the scope and every meter read (snapshots for displays,
+cursors for meters that must see every sample), `analysis.rs`/`spectrum.rs` are
+the cross-target meters, and they run off the audio thread on both shells --
+`cargo run -p player-core --example spectrum_smoke` and `/spectrum.html` report
+10/10 each. M5 (LUFS + phase metering) is next.
+
 `cargo run -p player-core --example seek_smoke -- <path>` checks that seeking a given file yields
 the same audio as playing through to that point — written for MP3, whose bit reservoir makes
 symphonia log an underflow warning on every seek (expected; see `tasks/phase-1.md`). See `ARCHITECTURE.md`'s "Known gaps" for tracked limitations (Opus,

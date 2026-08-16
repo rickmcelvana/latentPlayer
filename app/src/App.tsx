@@ -14,6 +14,7 @@ import {
   type PlaylistTrack,
   type TransportState,
 } from "./playlist";
+import { Spectrum } from "./Spectrum";
 import { startScope } from "./webScope";
 
 const EMPTY: TransportState = {
@@ -271,6 +272,8 @@ function App() {
             onChange={(e) => void changeVolume(Number(e.target.value))}
           />
         </div>
+
+        <Spectrum active={loaded} />
 
         {tracks.length > 0 && (
           <ol className="playlist">

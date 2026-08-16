@@ -9,7 +9,7 @@
 // This module's job is unchanged from the outside: it still reports the same
 // `TransportState` the native adapter does, so App.tsx never branches on which
 // shell it's in.
-import { CONTROL, SCOPE_MASK, SCOPE_SAMPLES, audioViews } from "./audioSab";
+import { CONTROL, SCOPE_MASK, SCOPE_SAMPLES, SPECTRUM_FLOOR_DB, audioViews } from "./audioSab";
 
 let audioCtx: AudioContext | null = null;
 let workletNode: AudioWorkletNode | null = null;
@@ -18,6 +18,7 @@ let worker: Worker | null = null;
 let views: ReturnType<typeof audioViews> | null = null;
 let sampleRate = 44_100;
 let volume = 1;
+let bandCentres = new Float32Array(0);
 
 /// Output channels for the session. Fixed rather than taken from the track,
 /// for the same reason the rate is: the ring's geometry cannot change while a
@@ -79,6 +80,7 @@ export async function loadFile(file: File): Promise<TransportState> {
     channels: number;
     sampleRate: number;
     durationSeconds: number;
+    bandCentres: Float32Array;
   }>((resolve, reject) => {
     const w = getWorker();
     w.onmessage = (e: MessageEvent) => {
@@ -114,6 +116,9 @@ export async function loadFile(file: File): Promise<TransportState> {
 
   views = audioViews(loaded.sab);
   sampleRate = loaded.sampleRate;
+  // Copied out of the message rather than kept: the worker builds it over
+  // wasm memory, which is a SharedArrayBuffer under COOP/COEP and can move.
+  bandCentres = new Float32Array(loaded.bandCentres);
 
   return transport();
 }
@@ -234,6 +239,29 @@ export function transport(): TransportState {
     finished: isFinished(),
     trackIndex: trackIndex(),
   };
+}
+
+/// The latest spectrum, one dBFS level per band, as the worker's meters last
+/// measured it (~20ms). Mirrors `Playback::spectrum` natively -- and the
+/// numbers come from the same Rust either way, so the two shells draw the same
+/// picture of the same audio.
+///
+/// Copies rather than handing back the shared view: a caller holding a live
+/// view would see values change under it mid-draw.
+export function spectrum(): Float32Array {
+  if (!views) return new Float32Array(0);
+  return new Float32Array(views.spectrum);
+}
+
+/// Centre frequency of each band, for the axis. Empty until a track is loaded,
+/// since the analyser is built with the output's rate.
+export function spectrumBands(): Float32Array {
+  return bandCentres;
+}
+
+/// The floor the spectrum reports for a band with nothing in it.
+export function spectrumFloorDb(): number {
+  return SPECTRUM_FLOOR_DB;
 }
 
 /// The most recently played `n` interleaved samples, for the scope render

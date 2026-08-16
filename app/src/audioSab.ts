@@ -104,6 +104,18 @@ export const CONTROL = {
   /// head, worker owns the tail; empty when they are equal.
   boundaryHead: 19,
   boundaryTail: 20,
+
+  /// Total samples ever written to the scope/analysis ring, which is what
+  /// makes that ring a *tap*: `scopeIndex` alone says where the writer is, not
+  /// how much a reader has missed. The worker's analysis cursor compares
+  /// against this to know when it has been lapped -- mirrors the `written`
+  /// count on `AnalysisTap` natively (player-core/src/tap.rs). Int32 and so
+  /// wrapping; compared through `framesUntil` for the same reason
+  /// `writtenFrames` is.
+  ///
+  /// Reset to 0 by the worklet when a seek drains the ring, which is how a
+  /// reader learns the audio it is about to get does not continue what it had.
+  tapWritten: 21,
 } as const;
 
 /// Where the boundary records start, and how many there can be at once. One
@@ -139,12 +151,26 @@ export const RING_SECONDS = 2;
 export const SCOPE_SAMPLES = 32_768;
 export const SCOPE_MASK = SCOPE_SAMPLES - 1;
 
+/// Display bands the spectrum publishes, mirroring `BAND_COUNT` in
+/// player-core/src/analysis.rs. The count has to be known here to size the
+/// buffer; the *values* are computed in Rust and only ever read from here.
+export const SPECTRUM_BANDS = 64;
+
+/// What an unmeasured band reads, mirroring `FLOOR_DB` in
+/// player-core/src/spectrum.rs. Duplicated deliberately and minimally: the
+/// buffer has to start at "nothing here" rather than at 0, which as a dBFS
+/// value would mean full scale.
+export const SPECTRUM_FLOOR_DB = -120;
+
 export interface AudioViews {
   control: Int32Array;
   /// Interleaved PCM waiting to be played, in the output's shape.
   ring: Float32Array;
-  /// Recently played interleaved samples, for the scope.
+  /// Recently played interleaved samples: the scope draws it, the worker's
+  /// meters read it. One tap, two kinds of reader (see CONTROL.tapWritten).
   scope: Float32Array;
+  /// Latest spectrum in dBFS, one per band, written by the worker's analyser.
+  spectrum: Float32Array;
   ringFrames: number;
   channels: number;
 }
@@ -154,11 +180,15 @@ export interface AudioViews {
 /// buffer geometry serves every track in the queue.
 export function createAudioSab(channels: number, sampleRate: number): SharedArrayBuffer {
   const ringFrames = Math.ceil(sampleRate * RING_SECONDS);
-  const bytes = CONTROL_INTS * 4 + ringFrames * channels * 4 + SCOPE_SAMPLES * 4;
+  const bytes =
+    CONTROL_INTS * 4 + ringFrames * channels * 4 + SCOPE_SAMPLES * 4 + SPECTRUM_BANDS * 4;
   const sab = new SharedArrayBuffer(bytes);
   const control = new Int32Array(sab, 0, CONTROL_INTS);
   control[CONTROL.ringFrames] = ringFrames;
   control[CONTROL.channels] = channels;
+  // A zeroed spectrum would read as full scale on every band until the first
+  // analysis frame lands.
+  audioViews(sab).spectrum.fill(SPECTRUM_FLOOR_DB);
   return sab;
 }
 
@@ -170,7 +200,9 @@ export function audioViews(sab: SharedArrayBuffer): AudioViews {
   const ringFrames = control[CONTROL.ringFrames];
   const channels = control[CONTROL.channels];
   const ringSamples = ringFrames * channels;
+  const ringBytes = CONTROL_INTS * 4 + ringSamples * 4;
   const ring = new Float32Array(sab, CONTROL_INTS * 4, ringSamples);
-  const scope = new Float32Array(sab, CONTROL_INTS * 4 + ringSamples * 4, SCOPE_SAMPLES);
-  return { control, ring, scope, ringFrames, channels };
+  const scope = new Float32Array(sab, ringBytes, SCOPE_SAMPLES);
+  const spectrum = new Float32Array(sab, ringBytes + SCOPE_SAMPLES * 4, SPECTRUM_BANDS);
+  return { control, ring, scope, spectrum, ringFrames, channels };
 }

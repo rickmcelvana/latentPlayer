@@ -77,8 +77,13 @@ class PlayerWorklet extends AudioWorkletProcessor {
         Atomics.store(c, CONTROL.boundaryHead, Atomics.load(c, CONTROL.boundaryTail));
         Atomics.store(c, CONTROL.positionFrames, Atomics.load(c, CONTROL.seekTargetFrames));
         Atomics.store(c, CONTROL.finished, 0);
-        // Otherwise the next scope frame is spliced from both sides of the seek.
+        // Otherwise the next scope frame is spliced from both sides of the
+        // seek. Restarting the tap at zero -- index and count together, as
+        // `AnalysisTap::clear` does natively -- is also what tells the worker's
+        // meters that what follows is from somewhere else in the track.
         Atomics.store(c, CONTROL.scopeFilled, 0);
+        Atomics.store(c, CONTROL.scopeIndex, 0);
+        Atomics.store(c, CONTROL.tapWritten, 0);
         Atomics.store(c, CONTROL.drainedSeq, requested);
       }
       // Either way, play nothing this block.
@@ -88,6 +93,11 @@ class PlayerWorklet extends AudioWorkletProcessor {
 
     if (Atomics.load(c, CONTROL.playing) !== 1) {
       this.silence(output);
+      // Paused audio is still audio the output received, and the tap holds
+      // what the output received -- same rule, same reason, as the native
+      // callback. Without it the meters freeze on the last frame before the
+      // pause and hold it forever.
+      this.tapSilence();
       return true;
     }
 
@@ -131,6 +141,9 @@ class PlayerWorklet extends AudioWorkletProcessor {
       CONTROL.scopeFilled,
       Math.min(SCOPE_MASK + 1, Atomics.load(c, CONTROL.scopeFilled) + BLOCK_FRAMES * this.channels),
     );
+    // Published last, and only after the samples above are in place: a reader
+    // that sees this count must be able to read every sample it counts.
+    Atomics.add(c, CONTROL.tapWritten, BLOCK_FRAMES * this.channels);
 
     if (frames > 0) {
       Atomics.store(c, CONTROL.readIndex, (readIndex + frames) % this.ringFrames);
@@ -178,6 +191,23 @@ class PlayerWorklet extends AudioWorkletProcessor {
 
   private silence(output: Float32Array[]): void {
     for (let ch = 0; ch < output.length; ch++) output[ch].fill(0);
+  }
+
+  /// One block of silence into the tap, for the paths that send the output
+  /// nothing. `AnalysisTap::push_silence` natively.
+  private tapSilence(): void {
+    const c = this.control;
+    const samples = BLOCK_FRAMES * this.channels;
+    let index = Atomics.load(c, CONTROL.scopeIndex);
+    for (let s = 0; s < samples; s++) this.scope[(index + s) & SCOPE_MASK] = 0;
+    index = (index + samples) & SCOPE_MASK;
+    Atomics.store(c, CONTROL.scopeIndex, index);
+    Atomics.store(
+      c,
+      CONTROL.scopeFilled,
+      Math.min(SCOPE_MASK + 1, Atomics.load(c, CONTROL.scopeFilled) + samples),
+    );
+    Atomics.add(c, CONTROL.tapWritten, samples);
   }
 }
 

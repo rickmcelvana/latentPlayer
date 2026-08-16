@@ -19,9 +19,20 @@ crates/
                      takes no lock and memory is bounded by the ring rather
                      than by the track. resample.rs's StreamingResampler and
                      the channel adaptation sit between the two, so the ring
-                     holds audio already in the device's shape; scope.rs keeps
-                     a small ring of what was actually played, for the scope
-                     to draw.
+                     holds audio already in the device's shape; tap.rs keeps
+                     a small ring of what was actually played.
+
+                     That ring is the analysis tap (M4): the scope draws
+                     snapshots of it (`window`), and meters read it through a
+                     cursor that reports when it has been lapped -- because a
+                     display only wants what is on screen now, while an
+                     integrated loudness reading has to have seen every sample
+                     it claims to measure. analysis.rs owns the meters and the
+                     drain; spectrum.rs is the first of them (windowed FFT,
+                     log bands, dBFS). Both are cross-target: the native
+                     analysis thread and the web worker run the same code, so
+                     the two shells cannot measure differently. Neither runs
+                     on the audio thread.
 
                      A seek is a real container seek, which means discarding
                      the audio already queued. That takes a three-counter
@@ -90,9 +101,16 @@ app/                 React + TS + Vite. Same component tree renders in the
                      session; the worker resamples every track to it. Web
                      volume rides a GainNode, since Web Audio smooths it and
                      the worklet would zipper.
-                     gapless.html + gaplessSmoke.ts are a dev-only harness
-                     (served at /gapless.html, never bundled) running the
-                     same checks as the native gapless_smoke example.
+                     playlist.ts and analysis.ts are the two adapter modules
+                     components actually call: playlist.ts picks the shell for
+                     playback, analysis.ts for metering. Spectrum.tsx draws
+                     bars from the dBFS its adapter hands it and computes
+                     nothing.
+                     gapless.html + gaplessSmoke.ts and spectrum.html +
+                     spectrumSmoke.ts are dev-only harnesses (served at
+                     /gapless.html and /spectrum.html, never bundled) running
+                     the same checks as the native gapless_smoke and
+                     spectrum_smoke examples.
                      webScope.ts drives the web build's scope canvas
                      (WasmRenderer, via rAF) -- the web-side counterpart of
                      src-tauri's native redraw thread.

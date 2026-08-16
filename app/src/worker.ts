@@ -15,7 +15,7 @@
 // ring's geometry is the session's and does not change at a track boundary.
 //
 // Buffer layout lives in audioSab.ts, shared with the worklet and the engine.
-import init, { WasmDecoder } from "./wasm/player_rt_wasm.js";
+import init, { WasmAnalyzer, WasmDecoder } from "./wasm/player_rt_wasm.js";
 import {
   BOUNDARY_AT,
   BOUNDARY_BASE,
@@ -23,8 +23,11 @@ import {
   BOUNDARY_SLOTS,
   BOUNDARY_TOTAL_FRAMES,
   CONTROL,
+  SCOPE_MASK,
+  SCOPE_SAMPLES,
   audioViews,
   createAudioSab,
+  framesUntil,
 } from "./audioSab";
 
 /// How often the pump runs when it has nothing else to do. The ring holds ~2s,
@@ -75,6 +78,10 @@ interface LoadedResponse {
   channels: number;
   sampleRate: number;
   durationSeconds: number;
+  /// Centre frequency of each spectrum band, computed in Rust and fixed for
+  /// the session -- sent once here rather than living in the shared buffer,
+  /// since it never changes.
+  bandCentres: Float32Array;
 }
 
 interface ErrorResponse {
@@ -85,6 +92,12 @@ interface ErrorResponse {
 let wasmReady: Promise<unknown> | null = null;
 let decoder: WasmDecoder | null = null;
 let views: ReturnType<typeof audioViews> | null = null;
+/// The meters, and this worker's read position in the tap the worklet writes.
+/// Analysis lives here rather than in the worklet because the worklet is the
+/// audio thread: a meter that overruns must go stale, not silent (M4).
+let analyzer: WasmAnalyzer | null = null;
+let tapCursor = 0;
+let lastAnalysis = 0;
 /// The output's rate -- what every track is resampled to and what all the
 /// frame counts in the control block are measured in.
 let outRate = 44_100;
@@ -138,6 +151,10 @@ self.onmessage = async (e: MessageEvent<Request>) => {
 
     const sab = createAudioSab(outChannels, outRate);
     views = audioViews(sab);
+    analyzer?.free();
+    analyzer = WasmAnalyzer.create(outRate, outChannels);
+    tapCursor = 0;
+    lastAnalysis = performance.now();
     // 0 means "the container didn't say" and travels all the way to the UI --
     // see StreamingDecoder::duration_seconds for when that happens.
     views.control[CONTROL.totalFrames] = Math.round(durationSeconds * outRate);
@@ -149,6 +166,7 @@ self.onmessage = async (e: MessageEvent<Request>) => {
       channels: outChannels,
       sampleRate: outRate,
       durationSeconds,
+      bandCentres: analyzer.bandCentres(),
     };
     self.postMessage(response);
     pump();
@@ -175,6 +193,11 @@ function pump(): void {
   }
   if (!decoder || !views) return;
   const { control, ring, ringFrames, channels } = views;
+
+  // First, and outside the decode paths below: several of them return early
+  // (mid-seek, waiting on the drain), and the meters should keep decaying
+  // through a seek rather than freezing until decoding resumes.
+  runAnalysis();
 
   try {
     // The listener has caught up; the old track can go.
@@ -249,6 +272,51 @@ function pump(): void {
   }
 
   schedule();
+}
+
+/// Drains the tap into the meters and publishes what they read.
+///
+/// Rides the decode pump rather than having a timer of its own: it runs at the
+/// same ~20ms cadence, and an FFT of 2048 points costs tens of microseconds
+/// against a pump budgeted for tens of milliseconds of decoding. The native
+/// side gives this its own thread only because it has threads to give.
+function runAnalysis(): void {
+  if (!analyzer || !views) return;
+  const { control, scope, spectrum } = views;
+
+  const written = Atomics.load(control, CONTROL.tapWritten);
+  let available = framesUntil(written, tapCursor);
+  let discontinuity = false;
+
+  if (available < 0) {
+    // The worklet restarted the tap at zero: a seek drained the ring, so what
+    // comes next is from somewhere else in the track.
+    discontinuity = true;
+    tapCursor = 0;
+    available = written;
+  }
+  if (available > SCOPE_SAMPLES) {
+    // Lapped -- the worklet wrote more than the ring holds since the last
+    // drain. Take what survived and say so, exactly as `AnalysisTap::read`
+    // does natively.
+    tapCursor = written - SCOPE_SAMPLES;
+    available = SCOPE_SAMPLES;
+    discontinuity = true;
+  }
+
+  if (available > 0) {
+    const drained = new Float32Array(available);
+    for (let i = 0; i < available; i++) drained[i] = scope[(tapCursor + i) & SCOPE_MASK];
+    tapCursor = written;
+    analyzer.ingest(drained, discontinuity);
+  } else if (discontinuity) {
+    analyzer.ingest(new Float32Array(0), true);
+  }
+
+  const now = performance.now();
+  const levels = analyzer.update((now - lastAnalysis) / 1000);
+  lastAnalysis = now;
+  spectrum.set(levels);
 }
 
 /// Crosses to the queued track, if there is one. Returns whether it did.

@@ -74,3 +74,15 @@ export async function seek(seconds: number): Promise<TransportState> {
 export async function setVolume(volume: number): Promise<void> {
   return invoke("set_volume", { volume });
 }
+
+/// The latest spectrum, one dBFS level per band, as the analysis thread last
+/// measured it. Mirrors `spectrum()` in playerEngine.ts; the levels are
+/// computed by the same Rust on both shells.
+export async function spectrum(): Promise<Float32Array> {
+  return new Float32Array(await invoke<number[]>("spectrum"));
+}
+
+/// Centre frequency of each band, for the axis. Fixed once a track is open.
+export async function spectrumBands(): Promise<Float32Array> {
+  return new Float32Array(await invoke<number[]>("spectrum_bands"));
+}

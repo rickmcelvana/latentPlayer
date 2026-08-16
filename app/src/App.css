@@ -192,6 +192,13 @@ input[type="range"] {
   }
 }
 
+.spectrum {
+  border-radius: 8px;
+  border: 1px solid var(--border);
+  width: min(560px, 100%);
+  height: auto;
+}
+
 .scope {
   border-radius: 8px;
   border: 1px solid var(--border);

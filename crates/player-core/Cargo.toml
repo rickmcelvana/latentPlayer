@@ -11,6 +11,7 @@ thiserror = "1"
 # lifetime, so the web build picks one rate per session and converts every
 # track to it rather than tearing the context down between tracks.
 rubato = "5"
+realfft = "3.5"
 
 # cpal doesn't target wasm32 -- native playback output lives behind this cfg
 # and is simply absent from wasm builds (player-rt-wasm drives output via the

@@ -11,7 +11,7 @@
 
 use js_sys::Float32Array;
 use player_core::resample::StreamingResampler;
-use player_core::{adapt_channels, ChannelShape, InMemorySource, StreamingDecoder};
+use player_core::{adapt_channels, ChannelShape, InMemorySource, Meters, StreamingDecoder};
 use wasm_bindgen::prelude::*;
 use web_sys::HtmlCanvasElement;
 
@@ -195,6 +195,53 @@ impl WasmDecoder {
         }
         adapt_channels(&self.resampled, &self.shape, &mut self.carry);
         Ok(())
+    }
+}
+
+/// The meters, driven from worker.ts -- the web half of M4's analysis tap.
+///
+/// Deliberately knows nothing about the SharedArrayBuffer: the worker reads its
+/// own tap region (it owns that layout, see app/src/audioSab.ts) and hands the
+/// samples over, exactly as it hands the decoder a slice of ring to write into.
+/// What happens to those samples is `player_core::Meters`, the same code the
+/// native analysis thread runs, so the two shells cannot measure differently.
+///
+/// It runs in the worker rather than the worklet for the reason M4's decision 2
+/// gives: an overrunning meter must degrade into a stale reading, never into a
+/// dropout, and the worklet *is* the audio thread here.
+#[wasm_bindgen]
+pub struct WasmAnalyzer {
+    meters: Meters,
+}
+
+#[wasm_bindgen]
+impl WasmAnalyzer {
+    /// `sample_rate`/`channels` are the output's -- what the tap holds.
+    #[wasm_bindgen(js_name = create)]
+    pub fn create(sample_rate: u32, channels: u16) -> WasmAnalyzer {
+        WasmAnalyzer {
+            meters: Meters::new(sample_rate, channels),
+        }
+    }
+
+    /// Adds audio drained from the tap. `discontinuity` says these samples do
+    /// not continue the previous ones -- the reader was lapped, or a seek
+    /// cleared the tap under it.
+    pub fn ingest(&mut self, samples: &[f32], discontinuity: bool) {
+        self.meters.ingest(samples, discontinuity);
+    }
+
+    /// Runs the meters and returns the levels, one dBFS value per band.
+    /// `dt_seconds` is real elapsed time, so the decay looks the same here as
+    /// it does natively whatever the worker's cadence happens to be.
+    pub fn update(&mut self, dt_seconds: f32) -> Vec<f32> {
+        self.meters.update(dt_seconds).to_vec()
+    }
+
+    /// Centre frequency of each band. Fixed for the session.
+    #[wasm_bindgen(js_name = bandCentres)]
+    pub fn band_centres(&self) -> Vec<f32> {
+        self.meters.band_centres().to_vec()
     }
 }
 

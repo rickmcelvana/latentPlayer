@@ -43,7 +43,8 @@ clean is not evidence.
   between tracks, crossfade if it falls out cheaply. **Done, verified live
   on both shells** (crossfade deferred, see the decisions below).
 - **M4 -- Analysis tap + spectrum analyzer.** The per-block tap every meter
-  hangs off, plus the first consumer (FFT spectrum, log/linear).
+  hangs off, plus the first consumer (FFT spectrum, log/linear). **Done,
+  verified live on both shells.**
 - **M5 -- Loudness + phase metering.** LUFS (integrated/short/momentary, per
   ITU-R BS.1770-4), true-peak, phase correlation, goniometer.
 - **M6 -- 3D vectorscope v1.** PLAN.md §4's hero feature: extrude the 2D XY
@@ -493,7 +494,12 @@ everything works". That covers what the automated checks can't -- React driving
 the new `set_next`/`clear_next` commands, where a mismatched argument name fails
 silently at the IPC boundary -- and closes M3.
 
-## M4 -- Analysis tap + spectrum analyzer: decisions (2026-08-16)
+## M4 -- Analysis tap + spectrum analyzer: done
+
+The tap every meter will hang off is in, with the spectrum analyser as its
+first reader, on both shells. Decisions first, then what building it turned up.
+
+### Decisions (2026-08-16)
 
 1. **One tap, not a second copy.** Both shells already keep a ring of exactly
    what reached the output, written by the party that knows -- `ScopeRing`
@@ -520,3 +526,75 @@ silently at the IPC boundary -- and closes M3.
 5. **Mono sum for v1.** Per-channel spectra are a display option, not a
    different measurement, and PLAN.md §4's spectrum analyzer is the summed one.
    Mid/side and per-channel are M5-and-later work.
+
+### What it is
+
+**One tap, two kinds of reader.** `scope.rs` became `tap.rs`: the same ring the
+audio callback already filled with what it sent the device, now with a
+`TapCursor` beside the existing `window(n)` snapshot. The distinction is the
+milestone's whole point -- a display wants "the last N samples" and is right to
+miss what happened between frames, while M5's integrated LUFS has to have seen
+every sample it claims to have measured. The cursor cannot stop the audio thread
+lapping it (nothing may make that thread wait) but it reports when it happened,
+which is the difference between a meter that degrades honestly and one that
+lies. The web build has the identical pair: `CONTROL.tapWritten` next to the
+scope region it already had.
+
+**The meters, in Rust, off the audio thread.** `analysis.rs` holds the drain
+loop and `spectrum.rs` the first meter -- periodic Hann, real FFT (`realfft`,
+already in the tree under rubato), 64 log-spaced bands from 20Hz, peak bin per
+band, dBFS normalised so a full-scale sine reads 0. Both are cross-target and
+free of threads: natively a `player-analysis` thread drives them, on the web the
+worker's existing pump does, and neither is the audio thread. `dt` is passed in
+rather than assumed, so the 30dB/s decay looks the same at 30fps and 144fps.
+
+**Levels cross to the UI as dBFS** and `Spectrum.tsx` draws bars, choosing its
+own display floor (-90dB, against the data's -120). The bands are log-spaced, so
+laying the bars out evenly *is* the log axis.
+
+**The tap is pre-volume on both shells** -- native pushes what came out of the
+ring before applying gain, the worklet writes to the tap before its GainNode.
+That is the only sane answer for a loudness meter: turning the monitoring level
+down must not change what the track measures. Both smoke checks assert it.
+
+### Two things the checks caught
+
+**Adjacent bands were sharing a bin.** Band edges rounded outwards -- floor the
+bottom, ceil the top -- so the bin holding a 440Hz tone belonged to both band 28
+and band 29, which then read *exactly* the same level. "Which band is loudest"
+came down to how a max broke ties, and the two shells broke it differently:
+the web harness reported 433Hz, the native one 483Hz, on identical audio. Bands
+now take a half-open `[lo, hi)` of bin centres, so no bin is in two bands, with
+a test that says so. (Bands below ~200Hz are narrower than the 23Hz bin spacing
+and still share bins by necessity -- better than a display with holes in the
+bass.)
+
+**A paused engine froze the meters.** Both callbacks silenced the output and
+returned *without* recording anything, so the tap stopped advancing, the
+analyser re-ran the same window forever, and the display held its last bar
+indefinitely. This is the same bug M3 found in the scope during dropouts, in a
+different place: the tap holds what the device received, and while paused the
+device receives silence. Both shells now push that silence, and the meters decay
+at the release rate instead -- measured at exactly 30dB in one second on both.
+
+### Verified
+
+- **Native**, `cargo run -p player-core --example spectrum_smoke` (new): 10/10
+  against the real default device. A -3.1dBFS 440Hz tone reads **-3.39dBFS in
+  band 28 (433Hz)**, 52dB down two octaves away; the volume control moves it by
+  0.00dB; a hand-off to 3520Hz moves the peak to band 47 and empties band 28;
+  pause decays -3.3 -> -33.3dB in a second; a seek recovers to -3.29dBFS.
+- **Web**, `/spectrum.html` (new, the counterpart harness, same claims, same
+  synthesised tones): 10/10, **-3.39dBFS in band 28** -- the same number to the
+  hundredth of a dB, which is the evidence that decision 3 (one implementation,
+  two hosts) actually holds rather than being an intention.
+- **The UI canvas**, read back pixel by pixel in-browser: background
+  `rgb(5,5,8)`, bars `rgb(38,242,140)`, tallest bar at **band 28**, 140px of the
+  146 available -- which is exactly where -3.4dBFS lands on a -90..0 scale. (The
+  Browser pane doesn't composite, so `requestAnimationFrame` never fires there;
+  the check drives the component's own loop with a timer instead.)
+- 49 unit tests in `player-core`, including the spectrum's analytic ones (a
+  full-scale sine at 0dBFS, halving amplitude costing 6.02dB, leakage two
+  octaves out, the release rate, mono and stereo of the same signal agreeing)
+  and the tap's cursor ones (every sample seen, lapping reported, a clear
+  reported).
