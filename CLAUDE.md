@@ -78,8 +78,7 @@ thread natively, a *second* worker on the web. `cargo run -p player-core
 --example library_smoke` reports 9/9 and `/library.html` 12/12, agreeing figure
 for figure.
 
-M8 (basic EQ) is built, with the web shell verified live and the desktop UI
-awaiting the usual live confirmation: `eq.rs` is a ten-band
+M8 (basic EQ) is done and user-confirmed on both shells: `eq.rs` is a ten-band
 graphic EQ (ISO octave centres, shelves at the ends, peaks between, a preamp and
 a bypass) running **between the ring and the output, before the analysis tap and
 before the volume** -- so every meter measures what the listener is played while
@@ -90,8 +89,14 @@ the UI draws) and only the difference equation is mirrored, in
 `app/src/eqFilter.ts`, with `/eq.html` holding the two to each other -- they
 agree exactly. `cargo run -p player-core --example eq_smoke` reports 14/14 and
 `/eq.html` 15/15, measuring the EQ *through the spectrum analyser*, which only
-works because the filters sit ahead of the tap. Once the desktop session
-confirms it, Phase 1's milestone list is closed.
+works because the filters sit ahead of the tap.
+
+**Phase 1's milestone list is complete** (2026-08-16) -- M1 to M8, all
+user-confirmed on both shells. The tracked limitations in ARCHITECTURE.md's
+"Known gaps" remain open, two of which are plain bugs rather than design trades
+(play at the end of a track pauses instead of restarting; closing the scope
+window by hand panics its redraw thread). See `tasks/phase-1.md`'s closing
+section.
 
 `cargo run -p player-core --example seek_smoke -- <path>` checks that seeking a given file yields
 the same audio as playing through to that point — written for MP3, whose bit reservoir makes

@@ -52,9 +52,8 @@ clean is not evidence.
 - **M7 -- Library + tags + playlists.** Folder scan, ID3/Vorbis comment
   reading, album art, search, persisted playlists. **Done, verified live on
   both shells.**
-- **M8 -- Basic EQ.** Biquad chain in the DSP path. **Built and verified live on
-  the web shell and against the native engine; the desktop UI is awaiting the
-  usual live confirmation.**
+- **M8 -- Basic EQ.** Biquad chain in the DSP path. **Done, verified live on
+  both shells.**
 
 Ordering rationale: M1-M3 are the engine, M4 is the seam everything visual
 hangs off, M5-M6 are the differentiator (PLAN.md §4), M7-M8 are table
@@ -1070,7 +1069,7 @@ never fatal.
   gaps, unfixed, because deciding what the scope's lifecycle should be when its
   window is closed is scope work, not library work.
 
-## M8 -- Basic EQ
+## M8 -- Basic EQ: done
 
 The last milestone of Phase 1, and the first one where the audio the listener
 hears is not the audio the file holds. Ten bands, a preamp and a bypass, in the
@@ -1242,13 +1241,13 @@ reason.
   each (-3.39dBFS in band 28, the same number M4 and M5 recorded), and
   `/gapless.html` and `gapless_smoke` **11/11** each. A flat EQ really is
   transparent.
-- **Not yet done: the desktop UI, live.** Everything above covers the native
-  *engine* (through `eq_smoke`, against a real output device) and the web shell
-  end to end, but not React driving the new `eq_state`/`set_eq` commands across
-  the IPC boundary -- where a mismatched argument name fails silently -- nor an
-  EQ judged against real music by ear rather than against tones by assertion.
-  That is the check every milestone in this phase has closed on, and M8 is not
-  closed until it passes.
+- **Native UI, user-confirmed live** (2026-08-16): "desktop test passes,
+  everything works". That covers what the automated checks cannot reach --
+  React driving the new `eq_state`/`set_eq` commands across the IPC boundary,
+  where a mismatched argument name fails silently; the setting surviving a real
+  process restart rather than a page reload; and an EQ judged against real music
+  by ear rather than against synthesised tones by assertion. It closes M8, and
+  with it Phase 1's milestone list.
 - **101 unit tests in `player-core`**, up from 89, twelve of them the EQ's: each
   band reaching its own gain at its own centre measured *on the audio* rather
   than on its coefficients, a bell leaving two octaves out alone, the measured
@@ -1257,3 +1256,18 @@ reason.
   filtered independently, a block split mid-frame filtering identically to a
   whole one (the wrapped-ring case), a reset matching a fresh processor, the
   clamp, and the top band on a 32kHz device.
+
+## Phase 1's milestone list is complete (2026-08-16)
+
+M1 to M8 are all done and user-confirmed on both shells, which is everything
+PLAN.md §7 asked of this phase: a local file player with a library, tagging,
+playlists, a basic EQ, a spectrum analyser, phase correlation, LUFS metering and
+the 3D vectorscope, shipping as a Tauri desktop build and a web build.
+
+What is *not* claimed by that: the tracked limitations in ARCHITECTURE.md's
+"Known gaps" are still open, and two of them are ordinary bugs rather than
+design trades -- pressing play at the end of a track pauses instead of
+restarting (found during M7, a UI-level disagreement between `playing` and
+`finished`), and closing the scope window by hand panics its redraw thread
+(pre-existing M6 code). Neither belonged inside a milestone that wasn't about
+them, and both are worth clearing before Phase 2 rather than carrying forward.
