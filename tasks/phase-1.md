@@ -492,3 +492,31 @@ into the file input, so React's own handlers run) against the dev server:
 everything works". That covers what the automated checks can't -- React driving
 the new `set_next`/`clear_next` commands, where a mismatched argument name fails
 silently at the IPC boundary -- and closes M3.
+
+## M4 -- Analysis tap + spectrum analyzer: decisions (2026-08-16)
+
+1. **One tap, not a second copy.** Both shells already keep a ring of exactly
+   what reached the output, written by the party that knows -- `ScopeRing`
+   natively, the scope region of the SAB on the web. That *is* the analysis
+   tap; meters read it rather than the audio thread pushing to a second ring.
+   What it lacks is a way for a reader to know it was lapped, so the ring grows
+   a monotonic written-count and readers hold cursors. The spectrum does not
+   need that continuity -- an FFT of the last N samples at 60Hz is exactly
+   right -- but M5's *integrated* LUFS must see every sample it claims to have
+   measured, and building the cursor now costs a counter.
+2. **Analysis never runs on the audio thread.** Not in cpal's callback, not in
+   the AudioWorklet. Natively it gets its own thread; on the web it runs in the
+   worker that already hosts wasm and already has a pump loop. This is the same
+   rule M2 applied to decoding, for the same reason: a meter that overruns its
+   budget must degrade into a stale reading, never into a dropout.
+3. **The DSP is Rust, shared by both shells** (`player-core::spectrum`),
+   including the window, the dB conversion, the log banding and the temporal
+   smoothing. TypeScript draws bars from numbers it is handed and nothing else.
+   Phase 0's two worst bugs were both web-only; a second implementation of the
+   analysis in TS would be the same mistake with a slower feedback loop.
+4. **Bins cross to the UI as dBFS**, not as 0..1 heights. The display floor is
+   a display decision and belongs where the drawing is; the meaning belongs
+   where the DSP is.
+5. **Mono sum for v1.** Per-channel spectra are a display option, not a
+   different measurement, and PLAN.md §4's spectrum analyzer is the summed one.
+   Mid/side and per-channel are M5-and-later work.
