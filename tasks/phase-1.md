@@ -602,3 +602,52 @@ at the release rate instead -- measured at exactly 30dB in one second on both.
   octaves out, the release rate, mono and stereo of the same signal agreeing)
   and the tap's cursor ones (every sample seen, lapping reported, a clear
   reported).
+
+## M5 -- Loudness + phase metering: in progress
+
+The second and third readers of M4's tap: a BS.1770-4 loudness meter (momentary,
+short-term, integrated, true peak) and a phase pair (correlation, goniometer).
+Decisions first, so the reasoning is on the record before the code is.
+
+### Decisions (2026-08-16)
+
+1. **The K-weighting coefficients are derived per rate, not tabulated at
+   48kHz.** BS.1770-4 states its filter as coefficients for 48kHz, and most
+   implementations paste that table -- which is wrong on this machine, whose
+   output devices run at 96kHz (M4's own smoke check opens at whatever rate the
+   default device offers). The filters are built by bilinear transform from the
+   spec's analog prototype instead, with a test asserting the derivation
+   reproduces the published 48kHz table to 1e-6. That test is the whole reason
+   to trust the derivation at 44.1 or 96.
+2. **Integrated loudness measures one continuous listen, and resets when the
+   listen breaks.** A new file, a seek, a gapless hand-off, or a tap
+   discontinuity all reset it. Integrating across a splice would report a number
+   for a timeline nobody heard -- and M3's hand-off is exactly what makes "the
+   track changed" an event the engine can see (`track_index`), so there is no
+   excuse for pretending two tracks are one measurement. Momentary and
+   short-term reset with it.
+3. **The loudness and phase meters share the spectrum's drain.** They are
+   readers of the same `Meters::ingest` the spectrum already gets every sample
+   from -- which is what `TapCursor` was built for in M4 (decision 1). No second
+   tap, no second cadence, and the discontinuity flag that M4 needed for the
+   FFT window is the same one integrated loudness needs for its gating blocks.
+4. **The meters cross to the UI as one snapshot**, the way `TransportState`
+   does: momentary/short/integrated LUFS, true peak in dBTP, correlation. Five
+   numbers that describe one moment must be read in one go, or a display can
+   show a momentary from one instant against an integrated from another.
+5. **Silence reads a floor, not negative infinity.** -70 LUFS, which is
+   BS.1770-4's own absolute gate. The honest value is -inf, but it cannot cross
+   the Tauri boundary (serde_json turns a non-finite float into `null`) and the
+   two shells have to report the same thing -- so the floor is the engine's
+   answer everywhere, and "below the gate" is what it means.
+6. **True peak is measured, not approximated by the sample peak.** 4x
+   oversampling through a windowed-sinc polyphase interpolator, per BS.1770-4
+   Annex 2's method (its method, not its exact filter table). The test is
+   analytic: a full-scale sine at fs/4 sampled through its zero crossings has a
+   sample peak of -3dBFS and a true peak of 0dBTP, and a meter that reports
+   -3 there is the one this exists to replace.
+7. **The goniometer's points are computed in Rust and published with the
+   meters** -- the same rule as the spectrum (M4 decision 3), even though the
+   transform is two lines of arithmetic. Two lines are enough to disagree
+   across shells. Decimated to a fixed count so the per-frame cost across the
+   IPC boundary is bounded rather than a function of the sample rate.
