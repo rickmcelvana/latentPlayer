@@ -45,8 +45,8 @@ the cross-target meters, and they run off the audio thread on both shells --
 `cargo run -p player-core --example spectrum_smoke` and `/spectrum.html` report
 10/10 each.
 
-M5 (LUFS + phase metering) is built and verified live on both shells, pending a
-desktop check by the user: `loudness.rs` is BS.1770-4 (K-weighting derived per
+M5 (LUFS + phase metering) is done and user-confirmed on both shells:
+`loudness.rs` is BS.1770-4 (K-weighting derived per
 output rate, momentary/short-term/gated integrated, true peak by 4x
 oversampling) and `phase.rs` is the correlation meter plus the goniometer's
 points. Both join the spectrum inside `Meters`, off the one drain, and reset

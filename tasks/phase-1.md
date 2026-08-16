@@ -729,6 +729,11 @@ just changed, suspect the wasm bundle before the code.
   1kHz +0.69dB and 440Hz nothing -- and the true peak, which is unweighted, is
   unchanged at -23.0. The goniometer's points are all within 2px of the centre
   line, spanning 11px vertically, which is where a quiet mono tone belongs.
+- **Native UI, user-confirmed live** (2026-08-16): "passes all tests, M5 is
+  confirmed". That covers what the automated checks cannot -- React driving the
+  new `meters`/`goniometer` commands across the IPC boundary at two different
+  cadences, and meters judged against real music by eye rather than against
+  synthesised tones by assertion.
 - **No regressions**: `/gapless.html` and the native `gapless_smoke` still
   11/11, `/spectrum.html` and `spectrum_smoke` still 10/10 (-3.39dBFS in band
   28, unchanged).
