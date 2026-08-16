@@ -71,13 +71,25 @@ fn write_wav(path: &Path, seconds: u32) -> std::io::Result<()> {
 
 /// Where in the track the audio currently reaching the speakers came from,
 /// read off the ramp in the right channel: 0.0 at the start, 1.0 at the end.
+///
+/// The window is interleaved in the *output* layout (M3 moved channel
+/// adaptation ahead of the ring), so the stride is the device's channel count,
+/// not the file's two. Channel 1 carries the ramp on any device with a second
+/// channel; a mono device gets the tone instead, which averages to nothing --
+/// `main` says so rather than letting the checks fail mysteriously.
 fn played_position_fraction(playback: &Playback) -> f64 {
-    let window = playback.scope_window(4096);
-    let right: Vec<f32> = window.iter().skip(1).step_by(2).copied().collect();
-    if right.is_empty() {
+    let stride = playback.output_channels().max(1) as usize;
+    let window = playback.scope_window(4096 * stride);
+    let ramp: Vec<f32> = window
+        .iter()
+        .skip(1.min(stride - 1))
+        .step_by(stride)
+        .copied()
+        .collect();
+    if ramp.is_empty() {
         return f64::NAN;
     }
-    right.iter().map(|&s| s as f64).sum::<f64>() / right.len() as f64
+    ramp.iter().map(|&s| s as f64).sum::<f64>() / ramp.len() as f64
 }
 
 fn main() {
@@ -114,6 +126,13 @@ fn main() {
         playback.output_channels(),
         playback.output_sample_rate()
     );
+    if playback.output_channels() < 2 {
+        println!(
+            "note:    this device is mono, so the right-channel ramp never reaches the\n\
+             \x20        scope and every position check below is meaningless. Pick a stereo\n\
+             \x20        output device and rerun."
+        );
+    }
 
     check(
         "duration comes from the container",

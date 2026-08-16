@@ -17,9 +17,11 @@ crates/
                      from a decoder thread into an rtrb lock-free SPSC ring
                      (~2s) that the cpal callback consumes, so the callback
                      takes no lock and memory is bounded by the ring rather
-                     than by the track. resample.rs's StreamingResampler sits
-                     between the two; scope.rs keeps a small ring of what was
-                     actually played, for the scope to draw.
+                     than by the track. resample.rs's StreamingResampler and
+                     the channel adaptation sit between the two, so the ring
+                     holds audio already in the device's shape; scope.rs keeps
+                     a small ring of what was actually played, for the scope
+                     to draw.
 
                      A seek is a real container seek, which means discarding
                      the audio already queued. That takes a three-counter
@@ -304,6 +306,16 @@ at the correct rate, re-verified with the same probe.
   at the new size. What's still missing is any *layout* response -- the
   scope is drawn in normalised device coordinates, so it stretches with the
   window rather than holding a square aspect.
+- **The scope pairs the first two channels and calls them X and Y**
+  (`player-render`'s `draw_frame` takes `chunks_exact(2)` of whatever it is
+  given). Since M3 the samples it gets are in the *output* layout -- device
+  rate, device channel count -- which is a real improvement over the source
+  layout, because the output shape is fixed for the session while the source
+  shape changes with every track in a queue. Two loose ends remain: a mono
+  output device makes consecutive samples of one channel into XY pairs,
+  which draws a diagonal smear rather than an error, and a device with more
+  than two channels contributes only channels 0 and 1. Neither is worth
+  fixing before the vectorscope work replaces this renderer.
 - **No WebGL2 fallback on the web build.** `player-render` on wasm32 only
   targets wgpu's WebGPU backend; a browser/GPU without WebGPU gets a clear
   error (`webScope.ts` checks `navigator.gpu` up front) rather than a

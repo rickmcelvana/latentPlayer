@@ -5,9 +5,16 @@
 //! # Shape (Phase 1 M2)
 //!
 //! ```text
-//!   decoder thread                    ring (rtrb)              cpal callback
-//!   StreamingDecoder -> resampler -> [ ~2s of audio ] -> output + ScopeRing
+//!   decoder thread                                ring (rtrb)   cpal callback
+//!   StreamingDecoder -> resampler -> channels -> [ ~2s ] -> output + ScopeRing
 //! ```
+//!
+//! Everything left of the ring is the decoder thread's, and it hands over
+//! audio already in the device's shape -- output rate, output channel count.
+//! M2 left the channel adaptation in the callback; M3 moved it here so that
+//! the ring's frame width is a property of the device rather than of the
+//! track, which is what lets a queue hand from a mono file to a stereo one
+//! without re-interleaving the samples already queued behind the seam.
 //!
 //! Phase 0 and M1 had no producer at all: the entire track was decoded into a
 //! `Vec<f32>` up front and the callback walked a cursor over it under a
@@ -175,8 +182,9 @@ impl Playback {
         let resampler =
             StreamingResampler::new(src_channels, decoder.sample_rate(), config.sample_rate)?;
 
+        // Sized in *output* frames, since that is what the ring now carries.
         let ring_samples =
-            (config.sample_rate as f64 * RING_SECONDS) as usize * src_channels as usize;
+            (config.sample_rate as f64 * RING_SECONDS) as usize * config.channels.max(1) as usize;
         let (producer, consumer) = rtrb::RingBuffer::<f32>::new(ring_samples);
 
         let shared = Arc::new(Shared {
@@ -195,31 +203,36 @@ impl Playback {
         });
 
         let prime_target = (ring_samples as f64 * PREBUFFER_FRACTION) as usize;
+        let out_channels = config.channels.max(1);
         let decoder_thread = {
             let shared = Arc::clone(&shared);
             std::thread::Builder::new()
                 .name("player-decode".to_string())
-                .spawn(move || decoder_loop(decoder, resampler, producer, shared, prime_target))
+                .spawn(move || {
+                    decoder_loop(
+                        decoder,
+                        resampler,
+                        producer,
+                        shared,
+                        Shape {
+                            src_channels,
+                            out_channels,
+                        },
+                        prime_target,
+                    )
+                })
                 .map_err(|e| PlayerError::OutputStream(format!("decoder thread: {e}")))?
         };
 
         let stream = match sample_format {
-            SampleFormat::F32 => build_stream::<f32>(
-                &device,
-                &config,
-                Arc::clone(&shared),
-                consumer,
-                src_channels,
-                |s| s,
-            ),
-            SampleFormat::I16 => build_stream::<i16>(
-                &device,
-                &config,
-                Arc::clone(&shared),
-                consumer,
-                src_channels,
-                |s| (s.clamp(-1.0, 1.0) * i16::MAX as f32) as i16,
-            ),
+            SampleFormat::F32 => {
+                build_stream::<f32>(&device, &config, Arc::clone(&shared), consumer, |s| s)
+            }
+            SampleFormat::I16 => {
+                build_stream::<i16>(&device, &config, Arc::clone(&shared), consumer, |s| {
+                    (s.clamp(-1.0, 1.0) * i16::MAX as f32) as i16
+                })
+            }
             other => return Err(PlayerError::UnsupportedOutputFormat(format!("{other:?}"))),
         }?;
         stream
@@ -332,8 +345,9 @@ impl Playback {
         self.sample_rate
     }
 
-    /// Source channels of the track being played, which is what
-    /// `scope_window` returns interleaved.
+    /// Channels the track itself has, before adaptation to the device. For
+    /// display only -- `scope_window` is in the *output* layout, so use
+    /// `output_channels` to de-interleave it.
     pub fn source_channels(&self) -> u16 {
         self.src_channels
     }
@@ -359,7 +373,41 @@ impl Drop for Playback {
     }
 }
 
-/// Decode -> resample -> ring, until the track ends or `Playback` is dropped.
+/// How wide a frame is either side of the channel adaptation.
+struct Shape {
+    src_channels: u16,
+    out_channels: u16,
+}
+
+/// Rewrites `src_channels`-interleaved frames as `out_channels`-interleaved
+/// ones, appending to `dst`.
+///
+/// Source channels are reused cyclically: mono to stereo duplicates the one
+/// channel, and a surround track on a stereo device keeps its first pair.
+/// Crude, and deliberately so -- a real downmix has coefficients and a
+/// channel map behind it, which is its own job and not one the queue needs.
+///
+/// Any trailing partial frame is dropped. The resampler emits whole frames,
+/// so in practice there is never one.
+fn adapt_channels(src: &[f32], shape: &Shape, dst: &mut Vec<f32>) {
+    let src_channels = shape.src_channels.max(1) as usize;
+    let out_channels = shape.out_channels.max(1) as usize;
+    if src_channels == out_channels {
+        dst.extend_from_slice(src);
+        return;
+    }
+    let frames = src.len() / src_channels;
+    dst.reserve(frames * out_channels);
+    for frame in 0..frames {
+        let base = frame * src_channels;
+        for ch in 0..out_channels {
+            dst.push(src[base + ch % src_channels]);
+        }
+    }
+}
+
+/// Decode -> resample -> channel adaptation -> ring, until the track ends or
+/// `Playback` is dropped.
 ///
 /// Runs on its own thread and owns the only handles to the decoder and the
 /// producer end of the ring, so nothing here needs a lock.
@@ -368,10 +416,13 @@ fn decoder_loop(
     mut resampler: StreamingResampler,
     mut producer: rtrb::Producer<f32>,
     shared: Arc<Shared>,
+    shape: Shape,
     prime_target: usize,
 ) {
     let mut seq = 0u64;
-    // Resampled output waiting for room in the ring.
+    // Resampler output, still in the source's channel layout.
+    let mut resampled: Vec<f32> = Vec::new();
+    // Output-shaped audio waiting for room in the ring.
     let mut carry: Vec<f32> = Vec::new();
     let mut carry_pos = 0usize;
     let mut source_done = false;
@@ -437,15 +488,16 @@ fn decoder_loop(
         if carry_pos >= carry.len() {
             carry.clear();
             carry_pos = 0;
+            resampled.clear();
             match decoder.next_block() {
                 Ok(Some(block)) => {
-                    if let Err(e) = resampler.process(block, &mut carry) {
+                    if let Err(e) = resampler.process(block, &mut resampled) {
                         eprintln!("resample failed: {e}");
                         source_done = true;
                     }
                 }
                 Ok(None) => {
-                    if let Err(e) = resampler.finish(&mut carry) {
+                    if let Err(e) = resampler.finish(&mut resampled) {
                         eprintln!("resampler flush failed: {e}");
                     }
                     source_done = true;
@@ -455,6 +507,7 @@ fn decoder_loop(
                     source_done = true;
                 }
             }
+            adapt_channels(&resampled, &shape, &mut carry);
         }
 
         if carry_pos < carry.len() {
@@ -519,14 +572,12 @@ fn build_stream<T>(
     config: &StreamConfig,
     shared: Arc<Shared>,
     mut consumer: rtrb::Consumer<f32>,
-    src_channels: u16,
     convert: fn(f32) -> T,
 ) -> Result<cpal::Stream, PlayerError>
 where
     T: cpal::SizedSample + Send + 'static,
 {
-    let out_channels = config.channels as usize;
-    let src_channels = src_channels.max(1) as usize;
+    let out_channels = config.channels.max(1) as usize;
     let sample_rate = config.sample_rate as f64;
 
     device
@@ -571,44 +622,36 @@ where
                 }
 
                 let volume = shared.volume();
-                let wanted = (data.len() / out_channels) * src_channels;
                 let available = consumer.slots();
-                // Whole source frames only -- a partial frame at the end of
-                // the ring would misalign every channel after it.
-                let usable = wanted.min(available - available % src_channels);
-                let mut played_frames = 0;
+                // The ring is already in the device's shape, so this is a copy
+                // and a gain -- whole output frames only, since a partial frame
+                // at the end would misalign every channel after it.
+                let usable = data.len().min(available - available % out_channels);
+                let mut filled = 0;
 
                 if usable > 0 {
                     if let Ok(chunk) = consumer.read_chunk(usable) {
                         let (first, second) = chunk.as_slices();
-                        let frames = usable / src_channels;
-                        for (i, out_frame) in data.chunks_mut(out_channels).take(frames).enumerate()
+                        let split = first.len().min(usable);
+                        for (out, sample) in data.iter_mut().zip(&first[..split]) {
+                            *out = convert(sample * volume);
+                        }
+                        for (out, sample) in data[split..usable]
+                            .iter_mut()
+                            .zip(&second[..usable - split])
                         {
-                            let base = i * src_channels;
-                            for (ch, out) in out_frame.iter_mut().enumerate() {
-                                // Simple channel adaptation: reuse source
-                                // channels cyclically (mono -> N duplicates the
-                                // one channel; anything fancier is later work).
-                                let idx = base + (ch % src_channels);
-                                let sample = if idx < first.len() {
-                                    first[idx]
-                                } else {
-                                    second[idx - first.len()]
-                                };
-                                *out = convert(sample * volume);
-                            }
+                            *out = convert(sample * volume);
                         }
 
-                        // The scope shows what was played, in the source's own
-                        // channel layout, so a stereo track gives it real L/R
-                        // pairs rather than the device's channel count.
-                        let split = first.len().min(usable);
+                        // The scope shows what was played, which since M3 means
+                        // the output's channel layout rather than the source's.
+                        // It is the layout that stays put across a queue.
                         shared.scope.push(&first[..split]);
                         if usable > split {
                             shared.scope.push(&second[..usable - split]);
                         }
 
-                        played_frames = frames;
+                        filled = usable;
                         chunk.commit(usable);
                     }
                 }
@@ -616,18 +659,18 @@ where
                 // Whatever wasn't filled: end of track, or the decoder falling
                 // behind. Silence either way, and the position doesn't move --
                 // an underrun is a stall, not playback.
-                for out_frame in data.chunks_mut(out_channels).skip(played_frames) {
-                    out_frame.fill(convert(0.0));
+                for out in data.iter_mut().skip(filled) {
+                    *out = convert(0.0);
                 }
-                if played_frames > 0 {
+                if filled > 0 {
                     shared
                         .position_frames
-                        .fetch_add(played_frames as u64, Ordering::Relaxed);
+                        .fetch_add((filled / out_channels) as u64, Ordering::Relaxed);
                 }
 
                 // Finished only when the decoder is done *and* nothing is left
                 // to play. Either alone is an ordinary mid-track state.
-                if shared.eos.load(Ordering::Acquire) && consumer.slots() < src_channels {
+                if shared.eos.load(Ordering::Acquire) && consumer.slots() < out_channels {
                     shared.finished.store(true, Ordering::Relaxed);
                 }
             },
@@ -643,5 +686,67 @@ where
 {
     for sample in data.iter_mut() {
         *sample = convert(0.0);
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn adapt(src: &[f32], src_channels: u16, out_channels: u16) -> Vec<f32> {
+        let mut dst = Vec::new();
+        adapt_channels(
+            src,
+            &Shape {
+                src_channels,
+                out_channels,
+            },
+            &mut dst,
+        );
+        dst
+    }
+
+    #[test]
+    fn matching_layouts_pass_through_untouched() {
+        let src = [1.0, 2.0, 3.0, 4.0];
+        assert_eq!(adapt(&src, 2, 2), src);
+    }
+
+    #[test]
+    fn mono_is_duplicated_across_the_outputs() {
+        assert_eq!(adapt(&[1.0, 2.0], 1, 2), [1.0, 1.0, 2.0, 2.0]);
+    }
+
+    #[test]
+    fn extra_source_channels_are_dropped() {
+        // 5.1-ish frame down to a stereo device: the first pair survives.
+        let src = [1.0, 2.0, 3.0, 4.0, 5.0, 6.0];
+        assert_eq!(adapt(&src, 6, 2), [1.0, 2.0]);
+    }
+
+    #[test]
+    fn stereo_up_to_more_outputs_cycles_the_pair() {
+        assert_eq!(adapt(&[1.0, 2.0], 2, 4), [1.0, 2.0, 1.0, 2.0]);
+    }
+
+    #[test]
+    fn a_trailing_partial_frame_is_dropped_rather_than_misaligned() {
+        // Half a frame at the end would shift every channel after it, so it
+        // goes. The resampler emits whole frames, so this is belt and braces.
+        assert_eq!(adapt(&[1.0, 2.0, 3.0], 2, 1), [1.0]);
+    }
+
+    #[test]
+    fn appending_twice_keeps_the_frames_in_order() {
+        // The decoder thread reuses one buffer across blocks, so adaptation
+        // has to append rather than replace.
+        let mut dst = Vec::new();
+        let shape = Shape {
+            src_channels: 1,
+            out_channels: 2,
+        };
+        adapt_channels(&[1.0], &shape, &mut dst);
+        adapt_channels(&[2.0], &shape, &mut dst);
+        assert_eq!(dst, [1.0, 1.0, 2.0, 2.0]);
     }
 }
