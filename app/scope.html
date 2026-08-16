@@ -1,0 +1,31 @@
+<!doctype html>
+<!--
+  Dev-only harness for the web build's 3D vectorscope (Phase 1 M6). Served at
+  /scope.html by `npm run dev`; deliberately not in vite's build inputs, so it
+  never ships. The native equivalent is
+  `cargo run -p player-render --example scope_smoke`, running the same checks
+  against the same claims -- there against an offscreen texture, here against a
+  real canvas through the browser's own WebGPU.
+
+  No audio and no transport: the renderer is handed synthesised samples
+  directly, so what is being checked is the pipeline rather than the player.
+-->
+<html lang="en">
+  <head>
+    <meta charset="UTF-8" />
+    <title>scope smoke</title>
+    <style>
+      body { background: #14161a; color: #dfe3ea; font: 13px/1.6 ui-monospace, monospace; padding: 24px; }
+      button { font: inherit; padding: 6px 14px; }
+      pre { white-space: pre-wrap; }
+      canvas { border: 1px solid #2a2e36; margin-top: 12px; }
+    </style>
+  </head>
+  <body>
+    <p>Draws known audio through the real renderer and reads the canvas back.</p>
+    <button id="run">Run</button>
+    <pre id="out"></pre>
+    <canvas id="scope" width="320" height="320"></canvas>
+    <script type="module" src="/src/scopeSmoke.ts"></script>
+  </body>
+</html>

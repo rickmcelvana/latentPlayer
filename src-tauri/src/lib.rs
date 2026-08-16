@@ -11,10 +11,15 @@ use std::time::Duration;
 use player_core::{LocalFile, Playback};
 use tauri::Manager;
 
-/// How many interleaved samples the scope reads per frame. Arbitrary for
-/// Phase 0 -- a real vectorscope will tune this against sample rate/refresh
-/// rate deliberately (Phase 4).
-const SCOPE_WINDOW_SAMPLES: usize = 2048;
+/// The scope window's label, and the sizes the UI offers.
+///
+/// Since M6 the window is resizable and the UI owns its geometry: what was a
+/// constant in this file is now `set_scope_size`, so "make the visualiser
+/// bigger" is a thing the user can do rather than a rebuild (M6 decision 4).
+const SCOPE_LABEL: &str = "scope";
+
+/// What the scope window opens at.
+const SCOPE_DEFAULT_SIZE: f64 = 480.0;
 
 type SharedPlayback = Arc<Mutex<Option<Playback>>>;
 
@@ -171,6 +176,66 @@ fn clear_next(state: tauri::State<SharedPlayback>) {
     }
 }
 
+/// The scope window's geometry, as the UI sees it.
+#[derive(serde::Serialize)]
+#[serde(rename_all = "camelCase")]
+struct ScopeState {
+    width: u32,
+    height: u32,
+    visible: bool,
+}
+
+#[tauri::command]
+fn scope_state(app: tauri::AppHandle) -> ScopeState {
+    let window = app.get_window(SCOPE_LABEL);
+    let size = window
+        .as_ref()
+        .and_then(|w| w.inner_size().ok())
+        .unwrap_or(tauri::PhysicalSize {
+            width: SCOPE_DEFAULT_SIZE as u32,
+            height: SCOPE_DEFAULT_SIZE as u32,
+        });
+    ScopeState {
+        width: size.width,
+        height: size.height,
+        // A window that failed to report is treated as hidden rather than
+        // shown: the toggle then offers to bring it back, which is the useful
+        // direction to be wrong in.
+        visible: window.and_then(|w| w.is_visible().ok()).unwrap_or(false),
+    }
+}
+
+/// Resizes the scope window. The renderer notices on its own -- its redraw
+/// loop polls the window's size (see `setup` below) -- so this only has to
+/// move the window.
+#[tauri::command]
+fn set_scope_size(width: u32, height: u32, app: tauri::AppHandle) -> Result<(), String> {
+    let window = app
+        .get_window(SCOPE_LABEL)
+        .ok_or_else(|| "the scope window is not open".to_string())?;
+    window
+        .set_size(tauri::Size::Physical(tauri::PhysicalSize {
+            width: width.max(160),
+            height: height.max(160),
+        }))
+        .map_err(|e| e.to_string())
+}
+
+/// Shows or hides the scope window. Hiding rather than closing it: the
+/// renderer holds the surface built from this window's handle, and closing it
+/// would leave a renderer drawing into nothing.
+#[tauri::command]
+fn set_scope_visible(visible: bool, app: tauri::AppHandle) -> Result<(), String> {
+    let window = app
+        .get_window(SCOPE_LABEL)
+        .ok_or_else(|| "the scope window is not open".to_string())?;
+    if visible {
+        window.show().map_err(|e| e.to_string())
+    } else {
+        window.hide().map_err(|e| e.to_string())
+    }
+}
+
 #[tauri::command]
 fn transport(state: tauri::State<SharedPlayback>) -> TransportState {
     state
@@ -227,7 +292,10 @@ pub fn run() {
             spectrum,
             spectrum_bands,
             meters,
-            goniometer
+            goniometer,
+            scope_state,
+            set_scope_size,
+            set_scope_visible
         ])
         .setup(|app| {
             if cfg!(debug_assertions) {
@@ -244,10 +312,15 @@ pub fn run() {
             // unconditionally keeps this portable rather than only
             // "working by luck" on Linux/Windows. Only the redraw loop
             // below moves to a background thread.
-            let scope_window = tauri::window::WindowBuilder::new(app, "scope")
+            let scope_window = tauri::window::WindowBuilder::new(app, SCOPE_LABEL)
                 .title("latentPlayer -- scope")
-                .inner_size(480.0, 480.0)
-                .resizable(false)
+                .inner_size(SCOPE_DEFAULT_SIZE, SCOPE_DEFAULT_SIZE)
+                // Resizable since M6: the UI sets the size through
+                // `set_scope_size`, and dragging the window's own edge has to
+                // work for the same reason. Phase 0 pinned this shut because
+                // the renderer couldn't survive a resize; it can now, and the
+                // size-poll below is what tells it.
+                .resizable(true)
                 .build()?;
             let size = scope_window.inner_size()?;
 
@@ -285,14 +358,23 @@ pub fn run() {
                         }
                     }
 
-                    let samples = {
+                    // How much history to draw is a duration, not a sample
+                    // count (M6 decision 1), so it depends on the rate the
+                    // device opened at -- which is why this asks the engine
+                    // rather than using a constant.
+                    let (samples, channels) = {
                         let guard = shared.lock().unwrap();
-                        guard
-                            .as_ref()
-                            .map(|p| p.scope_window(SCOPE_WINDOW_SAMPLES))
-                            .unwrap_or_default()
+                        match guard.as_ref() {
+                            Some(p) => {
+                                let channels = p.output_channels();
+                                let wanted =
+                                    player_render::window_samples(p.output_sample_rate(), channels);
+                                (p.scope_window(wanted), channels)
+                            }
+                            None => (Vec::new(), 2),
+                        }
                     };
-                    if let Err(e) = renderer.draw_frame(&samples) {
+                    if let Err(e) = renderer.draw_frame(&samples, channels) {
                         log::warn!("scope draw_frame error: {e}");
                     }
                     std::thread::sleep(Duration::from_millis(16));

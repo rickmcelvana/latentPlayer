@@ -3,10 +3,8 @@
 // from playerEngine.ts each frame -- same shape as the native path
 // (src-tauri's redraw thread reading player-core::Playback::scope_window),
 // just driven by rAF instead of a background OS thread.
-import init, { WasmRenderer } from "./wasm/player_rt_wasm.js";
-import { scopeWindow } from "./playerEngine";
-
-const SCOPE_WINDOW_SAMPLES = 2048;
+import init, { WasmRenderer, scopeWindowSamples } from "./wasm/player_rt_wasm.js";
+import { outputChannels, outputSampleRate, scopeWindow } from "./playerEngine";
 
 let renderer: WasmRenderer | null = null;
 let rafHandle: number | null = null;
@@ -15,7 +13,12 @@ let wasmReady: Promise<unknown> | null = null;
 function drawLoop(): void {
   if (!renderer) return;
   try {
-    renderer.draw_frame(scopeWindow(SCOPE_WINDOW_SAMPLES));
+    // A duration of history, not a sample count -- asked of the same Rust the
+    // native redraw thread asks, so the two shells extrude the same 120ms
+    // (M6 decision 1).
+    const channels = outputChannels();
+    const wanted = scopeWindowSamples(outputSampleRate(), channels);
+    renderer.draw_frame(scopeWindow(wanted), channels);
   } catch (e) {
     // Found live (2026-08-15): a single thrown frame (e.g. a transient
     // Outdated/Occluded surface -- see Renderer::draw_frame's own comment)

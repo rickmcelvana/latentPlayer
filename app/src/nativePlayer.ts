@@ -109,3 +109,28 @@ export async function meters(): Promise<MeterSnapshot> {
 export async function goniometer(): Promise<Float32Array> {
   return new Float32Array(await invoke<number[]>("goniometer"));
 }
+
+/// Geometry of the scope's own window. Mirrors `ScopeState` in
+/// src-tauri/src/lib.rs; see scope.ts for why this is an adapter rather than
+/// something components call directly.
+export interface ScopeState {
+  width: number;
+  height: number;
+  visible: boolean;
+}
+
+export async function scopeState(): Promise<ScopeState> {
+  return invoke<ScopeState>("scope_state");
+}
+
+/// Resizes the scope window. The renderer picks the new size up from its own
+/// size poll, so nothing here has to tell it.
+export async function setScopeSize(width: number, height: number): Promise<void> {
+  return invoke("set_scope_size", { width, height });
+}
+
+/// Shows or hides the scope window (hidden, not closed -- the renderer's
+/// surface is built from its handle).
+export async function setScopeVisible(visible: boolean): Promise<void> {
+  return invoke("set_scope_visible", { visible });
+}

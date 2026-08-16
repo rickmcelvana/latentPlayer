@@ -294,9 +294,24 @@ impl WasmRenderer {
         self.inner.resize(width, height);
     }
 
-    pub fn draw_frame(&mut self, samples: &[f32]) -> Result<(), JsValue> {
+    /// `channels` is the interleaving width of `samples` -- the output's, since
+    /// that is what the tap holds. Passing it rather than assuming stereo is
+    /// M6's fix for a device that isn't.
+    pub fn draw_frame(&mut self, samples: &[f32], channels: u16) -> Result<(), JsValue> {
         self.inner
-            .draw_frame(samples)
+            .draw_frame(samples, channels)
             .map_err(|e| JsValue::from_str(&e.to_string()))
     }
+}
+
+/// How many interleaved samples one frame of the scope should be drawn from.
+///
+/// A fixed *duration* of history rather than a fixed sample count, so the
+/// extrusion means the same thing at every output rate (M6 decision 1). Exposed
+/// as a free function because the web's draw loop lives in TypeScript and has
+/// to ask the same question `src-tauri`'s redraw thread does -- of the same
+/// code, so the two shells cannot answer it differently.
+#[wasm_bindgen(js_name = scopeWindowSamples)]
+pub fn scope_window_samples(sample_rate: u32, channels: u16) -> usize {
+    player_render::window_samples(sample_rate, channels)
 }

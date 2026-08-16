@@ -16,7 +16,9 @@ import {
 } from "./playlist";
 import { Goniometer } from "./Goniometer";
 import { Loudness } from "./Loudness";
+import { ScopeControls } from "./ScopeControls";
 import { Spectrum } from "./Spectrum";
+import { DEFAULT_SCOPE_SIZE, attachWebCanvas } from "./scope";
 import { startScope } from "./webScope";
 
 const EMPTY: TransportState = {
@@ -75,6 +77,10 @@ function App() {
   useEffect(() => {
     if (tauri || !canvasRef.current || scopeStarted.current) return;
     scopeStarted.current = true;
+    // Handed to the scope adapter as well as to the renderer: the size
+    // controls resize this canvas, and scope.ts is what owns that on the web
+    // side without reaching into the DOM itself.
+    attachWebCanvas(canvasRef.current);
     startScope(canvasRef.current).catch((e) => setError(String(e)));
   }, [tauri]);
 
@@ -305,12 +311,19 @@ function App() {
 
         {error && <p className="error">{error}</p>}
 
+        <ScopeControls />
+
         {tauri ? (
           <p className="hint">
-            The live 2D scope is in the second window this app opened alongside this one.
+            The 3D vectorscope is in the second window this app opened alongside this one.
           </p>
         ) : (
-          <canvas ref={canvasRef} width={480} height={480} className="scope" />
+          <canvas
+            ref={canvasRef}
+            width={DEFAULT_SCOPE_SIZE}
+            height={DEFAULT_SCOPE_SIZE}
+            className="scope"
+          />
         )}
       </div>
     </main>

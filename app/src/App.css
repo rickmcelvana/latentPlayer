@@ -311,8 +311,37 @@ input[type="range"] {
   }
 }
 
+.scope-controls {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  margin-top: 12px;
+  font-size: 11px;
+
+  .label {
+    text-transform: uppercase;
+    letter-spacing: 0.04em;
+    opacity: 0.7;
+    margin-right: 2px;
+  }
+
+  button {
+    font-size: 12px;
+    padding: 4px 10px;
+    border-radius: 5px;
+  }
+
+  /* The size currently in effect, which the scope window may also have been
+     dragged to. */
+  button.size.current {
+    border-color: var(--accent);
+  }
+}
+
 .scope {
   border-radius: 8px;
   border: 1px solid var(--border);
   margin-top: 12px;
+  max-width: 100%;
+  height: auto;
 }

@@ -11,3 +11,8 @@ edition.workspace = true
 wgpu = "30"
 bytemuck = { version = "1", features = ["derive"] }
 thiserror = "1"
+
+[dev-dependencies]
+# Only the offscreen smoke check needs to block on the async device request --
+# the library itself stays async precisely so the web build never has to.
+pollster = "0.4"
