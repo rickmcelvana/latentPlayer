@@ -742,3 +742,44 @@ just changed, suspect the wasm bundle before the code.
   independence across 44.1/48/96kHz, gating a silent passage out of an
   integrated number, the inter-sample peak, correlation at +1/0/-1, and the
   goniometer's rotation.
+
+## M6 -- 3D vectorscope v1: in progress
+
+PLAN.md §4's hero feature: extrude the XY scope along a time axis, and grow
+`player-render` from Phase 0's flat line strip into a real 3D pipeline.
+Decisions first, then what building it turned up.
+
+### Decisions (2026-08-16)
+
+1. **The extrusion shows a fixed duration, not a fixed sample count.** 120ms
+   of history, decimated to a fixed 2048 points. The depth axis *is* time, so
+   a fixed sample count would show half as much music at 96kHz as at 48kHz --
+   the same track would look different on different hardware, which is exactly
+   the class of bug M4's band edges and M5's K-weighting table both were. A
+   fixed point count on top of it keeps the vertex buffer and the draw call the
+   same size whatever the device runs at. 120ms is roughly an eighth note at
+   120bpm: long enough that the ribbon has shape, short enough that it still
+   moves with the music rather than smearing into a tangle.
+2. **The axes are the goniometer's.** x is the side signal `(L-R)/sqrt(2)`, y
+   the mid `(L+R)/sqrt(2)` -- the same orthonormal rotation M5's goniometer
+   draws -- and z is age. So the two displays agree about what mono looks like
+   (vertical in both) and the 3D one is honestly the 2D one with time added,
+   rather than a second opinion about the same audio.
+3. **The renderer owns the camera, the depth buffer and the multisampling;
+   callers still only hand over samples.** `draw_frame(samples, channels)` is
+   the whole interface, with `channels` new because the tap is in the output's
+   layout and that need not be stereo. Both shells keep calling the one method,
+   which is what has kept them from drifting since Phase 0.
+4. **The native scope stays its own window, but the UI owns its geometry.** A
+   wgpu surface cannot composite into a webview, so the second window is not a
+   limitation to design away -- it is the only way the same renderer runs
+   natively at all. What *was* wrong is that its size was a constant in Rust:
+   the window is now resizable and the UI sets its size and visibility through
+   commands, with the web canvas taking the identical control, so scope sizing
+   is one component on both shells.
+5. **The pipeline is verified by rendering offscreen and reading back pixels.**
+   `Renderer::offscreen` runs the same scene into a texture rather than a
+   surface, so a smoke example can assert where the figure actually landed --
+   a mono tone must draw a vertical ribbon, an inverted pair a horizontal one,
+   and the far end of the extrusion must be dimmer than the near end. Checking
+   a renderer by looking at it is how a wrong camera matrix ships.
