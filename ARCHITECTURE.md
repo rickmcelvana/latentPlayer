@@ -57,9 +57,17 @@ crates/
                      changes with the music rather than a ring early.
   player-render/    wgpu render engine. Takes any wgpu::SurfaceTarget
                      (native window handle or web canvas) -- knows nothing
-                     about Tauri or the browser. Currently a 2D XY
-                     oscilloscope; the literal precursor to the 3D
-                     vectorscope (PLAN.md §4).
+                     about Tauri or the browser. Since M6 it is PLAN.md §4's
+                     3D vectorscope: trace.rs turns a window of played audio
+                     into points (x side, y mid -- the goniometer's axes --
+                     and z their age), camera.rs is the perspective/look-at
+                     math with wgpu's clip-space conventions pinned by tests,
+                     and scene.rs owns the pipeline, depth buffer and 4x MSAA.
+                     How much history it shows is a fixed *duration*
+                     (window_samples), so the figure means the same thing at
+                     any output rate. OffscreenRenderer renders that same
+                     scene into a texture, which is how the pipeline is
+                     checked (examples/scope_smoke.rs) rather than eyeballed.
   player-rt-wasm/   wasm-bindgen glue for player-core's decoder and
                      player-render's Renderer (wraps both -- neither of
                      those two crates knows wasm-bindgen exists). wasm-only;
@@ -113,19 +121,22 @@ app/                 React + TS + Vite. Same component tree renders in the
                      session; the worker resamples every track to it. Web
                      volume rides a GainNode, since Web Audio smooths it and
                      the worklet would zipper.
-                     playlist.ts and analysis.ts are the two adapter modules
-                     components actually call: playlist.ts picks the shell for
-                     playback, analysis.ts for metering. Spectrum.tsx,
+                     playlist.ts, analysis.ts and scope.ts are the three
+                     adapter modules components actually call: playlist.ts
+                     picks the shell for playback, analysis.ts for metering,
+                     scope.ts for the scope's size and visibility (a separate
+                     OS window natively, a canvas on the web -- one component,
+                     ScopeControls, drives both). Spectrum.tsx,
                      Loudness.tsx and Goniometer.tsx draw the dBFS, LUFS and
                      mid/side pairs their adapter hands them and compute
                      nothing -- including the goniometer's 45-degree rotation,
                      which is two lines of arithmetic and still lives in Rust
                      so the two shells cannot draw different figures.
-                     gapless.html, spectrum.html and loudness.html (with their
-                     *Smoke.ts) are dev-only harnesses -- served at those
-                     paths, never bundled -- running the same checks as the
-                     native gapless_smoke, spectrum_smoke and loudness_smoke
-                     examples.
+                     gapless.html, spectrum.html, loudness.html and scope.html
+                     (with their *Smoke.ts) are dev-only harnesses -- served at
+                     those paths, never bundled -- running the same checks as
+                     the native gapless_smoke, spectrum_smoke, loudness_smoke
+                     and scope_smoke examples.
                      webScope.ts drives the web build's scope canvas
                      (WasmRenderer, via rAF) -- the web-side counterpart of
                      src-tauri's native redraw thread.

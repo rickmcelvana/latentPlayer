@@ -743,7 +743,7 @@ just changed, suspect the wasm bundle before the code.
   integrated number, the inter-sample peak, correlation at +1/0/-1, and the
   goniometer's rotation.
 
-## M6 -- 3D vectorscope v1: in progress
+## M6 -- 3D vectorscope v1: done
 
 PLAN.md §4's hero feature: extrude the XY scope along a time axis, and grow
 `player-render` from Phase 0's flat line strip into a real 3D pipeline.
@@ -783,3 +783,75 @@ Decisions first, then what building it turned up.
    a mono tone must draw a vertical ribbon, an inverted pair a horizontal one,
    and the far end of the extrusion must be dimmer than the near end. Checking
    a renderer by looking at it is how a wrong camera matrix ships.
+
+### What it is
+
+**A real 3D pipeline, in the crate that already ran on both shells.**
+`camera.rs` is the matrix arithmetic (hand-written, because one perspective and
+one look-at have exact answers a test can state, and wgpu's 0..1 clip-space
+depth convention is the part that actually catches people out -- there is a
+test that says so). `scene.rs` owns the pipeline, the uniform the camera rides
+in, the depth buffer and 4x multisampling; `trace.rs` turns a window of played
+audio into points. `lib.rs`'s `Renderer` is still "hand over samples, get a
+frame", which is what has kept the two shells from drifting since Phase 0.
+
+**The extrusion.** Each decimated frame of audio becomes a point: x is the side
+signal, y the mid, z its age. The shader places the newest sample nearest the
+viewer and fades the ribbon from phosphor green to the brand's violet as it
+recedes, which is what makes depth readable on a still frame rather than a
+tangle of overlapping lines.
+
+**One duration, asked once.** `window_samples(rate, channels)` is the only
+place the 120ms becomes a sample count. `src-tauri`'s redraw thread calls it
+directly; the web's draw loop calls it through `scopeWindowSamples` in the wasm
+glue. Neither shell owns a constant of its own, so neither can drift.
+
+**The scope's geometry moved to the UI.** The native window is resizable, and
+`scope_state`/`set_scope_size`/`set_scope_visible` let React set it; on the web
+the same `ScopeControls` component resizes the canvas and tells the renderer.
+`scope.ts` is the third shell-choosing adapter, beside playlist.ts and
+analysis.ts.
+
+### What the checks caught
+
+**The camera was on the wrong side.** The first offscreen run reported the
+ribbon's bright, newest end on the *left* of the image and history running off
+to the right -- backwards from every other audio display there is. Nothing was
+broken; the camera simply sat at +x, where its right vector points along -z.
+Moving it to -x fixed it, and the comment on `EYE` now says why the side is not
+arbitrary. This is exactly the class of thing "it looks fine" would have
+shipped: the picture was perfectly plausible.
+
+**The background is not black.** The first version of the check called all
+102,400 pixels part of the trace. The pass clears to a linear (0.02, 0.02,
+0.03), which is roughly (40, 40, 48) once sRGB-encoded -- so a threshold picked
+for linear values matches everything. Worth writing down because the same trap
+sits in front of anyone reading pixels back from an sRGB target.
+
+### Verified
+
+- **Native**, `cargo run -p player-render --example scope_smoke` (new): **8/8**,
+  rendering the real scene into an offscreen texture and reading it back. A
+  mono tone draws a figure **196px tall and 74px wide**; an inverted pair
+  **213x61**, i.e. the same audio rotated onto the other axis; a tenth of the
+  amplitude draws 62px against 196px, so nothing is being normalised; the near
+  half of the ribbon means green 172 against the far half's 114; silence draws
+  **0 lit pixels**; and a 2:1 viewport leaves the figure 74px wide rather than
+  stretching it.
+- **Web**, `/scope.html` (new, the counterpart harness, same claims, same
+  synthesised audio, drawn through the browser's own WebGPU into a real canvas
+  and read back): **8/8**, with the figure at **195px tall and 66px wide**
+  against the native run's 196x74, in the same place on screen (x 141..207 and
+  y 83..278, against 133..207 and 82..278). The few pixels of difference are
+  line rasterisation and MSAA resolve between Dawn and the native backend --
+  the geometry, the axes and the fade agree.
+- **The UI controls**, driven in-browser: the size buttons take the canvas from
+  480 to 640 (CSS width follows), the current size is highlighted, and Hide
+  toggles to Show with no errors.
+- **No regressions**: `/loudness.html` still ALL PASS, and the 73 `player-core`
+  tests are joined by **16 in `player-render`** -- the camera's conventions
+  (what the camera looks at lands in the middle, +x is right, +y is up, near
+  sorts in front of far, depth runs 0..1, a wide viewport does not stretch) and
+  the trace's (a duration not a sample count, bounded point count, age falling
+  towards the newest sample, mono up the centre, inverted flat, and the
+  amplitudes matching the goniometer's).

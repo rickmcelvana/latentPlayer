@@ -52,7 +52,17 @@ oversampling) and `phase.rs` is the correlation meter plus the goniometer's
 points. Both join the spectrum inside `Meters`, off the one drain, and reset
 whenever a continuous listen breaks -- a seek, a lap, or a gapless hand-off.
 `cargo run -p player-core --example loudness_smoke` and `/loudness.html` report
-15/15 each, agreeing to the hundredth of a dB. M6 (3D vectorscope v1) is next.
+15/15 each, agreeing to the hundredth of a dB.
+
+M6 (3D vectorscope v1) is built and verified live on both shells, pending a
+desktop check by the user: `player-render` now has a real 3D pipeline
+(`camera.rs`, `scene.rs` with a depth buffer and 4x MSAA) and `trace.rs`
+extrudes the XY figure along a time axis -- a fixed 120ms of history, on the
+goniometer's own axes. The scope window is resizable and the UI owns its size
+and visibility (`scope.ts`/`ScopeControls.tsx`, driving a native window on one
+shell and the canvas on the other). `cargo run -p player-render --example
+scope_smoke` and `/scope.html` report 8/8 each, against pixels read back rather
+than eyeballed. M7 (library + tags + playlists) is next.
 
 `cargo run -p player-core --example seek_smoke -- <path>` checks that seeking a given file yields
 the same audio as playing through to that point — written for MP3, whose bit reservoir makes
