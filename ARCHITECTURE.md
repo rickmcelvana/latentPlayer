@@ -77,9 +77,15 @@ app/                 React + TS + Vite. Same component tree renders in the
                      which shell it's in. audioSab.ts holds the one definition
                      of the SharedArrayBuffer all three web parties use --
                      control block, playback ring, scope history -- including
-                     the seek handshake that mirrors the native one. Web
+                     the seek handshake that mirrors the native one, and the
+                     boundary records that carry gapless track changes along
+                     with the audio. One AudioContext rate serves the whole
+                     session; the worker resamples every track to it. Web
                      volume rides a GainNode, since Web Audio smooths it and
                      the worklet would zipper.
+                     gapless.html + gaplessSmoke.ts are a dev-only harness
+                     (served at /gapless.html, never bundled) running the
+                     same checks as the native gapless_smoke example.
                      webScope.ts drives the web build's scope canvas
                      (WasmRenderer, via rAF) -- the web-side counterpart of
                      src-tauri's native redraw thread.
@@ -327,18 +333,20 @@ at the correct rate, re-verified with the same probe.
   error (`webScope.ts` checks `navigator.gpu` up front) rather than a
   silent blank canvas, but there's still no fallback rendering path. Real
   WebGL2 support (`wgpu`'s `webgl` feature + backend selection) is Phase 1.
-- **Web AudioContext sample rate must match the decoded track exactly**
-  (`playerEngine.ts`'s `getAudioContext`) -- there's no resampling on the
-  web path at all; it sidesteps the problem by running the context at the
-  file's rate, where the native path instead resamples to the device's.
-  Found live (2026-08-15): the web build ran the AudioContext at
-  its default rate regardless of the file's real rate, so playback was
-  audibly pitched (high vocals) even though the native build, which uses
-  the file's real rate via cpal, sounded correct. Fixed by constructing the
-  `AudioContext` with `{ sampleRate: decoded.sampleRate }`. Loading a
-  second file at a different rate closes and recreates the context, since
-  Web Audio has no way to change an existing context's rate.
-  **User-confirmed fixed (2026-08-15, live retest): "sounds good now."**
+- ~~**Web AudioContext sample rate must match the decoded track exactly.**~~
+  Closed in M3. The original bug (2026-08-15) was that the web build ran the
+  context at its default rate regardless of the file's, so playback was
+  audibly pitched -- high vocals -- while the native build, which resamples
+  to the device via cpal, sounded correct. **User-confirmed fixed the same
+  day: "sounds good now."** M1 fixed it by building the context at the
+  *file's* rate, which works for one track and cannot survive a queue: Web
+  Audio has no way to change a live context's rate, so per-track rates mean
+  tearing the context down between tracks, i.e. gapless except when the rate
+  changes. Since M3 the web path does what the native one does -- one rate
+  for the session, every track resampled to it in the worker (`WasmDecoder`
+  now owns a `StreamingResampler`). The pitch itself is checked rather than
+  assumed: /gapless.html measures the played tone's frequency, and a
+  resampling error would read 239Hz where it wants 220Hz.
 - **The scope's rAF loop now survives a bad frame** (`webScope.ts`). It
   used to have no try/catch around `draw_frame`; a single thrown frame
   (e.g. a transient `SurfaceUnavailable` from `Renderer::draw_frame`'s own

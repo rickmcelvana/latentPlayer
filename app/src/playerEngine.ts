@@ -19,6 +19,12 @@ let views: ReturnType<typeof audioViews> | null = null;
 let sampleRate = 44_100;
 let volume = 1;
 
+/// Output channels for the session. Fixed rather than taken from the track,
+/// for the same reason the rate is: the ring's geometry cannot change while a
+/// queue is handing between tracks. Two because that is what Web Audio's
+/// destination defaults to and what the XY scope wants to plot.
+const OUTPUT_CHANNELS = 2;
+
 /// Mirrors nativePlayer.ts's `TransportState` (and `TransportState` in
 /// src-tauri/src/lib.rs) exactly, so components can drive the transport
 /// without knowing which shell they're running in.
@@ -35,23 +41,21 @@ function getWorker(): Worker {
   return worker;
 }
 
-/// `sampleRate` must match the track being loaded: the worklet writes raw
-/// decoded samples straight to the output with no resampling, so an
-/// AudioContext running at a different rate than the source (e.g. the
-/// browser's 48kHz default output against a 44.1kHz MP3) plays back
-/// pitched/sped up -- found live (2026-08-15): vocals audibly high-pitched
-/// on the web build while the native build, which uses the file's own real
-/// sample rate via cpal, sounded correct. If a context already exists at a
-/// different rate (loading a second file with a different native rate),
-/// it's closed and replaced -- Web Audio has no way to change an existing
-/// context's rate.
-async function getAudioContext(sampleRate: number): Promise<AudioContext> {
-  if (audioCtx && audioCtx.sampleRate !== sampleRate) {
-    await audioCtx.close();
-    audioCtx = null;
-  }
+/// One context, one rate, for the whole session -- whatever the browser's
+/// output happens to run at -- with every track resampled to it in the worker.
+///
+/// M1 did the opposite: it built the context at the *file's* rate, because the
+/// worklet wrote decoded samples straight out with no resampling and a
+/// mismatch plays pitched (found live 2026-08-15 -- audibly high vocals on the
+/// web build while native, which resamples to the device via cpal, sounded
+/// right). That fix worked for one track at a time and cannot survive a queue:
+/// Web Audio has no way to change a live context's rate, so per-track rates
+/// mean tearing the context down between tracks, i.e. gapless except when the
+/// rate changes. Resampling in the worker (M3) is the native path's answer,
+/// and now the web's.
+async function getAudioContext(): Promise<AudioContext> {
   if (!audioCtx) {
-    audioCtx = new AudioContext({ sampleRate });
+    audioCtx = new AudioContext();
     await audioCtx.audioWorklet.addModule("/worklet/player-worklet.js");
   }
   return audioCtx;
@@ -66,8 +70,8 @@ async function getAudioContext(sampleRate: number): Promise<AudioContext> {
 /// but the *decoded* audio is now bounded by the ring rather than by the
 /// track's length.
 export async function loadFile(file: File): Promise<TransportState> {
-  const bytes = new Uint8Array(await file.arrayBuffer());
-  const extensionHint = file.name.includes(".") ? file.name.split(".").pop()! : null;
+  const { bytes, extensionHint } = await readFile(file);
+  const ctx = await getAudioContext();
 
   const loaded = await new Promise<{
     sab: SharedArrayBuffer;
@@ -80,10 +84,16 @@ export async function loadFile(file: File): Promise<TransportState> {
       if (e.data.type === "loaded") resolve(e.data);
       else if (e.data.type === "error") reject(new Error(e.data.message));
     };
-    w.postMessage({ type: "load", bytes, extensionHint }, [bytes.buffer]);
+    // Not transferred: the worker keeps the encoded bytes so it can reopen the
+    // track, which a seek arriving mid-hand-off has to do.
+    w.postMessage({
+      type: "load",
+      bytes,
+      extensionHint,
+      outRate: ctx.sampleRate,
+      outChannels: OUTPUT_CHANNELS,
+    });
   });
-
-  const ctx = await getAudioContext(loaded.sampleRate);
 
   workletNode?.disconnect();
   gainNode?.disconnect();
@@ -105,6 +115,48 @@ export async function loadFile(file: File): Promise<TransportState> {
   sampleRate = loaded.sampleRate;
 
   return transport();
+}
+
+/// Queues the track to play when the current one ends, replacing whatever was
+/// queued before. Mirrors `Playback::set_next` on the native side, including
+/// what it deliberately leaves out: the engine holds what is playing and what
+/// is next, and nothing else. Which track that is, and what follows it, stay
+/// the caller's business -- watch `trackIndex` for the hand-off and queue the
+/// one after it.
+export async function setNext(file: File): Promise<void> {
+  const { bytes, extensionHint } = await readFile(file);
+  getWorker().postMessage({ type: "queue", bytes, extensionHint });
+}
+
+/// Forgets any queued track, so the current one is the last.
+export function clearNext(): void {
+  getWorker().postMessage({ type: "queue", bytes: null, extensionHint: null });
+}
+
+/// How many gapless hand-offs have reached the output. Increments when the new
+/// track's first frame is played, not when the worker opened it, so a caller
+/// that redraws on a change redraws in time with the music.
+export function trackIndex(): number {
+  return views ? Atomics.load(views.control, CONTROL.trackIndex) : 0;
+}
+
+/// The rate every track is resampled to, fixed for the session. Mirrors
+/// `Playback::output_sample_rate`.
+export function outputSampleRate(): number {
+  return sampleRate;
+}
+
+/// Channels the output runs at, which is also how `scopeWindow`'s samples are
+/// interleaved. Mirrors `Playback::output_channels`.
+export function outputChannels(): number {
+  return OUTPUT_CHANNELS;
+}
+
+async function readFile(file: File): Promise<{ bytes: Uint8Array; extensionHint: string | null }> {
+  return {
+    bytes: new Uint8Array(await file.arrayBuffer()),
+    extensionHint: file.name.includes(".") ? file.name.split(".").pop()! : null,
+  };
 }
 
 export async function play(): Promise<void> {

@@ -1,0 +1,27 @@
+<!doctype html>
+<!--
+  Dev-only harness for the web queue and gapless hand-off (Phase 1 M3). Served
+  at /gapless.html by `npm run dev`; deliberately not in vite's build inputs,
+  so it never ships. The native equivalent is
+  `cargo run -p player-core --example gapless_smoke`.
+
+  A button rather than an autorun, because an AudioContext needs a user gesture
+  before it will make sound.
+-->
+<html lang="en">
+  <head>
+    <meta charset="UTF-8" />
+    <title>gapless smoke</title>
+    <style>
+      body { background: #14161a; color: #dfe3ea; font: 13px/1.6 ui-monospace, monospace; padding: 24px; }
+      button { font: inherit; padding: 6px 14px; }
+      pre { white-space: pre-wrap; }
+    </style>
+  </head>
+  <body>
+    <p>Plays ~10s of quiet test tones on the default output.</p>
+    <button id="run">Run</button>
+    <pre id="out"></pre>
+    <script type="module" src="/src/gaplessSmoke.ts"></script>
+  </body>
+</html>

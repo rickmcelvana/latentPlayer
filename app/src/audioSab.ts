@@ -14,6 +14,11 @@
 // The ring is a small fixed size -- about two seconds -- rather than the whole
 // track. Phase 0 and M1 allocated `frameCount * channels * 4` bytes here, i.e.
 // the entire decoded file, which is the thing M2 exists to stop doing.
+//
+// Since M3 the ring holds audio in the *output's* shape -- the AudioContext's
+// sample rate and channel count, converted in the worker -- rather than the
+// file's. A queue has to be able to hand from one track to another without the
+// ring's geometry changing underneath the samples already in it.
 
 /// Index of each field in the Int32 control block.
 export const CONTROL = {
@@ -27,8 +32,8 @@ export const CONTROL = {
   writeIndex: 2,
   /// Ring read position in frames, `0..ringFrames`. Worklet only.
   readIndex: 3,
-  /// The decoder has produced the last sample of the track. Not the same as
-  /// `finished` -- audio can still be queued.
+  /// The decoder has produced the last sample of the *queue*, with nothing
+  /// behind it. Not the same as `finished` -- audio can still be queued.
   eos: 4,
 
   // --- the seek handshake (mirrors player-core/src/playback.rs's `Shared`) ---
@@ -50,20 +55,22 @@ export const CONTROL = {
   decoderReadySeq: 6,
   /// Set by the worklet once the ring has been emptied.
   drainedSeq: 7,
-  /// Where to seek to, in source frames. Written before `seekSeq` is bumped.
+  /// Where to seek to, in output frames. Written before `seekSeq` is bumped.
   seekTargetFrames: 8,
 
-  /// Frames played. The authoritative position: the worklet counts what it
-  /// actually sent to the output, so it can't drift from what's audible.
-  /// Int32, so it wraps after 2^31 frames -- 12 hours in one track at 48kHz.
+  /// Frames played within the current track. The authoritative position: the
+  /// worklet counts what it actually sent to the output, so it can't drift
+  /// from what's audible. Int32, so it wraps after 2^31 frames -- 12 hours in
+  /// one track at 48kHz.
   positionFrames: 9,
-  /// Track length in frames, or 0 when the container doesn't state one.
+  /// Current track's length in output frames, or 0 when the container doesn't
+  /// state one. Republished by the worklet at each hand-off.
   totalFrames: 10,
-  /// End of stream *and* an empty ring, i.e. the track is really over. An
+  /// End of the queue *and* an empty ring, i.e. the music is really over. An
   /// empty ring alone is an underrun, which must not stop the transport.
   finished: 11,
 
-  /// Ring capacity in frames, and the track's channel count. Kept here so the
+  /// Ring capacity in frames, and the output channel count. Kept here so the
   /// worklet can size its views from the buffer itself rather than from
   /// processorOptions that could disagree with it.
   ringFrames: 12,
@@ -73,10 +80,54 @@ export const CONTROL = {
   /// it is valid (it stops growing once the ring has wrapped once).
   scopeIndex: 14,
   scopeFilled: 15,
+
+  // --- the gapless hand-off (mirrors `Boundary` in playback.rs) ---
+  //
+  // Track changes travel with the audio rather than being announced out of
+  // band, because the only honest answer to "which track is playing" is
+  // "whichever one the frame the output just took came from". The worker runs
+  // up to a ring ahead, so anything it published directly would be up to two
+  // seconds early -- the title would change while the previous song was still
+  // playing.
+  //
+  /// Output frames the worker has ever written, and the worklet has ever
+  /// taken (including frames a seek threw away, or every boundary after one
+  /// would land late). Both wrap at 2^31; see `framesUntil` below for why
+  /// that is fine.
+  writtenFrames: 16,
+  consumedFrames: 17,
+  /// Hand-offs that have reached the output. Not an index into any playlist --
+  /// the engine only ever knows two tracks -- just a counter the UI can watch
+  /// to know the music moved on.
+  trackIndex: 18,
+  /// Boundary queue read/write slots, `0..BOUNDARY_SLOTS`. Worklet owns the
+  /// head, worker owns the tail; empty when they are equal.
+  boundaryHead: 19,
+  boundaryTail: 20,
 } as const;
 
+/// Where the boundary records start, and how many there can be at once. One
+/// pending hand-off is the realistic maximum -- the UI only queues a single
+/// track ahead -- so four is slack for tracks shorter than the ring.
+export const BOUNDARY_BASE = 24;
+export const BOUNDARY_SLOTS = 4;
+/// Per record: the value of `writtenFrames` at the incoming track's first
+/// frame, and that track's length in output frames.
+export const BOUNDARY_FIELDS = 2;
+export const BOUNDARY_AT = 0;
+export const BOUNDARY_TOTAL_FRAMES = 1;
+
 /// Rounded up past the last field so the float regions start 8-byte aligned.
-export const CONTROL_INTS = 16;
+export const CONTROL_INTS = BOUNDARY_BASE + BOUNDARY_SLOTS * BOUNDARY_FIELDS;
+
+/// Signed 32-bit difference between two frame counters, correct across the
+/// wrap. `writtenFrames`/`consumedFrames` count forever and so must wrap, but
+/// they are only ever compared when within a ring of each other (~2s), which
+/// is nowhere near 2^31 apart -- so forcing the subtraction back into int32 is
+/// exact. `a` is at or past `b` when this is <= 0.
+export function framesUntil(a: number, b: number): number {
+  return (a - b) | 0;
+}
 
 /// How much audio the ring holds. Same reasoning as the native side: enough
 /// that a decode hiccup doesn't reach the speakers, small enough that a seek
@@ -90,7 +141,7 @@ export const SCOPE_MASK = SCOPE_SAMPLES - 1;
 
 export interface AudioViews {
   control: Int32Array;
-  /// Interleaved PCM waiting to be played.
+  /// Interleaved PCM waiting to be played, in the output's shape.
   ring: Float32Array;
   /// Recently played interleaved samples, for the scope.
   scope: Float32Array;
@@ -98,8 +149,9 @@ export interface AudioViews {
   channels: number;
 }
 
-/// Allocates the buffer for one track. Called in the worker, which is where
-/// the channel count and sample rate are first known.
+/// Allocates the buffer for a session. `channels` and `sampleRate` are the
+/// *output's* -- fixed for as long as the AudioContext lives, so the same
+/// buffer geometry serves every track in the queue.
 export function createAudioSab(channels: number, sampleRate: number): SharedArrayBuffer {
   const ringFrames = Math.ceil(sampleRate * RING_SECONDS);
   const bytes = CONTROL_INTS * 4 + ringFrames * channels * 4 + SCOPE_SAMPLES * 4;

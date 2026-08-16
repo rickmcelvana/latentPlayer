@@ -393,3 +393,40 @@ checks are load-bearing.
 synthesised tracks with different tone frequencies and lengths, so which track
 is playing is measured from the audio (zero-crossing rate) rather than taken
 from the engine's own reports.
+
+### The web hand-off (2026-08-16)
+
+Same design as the native side, same claims, and -- deliberately -- the same
+checks. `app/gapless.html` (dev-only, served by `npm run dev`, never bundled)
+runs the web counterpart of the `gapless_smoke` example, generating the same
+two test tones and measuring the same things. Both shells report 11/11.
+
+Three things had to move to make it possible:
+
+**One AudioContext rate for the session.** M1's fix for pitched web audio was
+to build the context at the *file's* rate. That works for one track and cannot
+survive a queue -- Web Audio has no way to change a live context's rate -- so
+the web path now does what the native one does: pick a rate once and resample
+every track to it. `WasmDecoder` gained a `StreamingResampler` and the channel
+adaptation, so `read` hands back audio already in the output's shape, exactly
+as the native decoder thread does. `adapt_channels` moved into its own
+cross-target module (`channels.rs`) to be shared.
+
+**Boundary records in the SAB.** Four slots after the control block, an SPSC
+queue with head/tail indices, carrying the incoming track's start frame and
+length. `writtenFrames`/`consumedFrames` are Int32 and wrap; comparisons go
+through `framesUntil`, which forces the difference back into int32. That is
+exact because the two counters are only ever compared while within a ring
+(~2s) of each other, nowhere near 2^31 apart.
+
+**The scope's silence, again.** The web worklet had the identical blind spot
+the native callback did -- it recorded only samples that came *out of the
+ring*, so underrun silence never reached the scope. Fixed the same way, and
+confirmed the same way: stalling the web hand-off past the ring makes the seam
+check report 4096 samples of silence.
+
+One measurement earns its keep twice. Reading the played tone's frequency from
+its zero-crossing rate says which track is audible, but it is also a direct
+check on the resampling that M1's pitched-audio bug was about: a broken
+44.1k -> 48k conversion would read 239Hz where the test wants 220Hz. Both
+shells measure within a few Hz.
