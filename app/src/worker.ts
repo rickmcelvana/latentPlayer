@@ -98,6 +98,10 @@ let views: ReturnType<typeof audioViews> | null = null;
 let analyzer: WasmAnalyzer | null = null;
 let tapCursor = 0;
 let lastAnalysis = 0;
+/// The track the meters have been measuring, against the worklet's
+/// `trackIndex`. A hand-off between them is a break in what is being measured
+/// even though it is no break in the audio.
+let analysedTrack = 0;
 /// The output's rate -- what every track is resampled to and what all the
 /// frame counts in the control block are measured in.
 let outRate = 44_100;
@@ -155,6 +159,7 @@ self.onmessage = async (e: MessageEvent<Request>) => {
     analyzer = WasmAnalyzer.create(outRate, outChannels);
     tapCursor = 0;
     lastAnalysis = performance.now();
+    analysedTrack = 0;
     // 0 means "the container didn't say" and travels all the way to the UI --
     // see StreamingDecoder::duration_seconds for when that happens.
     views.control[CONTROL.totalFrames] = Math.round(durationSeconds * outRate);
@@ -282,11 +287,18 @@ function pump(): void {
 /// side gives this its own thread only because it has threads to give.
 function runAnalysis(): void {
   if (!analyzer || !views) return;
-  const { control, scope, spectrum } = views;
+  const { control, scope, spectrum, meters, goniometer } = views;
 
   const written = Atomics.load(control, CONTROL.tapWritten);
   let available = framesUntil(written, tapCursor);
-  let discontinuity = false;
+  // A gapless hand-off is continuous audio, so the tap sees no break at all --
+  // which is precisely why one has to be declared here. The samples either side
+  // of the seam are different tracks, and an integrated loudness spanning both
+  // would describe a record nobody made (M5 decision 2). Mirrors the native
+  // analysis thread's own check against `track_index`.
+  const heard = Atomics.load(control, CONTROL.trackIndex);
+  let discontinuity = heard !== analysedTrack;
+  analysedTrack = heard;
 
   if (available < 0) {
     // The worklet restarted the tap at zero: a seek drained the ring, so what
@@ -317,6 +329,14 @@ function runAnalysis(): void {
   const levels = analyzer.update((now - lastAnalysis) / 1000);
   lastAnalysis = now;
   spectrum.set(levels);
+  // Published together, out of one `snapshot`, because they describe one
+  // instant (M5 decision 4).
+  meters.set(analyzer.meters());
+  const points = analyzer.goniometer();
+  goniometer.set(points);
+  // The count last: a reader that sees it must be able to read every point it
+  // counts, the same discipline `tapWritten` follows.
+  Atomics.store(control, CONTROL.goniometerPoints, points.length / 2);
 }
 
 /// Crosses to the queued track, if there is one. Returns whether it did.

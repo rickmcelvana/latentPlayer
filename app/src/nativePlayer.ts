@@ -86,3 +86,26 @@ export async function spectrum(): Promise<Float32Array> {
 export async function spectrumBands(): Promise<Float32Array> {
   return new Float32Array(await invoke<number[]>("spectrum_bands"));
 }
+
+/// Loudness and phase at one instant. Mirrors `MeterState` in
+/// src-tauri/src/lib.rs and playerEngine.ts's copy, so the meter components
+/// never branch on which shell they're in.
+export interface MeterSnapshot {
+  momentaryLufs: number;
+  shortTermLufs: number;
+  integratedLufs: number;
+  truePeakDb: number;
+  correlation: number;
+}
+
+/// The meters as the analysis thread last read them. One round trip, because
+/// the five numbers describe one instant.
+export async function meters(): Promise<MeterSnapshot> {
+  return invoke<MeterSnapshot>("meters");
+}
+
+/// The goniometer's points, interleaved side/mid. Decimated in Rust to a fixed
+/// count, so what crosses the IPC boundary each frame is bounded.
+export async function goniometer(): Promise<Float32Array> {
+  return new Float32Array(await invoke<number[]>("goniometer"));
+}

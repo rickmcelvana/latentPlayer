@@ -14,6 +14,8 @@ import {
   type PlaylistTrack,
   type TransportState,
 } from "./playlist";
+import { Goniometer } from "./Goniometer";
+import { Loudness } from "./Loudness";
 import { Spectrum } from "./Spectrum";
 import { startScope } from "./webScope";
 
@@ -274,6 +276,11 @@ function App() {
         </div>
 
         <Spectrum active={loaded} />
+
+        <div className="meters">
+          <Goniometer active={loaded} />
+          <Loudness active={loaded} />
+        </div>
 
         {tracks.length > 0 && (
           <ol className="playlist">

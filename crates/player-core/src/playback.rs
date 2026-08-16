@@ -38,7 +38,7 @@ use std::time::{Duration, Instant};
 use cpal::traits::{DeviceTrait, HostTrait, StreamTrait};
 use cpal::{SampleFormat, StreamConfig};
 
-use crate::analysis::Meters;
+use crate::analysis::{MeterSnapshot, Meters, GONIOMETER_POINTS};
 use crate::channels::{adapt_channels, ChannelShape};
 use crate::error::PlayerError;
 use crate::resample::StreamingResampler;
@@ -178,6 +178,30 @@ struct Boundary {
 /// through before the device consumes any of them.
 const MAX_PENDING_BOUNDARIES: usize = 16;
 
+/// What the analysis thread hands to whoever is drawing.
+///
+/// One record under one lock rather than three, because these describe the same
+/// instant: a display that took the spectrum from one publication and the
+/// loudness from the next would be drawing two moments as one (M5 decision 4).
+struct Published {
+    /// Spectrum levels, dBFS per band.
+    levels: Vec<f32>,
+    /// Loudness and phase.
+    snapshot: MeterSnapshot,
+    /// Goniometer points, interleaved side/mid.
+    goniometer: Vec<f32>,
+}
+
+impl Published {
+    fn empty() -> Self {
+        Self {
+            levels: vec![crate::spectrum::FLOOR_DB; crate::analysis::BAND_COUNT],
+            snapshot: MeterSnapshot::silent(),
+            goniometer: Vec::new(),
+        }
+    }
+}
+
 /// Where the caller leaves the track to play after the current one.
 ///
 /// A `Mutex` and not an atomic handshake, deliberately: this is touched by
@@ -193,10 +217,9 @@ pub struct Playback {
     /// Output sample rate -- what `position_frames` counts in.
     sample_rate: u32,
     next: NextSlot,
-    /// Latest spectrum levels in dBFS, published by the analysis thread. A
-    /// `Mutex` is fine here where it would not be in `Shared`: neither end of
-    /// this is the audio callback.
-    levels: Arc<Mutex<Vec<f32>>>,
+    /// Everything the analysis thread publishes. A `Mutex` is fine here where
+    /// it would not be in `Shared`: neither end of this is the audio callback.
+    meters: Arc<Mutex<Published>>,
     /// The frequency axis those levels are against. Fixed for the session, so
     /// it is computed once rather than sent with every frame.
     band_centres: Vec<f32>,
@@ -309,18 +332,15 @@ impl Playback {
         // overruns its budget must degrade into a stale reading, never into a
         // dropout. This thread only ever *reads* the tap, so nothing it does
         // can block the callback.
-        let levels = Arc::new(Mutex::new(vec![
-            crate::spectrum::FLOOR_DB;
-            crate::analysis::BAND_COUNT
-        ]));
+        let meters = Arc::new(Mutex::new(Published::empty()));
         let analysis_thread = {
             let shared = Arc::clone(&shared);
-            let levels = Arc::clone(&levels);
+            let meters = Arc::clone(&meters);
             let rate = config.sample_rate;
             let channels = config.channels;
             std::thread::Builder::new()
                 .name("player-analysis".to_string())
-                .spawn(move || analysis_loop(shared, levels, rate, channels))
+                .spawn(move || analysis_loop(shared, meters, rate, channels))
                 .map_err(|e| PlayerError::OutputStream(format!("analysis thread: {e}")))?
         };
 
@@ -329,7 +349,7 @@ impl Playback {
             sample_rate: config.sample_rate,
             next,
             shared,
-            levels,
+            meters,
             band_centres: crate::analysis::band_centres(config.sample_rate),
             decoder: Some(decoder_thread),
             analysis: Some(analysis_thread),
@@ -491,12 +511,29 @@ impl Playback {
     /// The latest spectrum, one dBFS level per display band, as of whenever the
     /// analysis thread last ran (~60Hz). Reading it never waits on audio.
     pub fn spectrum(&self) -> Vec<f32> {
-        match self.levels.lock() {
-            Ok(levels) => levels.clone(),
-            // Only reachable if the analysis thread panicked mid-publish. A
-            // frozen display beats propagating that to a caller who only wanted
-            // to draw a frame.
-            Err(poisoned) => poisoned.into_inner().clone(),
+        self.published(|published| published.levels.clone())
+    }
+
+    /// Loudness and phase as of the same instant as each other (M5 decision 4).
+    pub fn meters(&self) -> MeterSnapshot {
+        self.published(|published| published.snapshot)
+    }
+
+    /// The goniometer's points, interleaved side/mid, for the window the
+    /// analysis thread last read.
+    pub fn goniometer(&self) -> Vec<f32> {
+        self.published(|published| published.goniometer.clone())
+    }
+
+    /// Reads the analysis thread's publication.
+    ///
+    /// A poisoned lock is only reachable if that thread panicked mid-publish,
+    /// and a display holding its last frame beats propagating a panic to a
+    /// caller who only wanted to draw one.
+    fn published<T>(&self, read: impl FnOnce(&Published) -> T) -> T {
+        match self.meters.lock() {
+            Ok(published) => read(&published),
+            Err(poisoned) => read(&poisoned.into_inner()),
         }
     }
 
@@ -528,10 +565,10 @@ impl Drop for Playback {
 /// a display, and a meter that consumes a core to redraw the same frame twice
 /// is a worse player, not a better one. Everything it drains is handed over,
 /// though, not just the newest window -- M5's integrated loudness has to see
-/// every sample, and this loop is where it will read them.
+/// every sample it claims to have measured, and this is where it reads them.
 fn analysis_loop(
     shared: Arc<Shared>,
-    levels: Arc<Mutex<Vec<f32>>>,
+    published: Arc<Mutex<Published>>,
     sample_rate: u32,
     channels: u16,
 ) {
@@ -541,20 +578,33 @@ fn analysis_loop(
     let mut cursor = TapCursor::new(&shared.tap);
     let mut drained = Vec::new();
     let mut last = Instant::now();
+    let mut heard_track = shared.track_index.load(Ordering::Acquire);
 
     while !shared.stop.load(Ordering::Relaxed) {
         drained.clear();
         let read = shared.tap.read(&mut cursor, &mut drained);
-        meters.ingest(&drained, read.discontinuity);
+
+        // A gapless hand-off is continuous audio and so no discontinuity to the
+        // tap -- which is exactly why it has to be one here. The samples either
+        // side of the seam belong to different tracks, and an integrated
+        // loudness spanning both would be a number for a record nobody made
+        // (M5 decision 2). This is the one break only the transport can see.
+        let track = shared.track_index.load(Ordering::Acquire);
+        let handed_over = track != heard_track;
+        heard_track = track;
+
+        meters.ingest(&drained, read.discontinuity || handed_over);
 
         let now = Instant::now();
         let dt = now.duration_since(last).as_secs_f32();
         last = now;
-        let current = meters.update(dt);
+        meters.update(dt);
 
-        if let Ok(mut published) = levels.lock() {
-            published.clear();
-            published.extend_from_slice(current);
+        if let Ok(mut published) = published.lock() {
+            published.levels.clear();
+            published.levels.extend_from_slice(meters.levels());
+            published.snapshot = meters.snapshot();
+            published.goniometer = meters.goniometer(GONIOMETER_POINTS);
         }
 
         std::thread::sleep(INTERVAL);

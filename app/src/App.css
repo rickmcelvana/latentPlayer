@@ -199,6 +199,118 @@ input[type="range"] {
   height: auto;
 }
 
+/* The goniometer and the loudness readout side by side: one picture of the
+   stereo field, one set of numbers describing the same moment. */
+.meters {
+  display: flex;
+  align-items: stretch;
+  gap: 12px;
+  width: min(560px, 100%);
+}
+
+.goniometer {
+  border-radius: 8px;
+  border: 1px solid var(--border);
+  flex: 0 0 auto;
+}
+
+.loudness {
+  display: flex;
+  flex-direction: column;
+  justify-content: space-between;
+  flex: 1 1 auto;
+  gap: 8px;
+  padding: 10px 12px;
+  border-radius: 8px;
+  border: 1px solid var(--border);
+  font-variant-numeric: tabular-nums;
+
+  .readouts {
+    display: grid;
+    grid-template-columns: repeat(2, 1fr);
+    gap: 6px 12px;
+    margin: 0;
+  }
+
+  dt {
+    font-size: 11px;
+    letter-spacing: 0.04em;
+    text-transform: uppercase;
+    color: var(--text);
+    opacity: 0.7;
+  }
+
+  dd {
+    margin: 0;
+    font-size: 20px;
+    font-family: ui-monospace, monospace;
+    color: var(--accent);
+  }
+
+  /* Past -1 dBTP something downstream will clip. */
+  dd.over {
+    color: #ff5f56;
+  }
+
+  .units {
+    display: flex;
+    justify-content: space-between;
+    font-size: 10px;
+    letter-spacing: 0.08em;
+    color: var(--text);
+    opacity: 0.5;
+  }
+
+  .correlation {
+    display: flex;
+    align-items: center;
+    gap: 8px;
+    font-size: 11px;
+
+    .label {
+      text-transform: uppercase;
+      letter-spacing: 0.04em;
+      opacity: 0.7;
+    }
+
+    .track {
+      position: relative;
+      flex: 1 1 auto;
+      height: 8px;
+      border-radius: 4px;
+      background: #14141c;
+      overflow: hidden;
+    }
+
+    .fill {
+      position: absolute;
+      top: 0;
+      bottom: 0;
+      background: var(--accent);
+    }
+
+    /* Anything left of centre cancels when summed to mono. */
+    .fill.out-of-phase {
+      background: #ff5f56;
+    }
+
+    .centre {
+      position: absolute;
+      top: 0;
+      bottom: 0;
+      left: calc(50% - 0.5px);
+      width: 1px;
+      background: var(--border);
+    }
+
+    .value {
+      font-family: ui-monospace, monospace;
+      min-width: 3.5ch;
+      text-align: right;
+    }
+  }
+}
+
 .scope {
   border-radius: 8px;
   border: 1px solid var(--border);

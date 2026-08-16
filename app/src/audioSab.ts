@@ -116,6 +116,12 @@ export const CONTROL = {
   /// Reset to 0 by the worklet when a seek drains the ring, which is how a
   /// reader learns the audio it is about to get does not continue what it had.
   tapWritten: 21,
+
+  /// Goniometer points currently valid, of `GONIOMETER_POINTS`. Fewer than the
+  /// full count at the start of a track, where there isn't yet a window's worth
+  /// of audio to plot -- drawing the whole buffer then would draw the zeros
+  /// behind it as a dot in the centre.
+  goniometerPoints: 22,
 } as const;
 
 /// Where the boundary records start, and how many there can be at once. One
@@ -162,6 +168,30 @@ export const SPECTRUM_BANDS = 64;
 /// value would mean full scale.
 export const SPECTRUM_FLOOR_DB = -120;
 
+/// Where each of the loudness/phase numbers sits in the meter region, mirroring
+/// `MeterSnapshot::to_array` in player-core/src/analysis.rs. The worker copies
+/// what Rust returns straight in, so this is the one place the order is named
+/// on this side.
+export const METER = {
+  momentaryLufs: 0,
+  shortTermLufs: 1,
+  integratedLufs: 2,
+  truePeakDb: 3,
+  correlation: 4,
+} as const;
+export const METER_FIELDS = 5;
+
+/// What a meter that has measured nothing reads, mirroring `FLOOR_LUFS` and
+/// `FLOOR_DBTP` in player-core/src/loudness.rs. Finite rather than -Infinity
+/// for the reason M5 decision 5 gives -- the desktop shell's JSON boundary
+/// turns a non-finite float into `null`, and both shells report the same thing.
+export const LOUDNESS_FLOOR_LUFS = -70;
+export const TRUE_PEAK_FLOOR_DB = -120;
+
+/// Goniometer points the analyser publishes per frame, mirroring
+/// `GONIOMETER_POINTS` in player-core/src/analysis.rs. Two floats each.
+export const GONIOMETER_POINTS = 256;
+
 export interface AudioViews {
   control: Int32Array;
   /// Interleaved PCM waiting to be played, in the output's shape.
@@ -171,6 +201,11 @@ export interface AudioViews {
   scope: Float32Array;
   /// Latest spectrum in dBFS, one per band, written by the worker's analyser.
   spectrum: Float32Array;
+  /// Loudness and phase, in `METER`'s order.
+  meters: Float32Array;
+  /// Goniometer points, interleaved side/mid. Only the first
+  /// `CONTROL.goniometerPoints` pairs are valid.
+  goniometer: Float32Array;
   ringFrames: number;
   channels: number;
 }
@@ -181,14 +216,23 @@ export interface AudioViews {
 export function createAudioSab(channels: number, sampleRate: number): SharedArrayBuffer {
   const ringFrames = Math.ceil(sampleRate * RING_SECONDS);
   const bytes =
-    CONTROL_INTS * 4 + ringFrames * channels * 4 + SCOPE_SAMPLES * 4 + SPECTRUM_BANDS * 4;
+    CONTROL_INTS * 4 +
+    ringFrames * channels * 4 +
+    SCOPE_SAMPLES * 4 +
+    SPECTRUM_BANDS * 4 +
+    METER_FIELDS * 4 +
+    GONIOMETER_POINTS * 2 * 4;
   const sab = new SharedArrayBuffer(bytes);
   const control = new Int32Array(sab, 0, CONTROL_INTS);
   control[CONTROL.ringFrames] = ringFrames;
   control[CONTROL.channels] = channels;
-  // A zeroed spectrum would read as full scale on every band until the first
-  // analysis frame lands.
-  audioViews(sab).spectrum.fill(SPECTRUM_FLOOR_DB);
+  // Zeroed, these would read as full scale on every band and 0 LUFS on every
+  // meter until the first analysis frame lands.
+  const views = audioViews(sab);
+  views.spectrum.fill(SPECTRUM_FLOOR_DB);
+  views.meters.fill(LOUDNESS_FLOOR_LUFS);
+  views.meters[METER.truePeakDb] = TRUE_PEAK_FLOOR_DB;
+  views.meters[METER.correlation] = 0;
   return sab;
 }
 
@@ -203,6 +247,10 @@ export function audioViews(sab: SharedArrayBuffer): AudioViews {
   const ringBytes = CONTROL_INTS * 4 + ringSamples * 4;
   const ring = new Float32Array(sab, CONTROL_INTS * 4, ringSamples);
   const scope = new Float32Array(sab, ringBytes, SCOPE_SAMPLES);
-  const spectrum = new Float32Array(sab, ringBytes + SCOPE_SAMPLES * 4, SPECTRUM_BANDS);
-  return { control, ring, scope, spectrum, ringFrames, channels };
+  const spectrumBytes = ringBytes + SCOPE_SAMPLES * 4;
+  const spectrum = new Float32Array(sab, spectrumBytes, SPECTRUM_BANDS);
+  const meterBytes = spectrumBytes + SPECTRUM_BANDS * 4;
+  const meters = new Float32Array(sab, meterBytes, METER_FIELDS);
+  const goniometer = new Float32Array(sab, meterBytes + METER_FIELDS * 4, GONIOMETER_POINTS * 2);
+  return { control, ring, scope, spectrum, meters, goniometer, ringFrames, channels };
 }

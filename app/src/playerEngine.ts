@@ -9,7 +9,16 @@
 // This module's job is unchanged from the outside: it still reports the same
 // `TransportState` the native adapter does, so App.tsx never branches on which
 // shell it's in.
-import { CONTROL, SCOPE_MASK, SCOPE_SAMPLES, SPECTRUM_FLOOR_DB, audioViews } from "./audioSab";
+import {
+  CONTROL,
+  LOUDNESS_FLOOR_LUFS,
+  METER,
+  SCOPE_MASK,
+  SCOPE_SAMPLES,
+  SPECTRUM_FLOOR_DB,
+  TRUE_PEAK_FLOOR_DB,
+  audioViews,
+} from "./audioSab";
 
 let audioCtx: AudioContext | null = null;
 let workletNode: AudioWorkletNode | null = null;
@@ -262,6 +271,72 @@ export function spectrumBands(): Float32Array {
 /// The floor the spectrum reports for a band with nothing in it.
 export function spectrumFloorDb(): number {
   return SPECTRUM_FLOOR_DB;
+}
+
+/// Loudness and phase at one instant. Mirrors `MeterState` in
+/// src-tauri/src/lib.rs and nativePlayer.ts's copy, the same way
+/// `TransportState` does -- one shape, so the meter components never branch on
+/// which shell they're in.
+export interface MeterSnapshot {
+  /// 400ms loudness, LUFS.
+  momentaryLufs: number;
+  /// 3s loudness, LUFS.
+  shortTermLufs: number;
+  /// Gated loudness since the meters were last reset, LUFS.
+  integratedLufs: number;
+  /// Highest inter-sample peak since then, dBTP.
+  truePeakDb: number;
+  /// Stereo correlation: +1 mono, 0 uncorrelated, -1 inverted.
+  correlation: number;
+}
+
+/// The meters as the worker's analyser last read them (~20ms).
+///
+/// Read out of the shared buffer in one go, so the five numbers are one
+/// instant's -- which is the whole reason they are published together
+/// (M5 decision 4).
+export function meters(): MeterSnapshot {
+  if (!views) return silentMeters();
+  const m = views.meters;
+  return {
+    momentaryLufs: m[METER.momentaryLufs],
+    shortTermLufs: m[METER.shortTermLufs],
+    integratedLufs: m[METER.integratedLufs],
+    truePeakDb: m[METER.truePeakDb],
+    correlation: m[METER.correlation],
+  };
+}
+
+/// What the meters read before anything has been measured.
+export function silentMeters(): MeterSnapshot {
+  return {
+    momentaryLufs: LOUDNESS_FLOOR_LUFS,
+    shortTermLufs: LOUDNESS_FLOOR_LUFS,
+    integratedLufs: LOUDNESS_FLOOR_LUFS,
+    truePeakDb: TRUE_PEAK_FLOOR_DB,
+    correlation: 0,
+  };
+}
+
+/// The goniometer's points -- interleaved side/mid pairs, computed in Rust
+/// (M5 decision 7). Mirrors `Playback::goniometer` natively.
+///
+/// Copies rather than handing back the shared view, and takes only the pairs
+/// the worker says are valid: early in a track the buffer's tail is still the
+/// zeros it was created with, which would draw as a bright dot in the centre.
+export function goniometer(): Float32Array {
+  if (!views) return new Float32Array(0);
+  const points = Atomics.load(views.control, CONTROL.goniometerPoints);
+  return new Float32Array(views.goniometer.subarray(0, points * 2));
+}
+
+/// The floors the loudness meters report with nothing to measure.
+export function loudnessFloorLufs(): number {
+  return LOUDNESS_FLOOR_LUFS;
+}
+
+export function truePeakFloorDb(): number {
+  return TRUE_PEAK_FLOOR_DB;
 }
 
 /// The most recently played `n` interleaved samples, for the scope render

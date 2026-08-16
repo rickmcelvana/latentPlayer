@@ -90,6 +90,57 @@ fn spectrum(state: tauri::State<SharedPlayback>) -> Vec<f32> {
         .unwrap_or_default()
 }
 
+/// Loudness and phase, read as one snapshot.
+///
+/// The five numbers describe one instant, so they cross together (M5 decision
+/// 4). They are also all finite by construction -- `player-core` reports a floor
+/// rather than negative infinity precisely because a non-finite float becomes
+/// `null` on the way through this boundary (M5 decision 5).
+#[derive(serde::Serialize)]
+#[serde(rename_all = "camelCase")]
+struct MeterState {
+    momentary_lufs: f32,
+    short_term_lufs: f32,
+    integrated_lufs: f32,
+    true_peak_db: f32,
+    correlation: f32,
+}
+
+impl From<player_core::MeterSnapshot> for MeterState {
+    fn from(snapshot: player_core::MeterSnapshot) -> Self {
+        Self {
+            momentary_lufs: snapshot.momentary_lufs,
+            short_term_lufs: snapshot.short_term_lufs,
+            integrated_lufs: snapshot.integrated_lufs,
+            true_peak_db: snapshot.true_peak_db,
+            correlation: snapshot.correlation,
+        }
+    }
+}
+
+#[tauri::command]
+fn meters(state: tauri::State<SharedPlayback>) -> MeterState {
+    state
+        .lock()
+        .unwrap()
+        .as_ref()
+        .map(|playback| playback.meters().into())
+        .unwrap_or_else(|| player_core::MeterSnapshot::silent().into())
+}
+
+/// The goniometer's points for the window the analysis thread last read:
+/// interleaved side/mid pairs, already decimated to a fixed count in Rust so
+/// what crosses here per frame doesn't grow with the sample rate.
+#[tauri::command]
+fn goniometer(state: tauri::State<SharedPlayback>) -> Vec<f32> {
+    state
+        .lock()
+        .unwrap()
+        .as_ref()
+        .map(|playback| playback.goniometer())
+        .unwrap_or_default()
+}
+
 /// Centre frequency of each band `spectrum` returns. Fixed once a track is
 /// open, so the UI fetches it once rather than per frame.
 #[tauri::command]
@@ -174,7 +225,9 @@ pub fn run() {
             seek,
             set_volume,
             spectrum,
-            spectrum_bands
+            spectrum_bands,
+            meters,
+            goniometer
         ])
         .setup(|app| {
             if cfg!(debug_assertions) {

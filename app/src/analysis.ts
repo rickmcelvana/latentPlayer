@@ -5,17 +5,36 @@
 // `Meters`), so what differs here is only how the numbers arrive: a Tauri
 // command natively, a region of the SharedArrayBuffer on the web. Everything
 // past this file sees one async function returning dBFS.
-import { SPECTRUM_FLOOR_DB } from "./audioSab";
+import { LOUDNESS_FLOOR_LUFS, SPECTRUM_FLOOR_DB, TRUE_PEAK_FLOOR_DB } from "./audioSab";
 import { isTauri } from "./isTauri";
 import {
+  goniometer as goniometerNative,
+  meters as metersNative,
   spectrum as spectrumNative,
   spectrumBands as spectrumBandsNative,
 } from "./nativePlayer";
-import { spectrum as spectrumWeb, spectrumBands as spectrumBandsWeb } from "./playerEngine";
+import type { MeterSnapshot } from "./playerEngine";
+import {
+  goniometer as goniometerWeb,
+  meters as metersWeb,
+  silentMeters,
+  spectrum as spectrumWeb,
+  spectrumBands as spectrumBandsWeb,
+} from "./playerEngine";
+
+export type { MeterSnapshot };
 
 /// What a band with nothing in it reads. Mirrors `FLOOR_DB` in
 /// player-core/src/spectrum.rs.
 export const FLOOR_DB = SPECTRUM_FLOOR_DB;
+
+/// What the loudness meters read with nothing to measure. Mirrors `FLOOR_LUFS`
+/// and `FLOOR_DBTP` in player-core/src/loudness.rs.
+export const FLOOR_LUFS = LOUDNESS_FLOOR_LUFS;
+export const FLOOR_DBTP = TRUE_PEAK_FLOOR_DB;
+
+/// What a display shows before anything has been measured.
+export const SILENT_METERS: MeterSnapshot = silentMeters();
 
 /// The latest spectrum, one dBFS level per band. Empty before a track is
 /// loaded.
@@ -27,4 +46,16 @@ export async function spectrum(): Promise<Float32Array> {
 /// caller can fetch it once per track rather than per frame.
 export async function spectrumBands(): Promise<Float32Array> {
   return isTauri() ? spectrumBandsNative() : spectrumBandsWeb();
+}
+
+/// Loudness and phase, read as one snapshot so a display cannot show a
+/// momentary from one instant against an integrated from another.
+export async function meters(): Promise<MeterSnapshot> {
+  return isTauri() ? metersNative() : metersWeb();
+}
+
+/// The goniometer's points: interleaved side/mid pairs, in the mix's own units
+/// (full-scale mono reaches sqrt(2)). The display chooses the scale.
+export async function goniometer(): Promise<Float32Array> {
+  return isTauri() ? goniometerNative() : goniometerWeb();
 }

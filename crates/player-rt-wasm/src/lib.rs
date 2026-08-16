@@ -11,7 +11,9 @@
 
 use js_sys::Float32Array;
 use player_core::resample::StreamingResampler;
-use player_core::{adapt_channels, ChannelShape, InMemorySource, Meters, StreamingDecoder};
+use player_core::{
+    adapt_channels, ChannelShape, InMemorySource, Meters, StreamingDecoder, GONIOMETER_POINTS,
+};
 use wasm_bindgen::prelude::*;
 use web_sys::HtmlCanvasElement;
 
@@ -242,6 +244,23 @@ impl WasmAnalyzer {
     #[wasm_bindgen(js_name = bandCentres)]
     pub fn band_centres(&self) -> Vec<f32> {
         self.meters.band_centres().to_vec()
+    }
+
+    /// Loudness and phase as five floats, in `MeterSnapshot::to_array`'s order
+    /// -- which `METER` in app/src/audioSab.ts mirrors, since that is the
+    /// layout the worker copies them into.
+    ///
+    /// A flat array rather than a struct because wasm-bindgen would have to
+    /// build a JS object per call otherwise, and this is read at frame rate;
+    /// the naming happens once, on the TypeScript side.
+    pub fn meters(&self) -> Vec<f32> {
+        self.meters.snapshot().to_array().to_vec()
+    }
+
+    /// The goniometer's points for the window just ingested: interleaved
+    /// side/mid pairs (`player_core::phase::goniometer_points`).
+    pub fn goniometer(&self) -> Vec<f32> {
+        self.meters.goniometer(GONIOMETER_POINTS)
     }
 }
 
