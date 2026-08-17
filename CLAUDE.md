@@ -103,6 +103,17 @@ ARCHITECTURE.md's "The scope window's lifecycle" for that decision and
 `tasks/phase-1.md`'s closing sections for both. The rest of ARCHITECTURE.md's
 "Known gaps" are design trades and remain open.
 
+**Phase 2 is planned, not started** (2026-08-17) -- see `tasks/phase-2.md` for
+the milestone plan (M1 connection, M2 remote playback, M3 browsing, M4
+playlists/scrobbling/stars, M5 failing well) and its eight decisions. The short
+version: Subsonic/OpenSubsonic only (Jellyfin does not speak it natively --
+PLAN.md §8.6 is corrected), the protocol lives in `player-core` while the
+transport does not (ureq natively, `fetch` in the worker on the web), web parity
+stays lockstep with the CORS and mixed-content limits stated rather than hidden,
+and the server's library is browsed live rather than mirrored. Nothing in the
+phase should touch the audio callback, the DSP path or the renderer. It needs a
+real Navidrome to verify against.
+
 `cargo run -p player-core --example seek_smoke -- <path>` checks that seeking a given file yields
 the same audio as playing through to that point — written for MP3, whose bit reservoir makes
 symphonia log an underflow warning on every seek (expected; see `tasks/phase-1.md`). See `ARCHITECTURE.md`'s "Known gaps" for tracked limitations (Opus,
