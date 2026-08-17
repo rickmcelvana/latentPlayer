@@ -140,7 +140,7 @@ difference 0.0, and a server that stalls mid-track), plus both live runs against
 the real Navidrome -- `cargo run -p player-core --example remote_smoke` and
 `/remote.html` in a browser, **user-run 2026-08-17, all checks passed on both**.
 
-**Phase 2 M3 is built** (2026-08-17): browsing the server. `subsonic/browse.rs`
+**Phase 2 M3 is done and user-confirmed on both shells** (2026-08-17): browsing the server. `subsonic/browse.rs`
 holds the five requests *and* the five payload shapes their answers arrive in
 (`getArtists` hides artists under an alphabetical index, `getAlbum` nests songs
 inside the album, `search3` returns all three kinds), so no endpoint name or
@@ -154,11 +154,14 @@ this app's own `Cross-Origin-Embedder-Policy: require-corp` blocks a plain
 cross-origin `<img src>` before the network sees it. The library panel gained a
 source switch, and `Rows.tsx` is now every row in the app -- local or server,
 same markup, same meaning for clicking one.
-Verified so far: **7/7** `cargo test -p player-core --test subsonic_browse`,
-11 new unit tests in `browse.rs` (129 in `player-core`, up from 119), and 3/3
-offline in `/browse.html`. What remains before M3 closes is the live pair:
-`cargo run -p player-core --example browse_smoke` and `/browse.html` in a
-browser, against the real Navidrome.
+Verified: **7/7** `cargo test -p player-core --test subsonic_browse`, 11 new unit
+tests in `browse.rs` (129 in `player-core`, up from 119), and both live runs
+against the real Navidrome -- `cargo run -p player-core --example browse_smoke`
+and `/browse.html` in a browser, **user-run 2026-08-17, all checks passed on
+both**, the web one including the check only a browser can make (cover art from
+another origin decoding under this app's COEP header). M4 (server playlists,
+scrobbling, stars) is next, and is the first milestone here that writes to the
+server.
 
 **Phase 2 is planned** (2026-08-17) -- see `tasks/phase-2.md` for
 the milestone plan (M1 connection, M2 remote playback, M3 browsing, M4

@@ -485,12 +485,20 @@ search it is a request to someone's machine rather than a filter over an array.
   11 `subsonic_http`, 7 `subsonic_browse`, 4 in `src-tauri`, 16 in
   `player-render`, clippy and fmt clean, `tsc` and oxlint clean.
 
-### What remains before M3 closes
+### Closed (2026-08-17)
 
-The live runs, on both shells, against the real Navidrome:
-`cargo run -p player-core --example browse_smoke` and `/browse.html`. Between
-them they check the same claims -- artists, a page of albums and the page after
-it being different music, an album's tracks, a search that finds something and a
-search that finds nothing, and that a browsed track is one this app can actually
-play -- plus, on the web only, that cover art fetched from another origin really
-decodes under this app's COEP header.
+**User-confirmed on both shells.** `browse_smoke` and `/browse.html` both pass
+every check against the real Navidrome: the artists come back out of the
+alphabetical index, a page of albums arrives and the page after it is different
+music (so the offset is real rather than ignored), an album's tracks come back
+with the suffix playback needs and a count that agrees with the browse row, a
+search finds what it was asked about and a nonsense query is empty rather than an
+error, and a browsed track opens as a playable stream. On the web, additionally,
+cover art fetched from another origin *decodes* -- which is the check that had to
+be made in a browser, since it is this app's own COEP header that makes the
+straightforward `<img src>` impossible.
+
+So the server's library is now something a person can look through rather than
+something a harness can enumerate, and what they find plays through the path M2
+proved. M4 -- server playlists, scrobbling, stars and ratings -- is next, and it
+is the first milestone in this phase that *writes* to the server.
