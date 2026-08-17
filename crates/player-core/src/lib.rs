@@ -15,6 +15,11 @@ pub mod loudness;
 pub mod phase;
 #[cfg(not(target_arch = "wasm32"))]
 pub mod playback;
+/// Tracks read over HTTP (Phase 2 M2). Native-only for `subsonic::http`'s
+/// reason: the web build fetches bytes in the browser and feeds them through
+/// `InMemorySource` instead.
+#[cfg(not(target_arch = "wasm32"))]
+pub mod remote;
 pub mod resample;
 pub mod source;
 pub mod spectrum;
@@ -38,6 +43,8 @@ pub use loudness::{LoudnessMeter, LoudnessReading};
 pub use phase::{goniometer_points, CorrelationMeter};
 #[cfg(not(target_arch = "wasm32"))]
 pub use playback::Playback;
+#[cfg(not(target_arch = "wasm32"))]
+pub use remote::RemoteSource;
 pub use source::{InMemorySource, LocalFile, PlaybackSource};
 pub use spectrum::SpectrumAnalyzer;
 pub use stream::StreamingDecoder;

@@ -47,4 +47,11 @@ pub enum PlayerError {
     /// starts empty rather than refusing to open the app.
     #[error("library error: {0}")]
     Library(String),
+
+    /// A track being read over the network could not be reached or read
+    /// (Phase 2 M2). Distinct from `Open`, which names a path: the recovery for
+    /// this one is about a server or a connection, and telling a listener that
+    /// a *file* failed to open would send them looking at their disk.
+    #[error("remote track: {0}")]
+    Remote(String),
 }
