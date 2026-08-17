@@ -135,6 +135,17 @@ async function getAudioContext(): Promise<AudioContext> {
 /// track's length.
 export async function loadFile(file: File): Promise<TransportState> {
   const { bytes, extensionHint } = await readFile(file);
+  return loadEncoded(bytes, extensionHint);
+}
+
+/// The same, for audio that did not come from a `File` -- a server track's
+/// bytes, fetched (Phase 2 M2). Everything past this point is identical:
+/// the worker cannot tell where a track came from, any more than the desktop
+/// engine can tell a `RemoteSource` from a file on disk.
+export async function loadEncoded(
+  bytes: Uint8Array,
+  extensionHint: string | null,
+): Promise<TransportState> {
   const ctx = await getAudioContext();
 
   const loaded = await new Promise<LoadedMessage>((resolve, reject) => {
@@ -184,6 +195,14 @@ export async function loadFile(file: File): Promise<TransportState> {
 /// one after it.
 export async function setNext(file: File): Promise<void> {
   const { bytes, extensionHint } = await readFile(file);
+  setNextEncoded(bytes, extensionHint);
+}
+
+/// Queues already-fetched bytes -- the web shell's prefetch. The fetching
+/// happens in the caller (playlist.ts) rather than here, and happens when the
+/// track is queued rather than when the seam arrives, which is what makes a
+/// gapless hand-off between two server tracks possible at all.
+export function setNextEncoded(bytes: Uint8Array, extensionHint: string | null): void {
   getWorker().postMessage({ type: "queue", bytes, extensionHint });
 }
 

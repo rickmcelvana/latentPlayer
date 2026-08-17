@@ -238,3 +238,33 @@ export async function reconnectServer(): Promise<ServerState> {
 export async function forgetServer(): Promise<ServerState> {
   return invoke<ServerState>("forget_server");
 }
+
+/// One track on the server (Phase 2 M2). Mirrors `ServerTrack` in
+/// src-tauri/src/servers.rs, and subsonicWeb.ts's copy on the web side.
+export interface ServerTrack {
+  id: string;
+  title: string;
+  artist: string;
+  album: string;
+  suffix: string;
+  durationSeconds: number;
+}
+
+/// A handful of tracks at random, so there is something to play before browsing
+/// exists (M3).
+export async function serverRandomTracks(count: number): Promise<ServerTrack[]> {
+  return invoke<ServerTrack[]>("server_random_tracks", { count });
+}
+
+/// Opens a server track and starts playing it. The same shape as `loadFile`,
+/// because on this shell the difference is one `PlaybackSource` deep: the bytes
+/// arrive over HTTP as the decoder asks for them, and nothing downstream knows.
+export async function loadServerTrack(id: string, suffix: string): Promise<TransportState> {
+  return invoke<TransportState>("load_server_track", { id, suffix });
+}
+
+/// Queues a server track for the gapless hand-off. The decoder opens it when it
+/// runs out of the current track, which is where the prefetch happens.
+export async function setNextServerTrack(id: string, suffix: string): Promise<void> {
+  return invoke("set_next_server_track", { id, suffix });
+}

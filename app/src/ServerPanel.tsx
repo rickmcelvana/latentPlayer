@@ -17,11 +17,25 @@ import {
   forgetServer,
   reconnectServer,
   secretStorageNote,
+  serverRandomTracks,
   serverState,
   type ServerState,
 } from "./server";
+import { trackFromServer, type PlaylistTrack } from "./playlist";
 
-export function ServerPanel() {
+/// How many tracks "Play random tracks" asks for. Enough that the gapless
+/// hand-off between two *server* tracks actually gets exercised by pressing the
+/// button, which is the point of the control existing this early.
+const RANDOM_COUNT = 10;
+
+interface Props {
+  /// Replaces the queue with these and starts at `index` -- the same callback
+  /// the library panel gets, because "play this" means the same thing wherever
+  /// the rows came from.
+  onPlay: (tracks: PlaylistTrack[], index: number) => void;
+}
+
+export function ServerPanel({ onPlay }: Props) {
   const [state, setState] = useState<ServerState>(emptyServerState());
   const [baseUrl, setBaseUrl] = useState("");
   const [user, setUser] = useState("");
@@ -56,6 +70,29 @@ export function ServerPanel() {
   }, []);
 
   const apiKeyMode = state.supportsApiKey && state.auth === "apiKey";
+
+  /// Pulls a few tracks off the server and plays them (Phase 2 M2).
+  ///
+  /// Random rather than browsed, because browsing is M3 and this milestone
+  /// still has to be something a person can press: it is the shortest path from
+  /// a connected server to sound coming out, and it is what makes the
+  /// remote path testable by hand on both shells.
+  async function playRandom() {
+    setBusy(true);
+    setState((current) => ({ ...current, error: "" }));
+    try {
+      const tracks = await serverRandomTracks(RANDOM_COUNT);
+      if (tracks.length === 0) {
+        setState((current) => ({ ...current, error: "The server returned no tracks to play." }));
+        return;
+      }
+      onPlay(tracks.map(trackFromServer), 0);
+    } catch (e) {
+      setState((current) => ({ ...current, error: String(e), errorIsCredentials: false }));
+    } finally {
+      setBusy(false);
+    }
+  }
 
   async function run(work: () => Promise<ServerState>) {
     setBusy(true);
@@ -107,6 +144,11 @@ export function ServerPanel() {
             </p>
           )}
           <div className="server-actions">
+            {state.connected && (
+              <button type="button" onClick={() => void playRandom()} disabled={busy}>
+                Play random tracks
+              </button>
+            )}
             <button type="button" onClick={() => void run(reconnectServer)} disabled={busy}>
               {state.connected ? "Check" : "Reconnect"}
             </button>

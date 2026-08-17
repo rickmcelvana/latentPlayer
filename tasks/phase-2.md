@@ -148,8 +148,8 @@ both in M1 rather than discover the need in M4:
   a response with no `Accept-Ranges`, a connection that stalls mid-track, a
   redirect, a 401. This is what makes the failure paths testable at all --
   nobody can unplug a real Navidrome on cue -- and it is what the smoke
-  examples (`subsonic_smoke`, `remote_smoke`) and their `/subsonic.html`
-  counterparts run against.
+  examples (`subsonic_smoke`, `remote_smoke`) and their `/subsonic.html` and
+  `/remote.html` counterparts run against.
 - **A real server**, because a fake one only ever returns what its author
   expected. Navidrome is the reference target. This is the half that needs a
   server to exist -- see "What this phase needs from you" below.
@@ -317,3 +317,94 @@ accepted by a real server, and reaches it through both transports.
 So M1's seam is real: a connection, credentials that survive a restart in the
 place each platform keeps such things, and a client that tells a wrong password
 apart from an unreachable server. M2 calls through it.
+
+## M2 -- Remote playback: built, awaiting the web shell's live run
+
+The phase's actual point: a track that lives on the server, played by the same
+engine that plays a file on disk.
+
+**Natively, the difference is one source deep.** `player-core/src/remote.rs` is a
+`PlaybackSource` over HTTP: `RemoteSource` builds it, `HttpStream` is the
+`MediaSource` symphonia reads. One 512KB chunk is held at a time, `seek` moves a
+cursor and issues no request at all (symphonia probes a container by seeking
+around and reading a few bytes -- fetching on every seek would make opening a
+track a dozen round trips), and the fetch happens when a read actually crosses
+into bytes not in hand. Everything downstream is untouched: the ring, the EQ, the
+tap, every meter, the scope. `load_server_track` is `load_file` with a different
+source built, which is exactly what decision 8 asked for.
+
+**The first request settles what kind of server this is.** A 206 with a
+`Content-Range` means real ranges: seek freely, hold a chunk. A 200 means the
+server ignored the range and sent the whole thing -- decision 7's transcoding
+case -- and then the body is buffered whole, bounded at 512MB, and the track
+still plays and still seeks. Both are proven against a fake server that does each
+on purpose.
+
+**On the web the parity limit is real, and stated rather than hidden**
+(decision 5). A browser has no `MediaSource` for the worker to pull through: the
+decoder reads a byte array it owns. So a server track is fetched whole before it
+plays -- `trackBytes` in `subsonicWeb.ts` -- which costs the wait at the start of
+a track and the track's size in memory, and buys back everything else unchanged,
+including instant seeking afterwards and a network stall that cannot underrun the
+ring because there is no network left to stall. It is also not a *new* cost on
+that shell: a picked local file has always been read whole into memory there. The
+message when a track is too large names the desktop app, which streams instead.
+
+**Prefetching is what queuing already was.** `queueTrack` does the work when the
+track is queued rather than at the seam: natively the decoder opens the stream
+when it runs out of the current track (a ring ahead of the listener), and on the
+web the whole next track is fetched at that moment. Both are ahead of the seam by
+construction, so a gapless hand-off between two *server* tracks needed no new
+machinery -- only for the fetching to happen at the right time.
+
+**A network stall is an underrun, and that was already answered.** An empty ring
+with the track not ended has meant silence and a held position since Phase 1 M2
+(`Shared::finished`'s note in `playback.rs`); a decode error means "this track is
+over, move on" rather than a stopped transport. A stalled network lands on the
+first, and a network that never recovers lands on the second after ureq's 60s
+timeout. What M2 had to add was only that the *source* waits and resumes rather
+than corrupting or truncating what it hands the decoder, which is now a test.
+
+**The UI entry point is deliberately small.** "Play random tracks" on the server
+panel: `getRandomSongs`, into the same queue local tracks go into, on both
+shells. Browsing is M3, and M2 still had to be something a person can press.
+
+### Verified
+
+- **`cargo test -p player-core --test remote_source`: 10/10.** The one that
+  matters compares audio: seven seconds of WAV, served over real TCP, decoded
+  through `RemoteSource`, against the same bytes decoded locally -- worst
+  difference **0.0**, over a fixture whose right channel ramps 0 to 1 so that
+  chunks stitched together in the wrong order are detectable rather than merely
+  different. Beside it: a container seek to 3.5s of 7s reading 0.501, byte seeks
+  either side of a chunk boundary, reading past the end being end-of-stream
+  rather than an error, a server that ignores ranges, a 404, a dead port, and a
+  server that stalls 250ms per chunk (audio identical, and the delay shows up in
+  the time taken, so it passes for the right reason).
+- **`/remote.html`, offline half: 3/3** in a real browser -- the stream URL
+  carries `format=raw` and the spec's known-answer token and no password, a song
+  list parses into playable rows, and a failure inside an HTTP 200 is a failure
+  on this side too. The live half is below.
+- **Live, native**: `cargo run -p player-core --example remote_smoke` against the
+  real Navidrome -- **user-run 2026-08-17, all checks passed**. It picks a track
+  at random, opens it, checks the container's duration against the one the server
+  stated (a URL built with the wrong id would otherwise play the wrong song
+  silently), plays for 1.5s, reads the *analysis tap* to prove audio reached the
+  output rather than a counter moving on its own, seeks, and hands over to a
+  queued track at the seam.
+- The full suite stayed green: 119 `player-core` unit tests, 11 `subsonic_http`,
+  4 in `src-tauri`, 16 in `player-render`, clippy and fmt clean.
+
+**Two bugs found here were in the test double, and both looked exactly like
+client bugs.** It hung up after every response, so ureq's pooled connection reuse
+met a closed socket and the *second* range request of every track died; and on
+Windows a socket accepted from a non-blocking listener inherits that, so reads
+returned `WouldBlock` before the request had arrived and the server closed
+connections mid-request -- intermittent under parallel tests, invisible when run
+alone. Both are written up where they happened, in `tests/common/mod.rs`.
+
+### What remains before M2 closes
+
+The web shell's live run: `/remote.html` with a server connected in the app,
+which plays a real track off the real server in a browser and checks the seek and
+the gapless hand-off after it. Everything it needs is built.

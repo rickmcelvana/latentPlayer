@@ -20,18 +20,21 @@ import {
   connectServer as connectNative,
   forgetServer as forgetNative,
   reconnectServer as reconnectNative,
+  serverRandomTracks as randomNative,
   serverState as stateNative,
   type ServerState,
+  type ServerTrack,
 } from "./nativePlayer";
 import {
   connectServer as connectWeb,
   emptyServerState,
   forgetServer as forgetWeb,
+  randomTracks as randomWeb,
   reconnectServer as reconnectWeb,
   serverState as stateWeb,
 } from "./subsonicWeb";
 
-export type { ServerState };
+export type { ServerState, ServerTrack };
 export { emptyServerState };
 
 /// How the secret is being kept, so the panel can say it plainly where the user
@@ -63,4 +66,13 @@ export async function reconnectServer(): Promise<ServerState> {
 
 export async function forgetServer(): Promise<ServerState> {
   return isTauri() ? forgetNative() : forgetWeb();
+}
+
+/// A handful of tracks at random from the server (Phase 2 M2).
+///
+/// The smallest thing that produces playable rows, and deliberately not a browse
+/// API -- that is M3. What it is here for is to make remote playback something a
+/// person can press rather than something only a harness exercises.
+export async function serverRandomTracks(count: number): Promise<ServerTrack[]> {
+  return isTauri() ? randomNative(count) : randomWeb(count);
 }

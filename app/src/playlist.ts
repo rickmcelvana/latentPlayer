@@ -16,8 +16,10 @@ import { isTauri } from "./isTauri";
 import {
   clearNext as clearNextNative,
   loadFile as loadFileNative,
+  loadServerTrack as loadServerNative,
   seek as seekNative,
   setNext as setNextNative,
+  setNextServerTrack as setNextServerNative,
   setPlaying as setPlayingNative,
   setVolume as setVolumeNative,
   transport as transportNative,
@@ -25,19 +27,24 @@ import {
 } from "./nativePlayer";
 import {
   clearNext as clearNextWeb,
+  loadEncoded as loadEncodedWeb,
   loadFile as loadFileWeb,
   pause as pauseWeb,
   play as playWeb,
   seek as seekWeb,
   setNext as setNextWeb,
+  setNextEncoded as setNextEncodedWeb,
   setVolume as setVolumeWeb,
   transport as transportWeb,
 } from "./playerEngine";
+import { trackBytes } from "./subsonicWeb";
+import type { ServerTrack } from "./server";
 
 export type { TransportState };
 
-/// One entry in the playlist. Exactly one of `path`/`file` is set, whichever
-/// the running shell can open.
+/// Where a playlist entry's audio comes from. Exactly one of `path`/`file`/
+/// `server` is set -- the first two are this machine, whichever shell is
+/// running, and the third is the music server (Phase 2 M2).
 export interface PlaylistTrack {
   /// Stable across reordering and duplicates, which an array index isn't --
   /// the same file can legitimately appear twice in a playlist.
@@ -52,6 +59,12 @@ export interface PlaylistTrack {
   /// library row to point at. A saved playlist stores these rather than the
   /// tracks themselves, so fixing a tag fixes it everywhere the track appears.
   libraryId: string | null;
+  /// The server track this plays, when it is one. The id is the server's, and
+  /// the suffix is the decoder's format hint -- a Subsonic stream URL carries no
+  /// extension, so without it a bare AAC stream is ambiguous to symphonia's
+  /// probe. Both shells need exactly this pair and nothing else, which is why
+  /// there is no third adapter here: the difference is one source deep.
+  server: { id: string; suffix: string } | null;
 }
 
 let nextId = 0;
@@ -63,11 +76,24 @@ export function trackFromPath(path: string): PlaylistTrack {
     path,
     file: null,
     libraryId: null,
+    server: null,
   };
 }
 
 export function trackFromFile(file: File): PlaylistTrack {
-  return { id: nextId++, name: file.name, path: null, file, libraryId: null };
+  return { id: nextId++, name: file.name, path: null, file, libraryId: null, server: null };
+}
+
+export function trackFromServer(track: ServerTrack): PlaylistTrack {
+  const name = track.artist ? `${track.artist} - ${track.title}` : track.title || track.id;
+  return {
+    id: nextId++,
+    name,
+    path: null,
+    file: null,
+    libraryId: null,
+    server: { id: track.id, suffix: track.suffix },
+  };
 }
 
 /// Starts `track` immediately, replacing whatever was playing and dropping
@@ -75,17 +101,40 @@ export function trackFromFile(file: File): PlaylistTrack {
 /// or next/previous -- as opposed to the gapless hand-off, which happens in
 /// the engine with no call from here at all.
 export async function loadTrack(track: PlaylistTrack): Promise<TransportState> {
-  if (isTauri()) return loadFileNative(requirePath(track));
-  await loadFileWeb(requireFile(track));
-  // The native command starts playback itself; match it here so callers get
-  // one behaviour rather than two.
+  if (track.server) {
+    const { id, suffix } = track.server;
+    // Desktop: the engine opens the network stream itself and reads it as it
+    // decodes. Web: the bytes are fetched here first, because the worker
+    // decodes from an array it owns and there is nothing for it to pull
+    // through (see `trackBytes` for what that costs and what it buys).
+    if (isTauri()) return loadServerNative(id, suffix);
+    await loadEncodedWeb(await trackBytes(id), suffix || null);
+  } else if (isTauri()) {
+    return loadFileNative(requirePath(track));
+  } else {
+    await loadFileWeb(requireFile(track));
+  }
+  // The native commands start playback themselves; match that here so callers
+  // get one behaviour rather than two.
   await playWeb();
   return transportWeb();
 }
 
 /// Hands the engine the track to play when the current one runs out, or
 /// clears the slot when there is nothing after it.
+///
+/// For a server track this is also the prefetch, on both shells: the desktop
+/// engine opens the stream when it runs out of the current track, and the web
+/// shell fetches the whole thing now. Either way the work happens when the
+/// track is queued -- a track ahead of the seam -- rather than at the seam,
+/// which is what keeps a hand-off between two server tracks gapless.
 export async function queueTrack(track: PlaylistTrack | null): Promise<void> {
+  if (track?.server) {
+    const { id, suffix } = track.server;
+    if (isTauri()) return setNextServerNative(id, suffix);
+    setNextEncodedWeb(await trackBytes(id), suffix || null);
+    return;
+  }
   if (isTauri()) {
     return track ? setNextNative(requirePath(track)) : clearNextNative();
   }

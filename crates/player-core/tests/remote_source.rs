@@ -244,6 +244,55 @@ fn seeking_a_remote_track_lands_where_it_says() {
     );
 }
 
+/// A network that stalls is a delay, not damage.
+///
+/// This is the failure a local file cannot have, and the one the phase's
+/// decision 8 called out as playback's only exception: partway through a track
+/// the bytes stop coming for a while. What the engine does with that is already
+/// settled and is not new here -- an empty ring with the track not ended is an
+/// underrun, and the callback answers it with silence and a held position
+/// (`Shared::finished`'s note in playback.rs), the same as a disk that is slow.
+/// What this checks is the half that *is* new: that the source waits and then
+/// carries on, so what eventually reaches the decoder is the whole track in the
+/// right order rather than a gap stitched over.
+#[test]
+fn a_stalled_network_delays_the_audio_rather_than_breaking_it() {
+    let wav = wav_bytes(44_100, 7.0);
+    let server = FakeServer::start();
+    server.on(
+        "stream",
+        Reply::Stalling {
+            body: wav.clone(),
+            delay: std::time::Duration::from_millis(250),
+        },
+    );
+
+    let started = std::time::Instant::now();
+    let stalled = decode_all(&RemoteSource::new(
+        format!("{}/rest/stream", server.base_url()),
+        Some("wav".into()),
+    ));
+    let elapsed = started.elapsed();
+    let local = decode_all(&InMemorySource::new(wav, Some("wav".into())));
+
+    assert_eq!(local.len(), stalled.len(), "different number of samples");
+    let worst = local
+        .iter()
+        .zip(stalled.iter())
+        .map(|(a, b)| (a - b).abs())
+        .fold(0.0f32, f32::max);
+    assert_eq!(
+        worst, 0.0,
+        "audio through a stalling server differs by {worst}"
+    );
+    // And the stall really happened rather than the whole track arriving in the
+    // first, un-delayed response -- otherwise this passes for the wrong reason.
+    assert!(
+        elapsed >= std::time::Duration::from_millis(250),
+        "expected the delayed chunks to show up in the time taken, took {elapsed:?}"
+    );
+}
+
 /// Decodes a whole source into interleaved samples, the way the decoder thread
 /// would drain it.
 fn decode_all(source: &dyn PlaybackSource) -> Vec<f32> {

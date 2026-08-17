@@ -13,7 +13,12 @@
 // fetch" (decision 5): a page on https: may not talk to an http: server at all,
 // and a server that does not send CORS headers is unreachable from any origin
 // but its own.
-import init, { subsonicParse, subsonicRequestUrl } from "./wasm/player_rt_wasm.js";
+import init, {
+  subsonicParse,
+  subsonicRandomSongs,
+  subsonicRequestUrl,
+  subsonicStreamUrl,
+} from "./wasm/player_rt_wasm.js";
 import {
   CURRENT_SERVER,
   deleteServer,
@@ -140,6 +145,20 @@ async function call(
   endpoint: string,
   params: Record<string, string> = {},
 ): Promise<Parsed & { ok: true }> {
+  const bytes = await callBytes(server, endpoint, params);
+  const parsed = JSON.parse(subsonicParse(bytes)) as Parsed;
+  if (!parsed.ok) throw new SubsonicFailure(parsed.error);
+  return parsed;
+}
+
+/// The same call, stopping at the bytes -- for the endpoints whose response is
+/// read by a different Rust parser (`subsonicRandomSongs`, and from M3 the
+/// browse endpoints).
+async function callBytes(
+  server: StoredServer,
+  endpoint: string,
+  params: Record<string, string> = {},
+): Promise<Uint8Array> {
   await ready();
   const url = subsonicRequestUrl(
     server.baseUrl,
@@ -150,7 +169,13 @@ async function call(
     freshSalt(),
     JSON.stringify(params),
   );
+  const response = await get(server, url);
+  return new Uint8Array(await response.arrayBuffer());
+}
 
+/// One GET, with the browser's own refusals turned into a `SubsonicFailure`
+/// that names what to change.
+async function get(server: StoredServer, url: string): Promise<Response> {
   let response: Response;
   try {
     // `cors` explicitly, which is also what satisfies this app's own
@@ -169,7 +194,7 @@ async function call(
   if (!response.ok) {
     // A real HTTP failure means something other than the application talking --
     // a proxy, an auth layer, a wrong path. Subsonic's own failures arrive as
-    // 200s and are caught by the parse below.
+    // 200s and are caught by whichever parser reads the body.
     throw new SubsonicFailure({
       kind: "http",
       code: String(response.status),
@@ -177,11 +202,7 @@ async function call(
       credentials: false,
     });
   }
-
-  const bytes = new Uint8Array(await response.arrayBuffer());
-  const parsed = JSON.parse(subsonicParse(bytes)) as Parsed;
-  if (!parsed.ok) throw new SubsonicFailure(parsed.error);
-  return parsed;
+  return response;
 }
 
 function stateFrom(server: StoredServer): ServerState {
@@ -291,6 +312,114 @@ export async function forgetServer(): Promise<ServerState> {
   return emptyServerState();
 }
 
-/// Exposed for the harness at /subsonic.html, which drives the same path the UI
-/// does against a server the developer names.
-export const testing = { call, connectTo, freshSalt };
+/// One track on the server, as much of it as playing one needs. Mirrors
+/// `ServerTrack` in src-tauri/src/servers.rs field for field, the way
+/// `ServerState` does -- and the rows are built by the same Rust either way
+/// (`subsonicRandomSongs`), so the two shells cannot disagree about what a
+/// response contained.
+export interface ServerTrack {
+  id: string;
+  title: string;
+  artist: string;
+  album: string;
+  suffix: string;
+  durationSeconds: number;
+}
+
+type ParsedSongs = { ok: true; songs: ServerTrack[] } | { ok: false; error: ParsedError };
+
+/// A handful of tracks at random, so there is something to play before browsing
+/// exists (M3). Mirrors `server_random_tracks` on the desktop shell.
+export async function randomTracks(count: number): Promise<ServerTrack[]> {
+  const server = await requireServer();
+  const bytes = await callBytes(server, "getRandomSongs", { size: String(count) });
+  const parsed = JSON.parse(subsonicRandomSongs(bytes)) as ParsedSongs;
+  if (!parsed.ok) throw new SubsonicFailure(parsed.error);
+  return parsed.songs;
+}
+
+/// Most of a track this build will hold in memory at once.
+///
+/// The same bound the desktop shell puts on a server that ignores range
+/// requests and sends the whole file (`MAX_WHOLE_BYTES` in
+/// player-core/src/remote.rs), for the same reason: past some size, refusing
+/// with a sentence is kinder than an allocation that takes the tab down. It is
+/// far above any real track -- an hour of stereo FLAC is well under it.
+const MAX_TRACK_BYTES = 512 * 1024 * 1024;
+
+/// A server track's encoded bytes, whole.
+///
+/// This is where web parity stops being free, and the limit is stated rather
+/// than hidden (decision 5). The desktop shell streams a track through
+/// `RemoteSource`: 512KB at a time, with seeks turning into range requests, so
+/// the memory a track costs does not depend on its length. A browser has no
+/// equivalent -- the worker decodes from a byte array it owns (worker.ts), and
+/// there is no `MediaSource` for it to pull through -- so the whole track is
+/// fetched before it plays. That costs the wait at the start of a track and the
+/// track's size in memory, and buys the same behaviour everywhere else: seeking
+/// is instant afterwards, and a network that stalls mid-track cannot underrun
+/// the ring, because there is no network left to stall.
+///
+/// Note this is the same thing the web build already does for a local file --
+/// `File.arrayBuffer()` in playerEngine.ts -- so it is not a new cost on this
+/// shell, only one the desktop shell no longer pays.
+export async function trackBytes(id: string): Promise<Uint8Array> {
+  const server = await requireServer();
+  await ready();
+  const url = subsonicStreamUrl(
+    server.baseUrl,
+    server.user,
+    server.secret,
+    server.auth === "apiKey",
+    freshSalt(),
+    id,
+  );
+  const response = await get(server, url);
+
+  // Checked before reading when the server states it, so an implausible
+  // response is refused rather than buffered and then refused.
+  const stated = Number(response.headers.get("content-length") ?? "");
+  if (Number.isFinite(stated) && stated > MAX_TRACK_BYTES) {
+    throw new SubsonicFailure({
+      kind: "transport",
+      code: null,
+      message: `That track is ${(stated / 1024 / 1024).toFixed(0)}MB, which this build will not hold in memory. The desktop app streams it instead.`,
+      credentials: false,
+    });
+  }
+
+  const bytes = new Uint8Array(await response.arrayBuffer());
+  if (bytes.byteLength > MAX_TRACK_BYTES) {
+    throw new SubsonicFailure({
+      kind: "transport",
+      code: null,
+      message: "That track is too large for this build to hold in memory. The desktop app streams it instead.",
+      credentials: false,
+    });
+  }
+  // A server that answers `stream` with an error envelope sends JSON, not
+  // audio, and it arrives as an HTTP 200 like every other Subsonic failure. The
+  // decoder would report it as an unsupported format, which is true and
+  // useless; parsing it here means the server's own words reach the user.
+  const failure = audioFailure(bytes);
+  if (failure) throw failure;
+  return bytes;
+}
+
+/// A `stream` response that is a Subsonic error rather than audio, if that is
+/// what it is. Cheap: only bodies small enough and shaped like JSON are parsed.
+function audioFailure(bytes: Uint8Array): SubsonicFailure | null {
+  if (bytes.byteLength > 64 * 1024 || bytes[0] !== 0x7b /* { */) return null;
+  const parsed = JSON.parse(subsonicParse(bytes)) as Parsed;
+  return parsed.ok ? null : new SubsonicFailure(parsed.error);
+}
+
+async function requireServer(): Promise<StoredServer> {
+  const server = await storedServer();
+  if (!server) throw new Error("no music server is configured");
+  return server;
+}
+
+/// Exposed for the harnesses at /subsonic.html and /remote.html, which drive the
+/// same path the UI does against a server the developer names.
+export const testing = { call, callBytes, connectTo, freshSalt };

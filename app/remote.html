@@ -1,0 +1,39 @@
+<!doctype html>
+<!--
+  Dev-only harness for remote playback in the browser (Phase 2 M2). Served at
+  /remote.html by `npm run dev`; deliberately not in vite's build inputs, so it
+  never ships. The native counterparts are
+  `cargo test -p player-core --test remote_source` (the fake-server half) and
+  `cargo run -p player-core --example remote_smoke` (the live half), making the
+  same claims about the same things.
+
+  What only this side can check: that a *browser* can play a track off the
+  server -- a whole-track fetch rather than the desktop shell's range requests,
+  through the worker and the worklet, with the same transport, the same seek and
+  the same gapless hand-off on the other side of it.
+
+  There is nowhere to type a password here: this uses the server the app's own
+  panel stored. Connect one in the app first. It plays real sound, quietly.
+-->
+<html lang="en">
+  <head>
+    <meta charset="UTF-8" />
+    <title>remote playback smoke</title>
+    <style>
+      body { background: #14161a; color: #dfe3ea; font: 13px/1.6 ui-monospace, monospace; padding: 24px; }
+      button { font: inherit; padding: 6px 10px; background: #1d2027; color: inherit; border: 1px solid #333842; border-radius: 4px; }
+      pre { white-space: pre-wrap; }
+      .note { opacity: 0.6; }
+    </style>
+  </head>
+  <body>
+    <p>Plays a track off the music server, in this browser, through the app's own playback path.</p>
+    <p class="note">
+      Uses the server set up in the app (same origin, same IndexedDB). The offline
+      checks run without one. Takes about fifteen seconds, and makes sound.
+    </p>
+    <button id="run">Run</button>
+    <pre id="out"></pre>
+    <script type="module" src="/src/remoteSmoke.ts"></script>
+  </body>
+</html>

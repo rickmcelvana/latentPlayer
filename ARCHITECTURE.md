@@ -94,6 +94,21 @@ crates/
                      calling this same code through two wasm bindings. Salts come
                      from whichever shell is asking, since a browser and an OS
                      have different RNGs and only one of them needs a build flag.
+                     remote.rs (Phase 2 M2) is a PlaybackSource over HTTP, and
+                     is the whole of what remote playback adds to the engine:
+                     one 512KB chunk held at a time, seeks that move a cursor
+                     and issue no request (symphonia probes by seeking and
+                     reading a few bytes, so fetching per seek would make
+                     opening a track a dozen round trips), and a fetch only when
+                     a read crosses into bytes not in hand. The first response
+                     settles which kind of server this is: 206 means real
+                     ranges, 200 means it ignored the range and sent everything
+                     -- a transcoding endpoint -- which is then buffered whole,
+                     bounded, and still plays and still seeks. A stalled network
+                     is an underrun, which the callback has answered with
+                     silence and a held position since Phase 1 M2; a network
+                     that never recovers becomes a decode error after ureq's
+                     timeout, which ends the track rather than the transport.
                      library.rs is the desktop library and is native-only by
                      necessity -- a browser has directory handles, not paths.
                      It walks folders, keeps a versioned JSON index plus a
@@ -184,8 +199,14 @@ app/                 React + TS + Vite. Same component tree renders in the
                      "play track n" into the load/queue pair both shells
                      expose, so the one remaining difference between them --
                      a desktop track is a path, a web track is a File --
-                     stops there. The engine still holds only current + next
-                     (M3's decision); ordering lives here.
+                     stops there. Since Phase 2 M2 a third kind of entry sits
+                     beside those two: a server track, which is an id and a
+                     format hint, and which the desktop shell hands to the
+                     engine as a RemoteSource while the web shell fetches whole
+                     and hands over as bytes. Queuing one is also the prefetch,
+                     on both shells -- the work happens a track ahead of the
+                     seam rather than at it. The engine still holds only
+                     current + next (M3's decision); ordering lives here.
                      audioSab.ts holds the one definition
                      of the SharedArrayBuffer all three web parties use --
                      control block, playback ring, scope history, the
@@ -209,6 +230,14 @@ app/                 React + TS + Vite. Same component tree renders in the
                      credentials go in IndexedDB in plaintext, because a browser
                      has no credential store -- which the panel says, next to the
                      field the secret is typed into.
+                     Its M2 half fetches a server track's bytes *whole* before
+                     playing them: a browser has no MediaSource for the worker
+                     to pull through, so there is no web counterpart to
+                     remote.rs's chunking. That costs the wait at the start of a
+                     track and the track's size in memory -- the same thing this
+                     shell already does for a picked local file -- and leaves
+                     everything after it identical, including instant seeking
+                     and a stall that cannot underrun the ring.
                      playlist.ts, analysis.ts, scope.ts, library.ts, eq.ts and
                      server.ts are the six adapter modules components call:
                      playlist.ts picks the shell for playback, analysis.ts for
@@ -244,13 +273,16 @@ app/                 React + TS + Vite. Same component tree renders in the
                      which is two lines of arithmetic and still lives in Rust
                      so the two shells cannot draw different figures.
                      gapless.html, spectrum.html, loudness.html, scope.html,
-                     library.html, eq.html and subsonic.html
+                     library.html, eq.html, subsonic.html and remote.html
                      (with their *Smoke.ts) are dev-only harnesses -- served at
                      those paths, never bundled -- running the same checks as
                      the native gapless_smoke, spectrum_smoke, loudness_smoke,
-                     scope_smoke, library_smoke, eq_smoke and subsonic_smoke
-                     examples. subsonic.html additionally checks the two things
-                     only a browser can fail at, CORS and mixed content.
+                     scope_smoke, library_smoke, eq_smoke, subsonic_smoke and
+                     remote_smoke examples. subsonic.html additionally checks
+                     the two things only a browser can fail at, CORS and mixed
+                     content; remote.html plays a real server track through the
+                     app's own playlist path and takes its server from what the
+                     panel stored, so there is nowhere to type a password in it.
                      webScope.ts drives the web build's scope canvas
                      (WasmRenderer, via rAF) -- the web-side counterpart of
                      src-tauri's native redraw thread.
@@ -549,6 +581,34 @@ at the correct rate, re-verified with the same probe.
   or two per ring's worth of audio and keeps the consumer free of any
   signalling work, which is the trade that matters on the audio callback --
   but it is a poll, and worth revisiting if it ever shows up in a profile.
+- **A network hiccup that outlasts the request timeout ends the track** (Phase 2
+  M2, desktop). A stall is handled well while it lasts -- the source blocks, the
+  ring drains, the callback plays silence and holds the position, and the audio
+  resumes with nothing missing (checked against a server that stalls per chunk).
+  But there is no retry: once ureq's 60s timeout fires, the read is an error, and
+  the decoder treats a broken track the way it treats a corrupt file, by moving
+  on to whatever is queued. On a flaky connection that turns a five-second
+  outage's worth of patience into a skipped track. The fix is a bounded retry
+  with backoff inside `HttpStream::fetch`, which also wants the UI to be able to
+  say "buffering" -- neither exists yet, and M5 ("failing well") is where they
+  belong.
+- **Nothing says "buffering"** (Phase 2 M2, both shells). A track that is slow to
+  arrive looks like a UI that is doing nothing: natively the transport reports
+  `playing` with the position held, and on the web `loadTrack` does not return
+  until the whole track has been fetched, so a row clicked on a slow connection
+  simply takes a while to make a sound. Honest but mute. The state exists in both
+  engines (an empty ring with the track not ended is exactly it); what is missing
+  is a way for the transport snapshot to carry it and something in the UI to draw.
+- **The web shell fetches a whole server track before playing it** (Phase 2 M2).
+  A browser has no `MediaSource` the worker can pull through, so there is no web
+  counterpart to `remote.rs`'s 512KB chunking: the track's bytes are fetched, and
+  then it plays. The wait scales with the track and the connection, and the
+  memory cost is the encoded track (bounded at 512MB, above which it refuses and
+  says the desktop app streams instead). Not a new cost on that shell -- a picked
+  local file has always been read whole -- and everything after the fetch is
+  identical, including instant seeking. A real fix is a `Blob`/stream-backed wasm
+  source that reads on demand, which is the same missing piece as the web
+  library's whole-file tag scan above.
 - **AAC/M4A encoder delay and padding are not trimmed.** For MP3 and Ogg this
   is handled for us: the demuxer populates `Packet::trim_start`/`trim_end` and
   the decoder applies them itself (`symphonia-bundle-mp3/src/decoder.rs:131`

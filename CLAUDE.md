@@ -120,6 +120,27 @@ transports against a real server.
 real server; `cargo test -p player-core --test subsonic_http` checks it against
 a fake one that misbehaves on purpose (`tests/common/mod.rs`, which M2 reuses).
 
+**Phase 2 M2 is built** (2026-08-17) and is the phase's point: a track on the
+server plays through the same engine as a file on disk. `player-core::remote` is
+a `PlaybackSource` over HTTP -- one 512KB chunk in memory, seeks that issue no
+request, and a first response that settles whether the server ranges (206) or
+ignored the range and sent everything (200, a transcoding endpoint, buffered
+whole and still seekable). Nothing downstream changed: the ring, the EQ, the tap,
+the meters and the scope cannot tell. The web shell's parity limit is real and
+stated rather than hidden -- a browser has no `MediaSource` for the worker, so
+`subsonicWeb.ts` fetches a server track **whole** before playing it, which is
+what a picked local file has always cost there. Queuing a server track is the
+prefetch on both shells, which is what keeps a gapless hand-off between two of
+them gapless. `playlist.ts` gained a third kind of entry (an id and a format
+hint) beside a path and a `File`, and "Play random tracks" on the server panel is
+the entry point until browsing lands in M3.
+Verified: **10/10** `cargo test -p player-core --test remote_source` (including
+audio decoded over real TCP matching the same bytes decoded locally, worst
+difference 0.0, and a server that stalls mid-track), **3/3** offline in
+`/remote.html`, and the live native run -- `cargo run -p player-core --example
+remote_smoke`, **user-run 2026-08-17, all checks passed**. What remains before M2
+closes is `/remote.html`'s live half in a browser.
+
 **Phase 2 is planned** (2026-08-17) -- see `tasks/phase-2.md` for
 the milestone plan (M1 connection, M2 remote playback, M3 browsing, M4
 playlists/scrobbling/stars, M5 failing well) and its eight decisions. The short

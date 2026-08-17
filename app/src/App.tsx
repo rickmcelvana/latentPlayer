@@ -155,10 +155,11 @@ function App() {
     [current, play, tracks],
   );
 
-  /// Replaces the queue with a list from the library and starts at `index`.
-  /// Deliberately a replacement rather than an append: clicking a row in the
-  /// library means "play this now", the same as clicking a row in the queue.
-  const playFromLibrary = useCallback(
+  /// Replaces the queue with a list -- from the library, or from the server --
+  /// and starts at `index`. Deliberately a replacement rather than an append:
+  /// clicking a row in the library means "play this now", the same as clicking
+  /// a row in the queue.
+  const playTracks = useCallback(
     (list: PlaylistTrack[], index: number) => {
       if (list.length === 0) return;
       setTracks(list);
@@ -348,11 +349,13 @@ function App() {
 
         {error && <p className="error">{error}</p>}
 
-        <LibraryPanel onPlay={playFromLibrary} onQueue={queueFromLibrary} queue={tracks} />
+        <LibraryPanel onPlay={playTracks} onQueue={queueFromLibrary} queue={tracks} />
 
-        {/* Phase 2 M1 connects to a server; browsing what is on it is M3, so
-            this sits below the local library rather than beside it for now. */}
-        <ServerPanel />
+        {/* Phase 2 M1 connects to a server and M2 plays from it; browsing what
+            is on it is M3, so this sits below the local library rather than
+            beside it for now. Server tracks land in the same queue as local
+            ones -- the playlist is one list, whatever a row plays. */}
+        <ServerPanel onPlay={playTracks} />
 
         <ScopeControls />
 

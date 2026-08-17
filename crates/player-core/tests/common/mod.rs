@@ -36,6 +36,14 @@ pub enum Reply {
     /// Headers promising more than the body delivers, then a closed socket --
     /// what a server going away mid-transfer looks like to a client.
     Truncated { promised: usize, sent: Vec<u8> },
+    /// A ranged body whose *later* chunks are slow to arrive -- a network that
+    /// stalls partway through a track, which is the one failure a local file
+    /// cannot have. The first request is answered at once so opening a track is
+    /// not what is being measured.
+    Stalling {
+        body: Vec<u8>,
+        delay: std::time::Duration,
+    },
     /// Accept the connection and never answer, so the client's own timeout is
     /// the only thing that ends it.
     Hang,
@@ -318,53 +326,14 @@ fn serve_one(
             // `promised - sent.len()` bytes that will never come.
             false
         }
-        Reply::Ranged { body } => {
-            // Headers built line by line rather than as one long literal: the
-            // separator is CRLF and getting that wrong produces a header name
-            // no client will parse, which is exactly the bug this arm had.
-            let total = body.len() as u64;
-            let (status, mut headers, slice): (&str, Vec<String>, &[u8]) =
-                match range.as_deref().and_then(parse_range) {
-                    Some((first, _)) if first >= total => {
-                        // What a real server answers for a range past the end.
-                        let head = [
-                            "HTTP/1.1 416 Range Not Satisfiable",
-                            "Content-Length: 0",
-                            "",
-                            "",
-                        ]
-                        .join("\r\n");
-                        let _ = stream.write_all(head.as_bytes());
-                        let _ = stream.flush();
-                        return true;
-                    }
-                    Some((first, last)) => {
-                        let last = last.unwrap_or(total - 1).min(total.saturating_sub(1));
-                        (
-                            "HTTP/1.1 206 Partial Content",
-                            vec![format!("Content-Range: bytes {first}-{last}/{total}")],
-                            &body[first as usize..=last as usize],
-                        )
-                    }
-                    // No range asked for: the whole thing, the way any file
-                    // server answers a plain GET.
-                    None => ("HTTP/1.1 200 OK", Vec::new(), &body[..]),
-                };
-
-            headers.push("Content-Type: application/octet-stream".to_string());
-            headers.push("Accept-Ranges: bytes".to_string());
-            headers.push(format!("Content-Length: {}", slice.len()));
-
-            let mut head = String::from(status);
-            for header in &headers {
-                head.push_str("\r\n");
-                head.push_str(header);
+        Reply::Ranged { body } => serve_ranged(stream, range.as_deref(), &body),
+        Reply::Stalling { body, delay } => {
+            // Counted across the whole server rather than per path, which is
+            // enough: the tests that use this talk to one path.
+            if requests.load(Ordering::Acquire) > 1 {
+                std::thread::sleep(delay);
             }
-            head.push_str("\r\n\r\n");
-            let _ = stream.write_all(head.as_bytes());
-            let _ = stream.write_all(slice);
-            let _ = stream.flush();
-            true
+            serve_ranged(stream, range.as_deref(), &body)
         }
         Reply::Hang => {
             // This one *wants* to poll rather than block, so it opts back out of
@@ -385,6 +354,57 @@ fn serve_one(
             false
         }
     }
+}
+
+/// A body served the way a file server serves one. Returns whether the
+/// connection may carry another request.
+fn serve_ranged(stream: &mut TcpStream, range: Option<&str>, body: &[u8]) -> bool {
+    // Headers built line by line rather than as one long literal: the separator
+    // is CRLF and getting that wrong produces a header name no client will
+    // parse, which is exactly the bug this arm had.
+    let total = body.len() as u64;
+    let (status, mut headers, slice): (&str, Vec<String>, &[u8]) = match range.and_then(parse_range)
+    {
+        Some((first, _)) if first >= total => {
+            // What a real server answers for a range past the end.
+            let head = [
+                "HTTP/1.1 416 Range Not Satisfiable",
+                "Content-Length: 0",
+                "",
+                "",
+            ]
+            .join("\r\n");
+            let _ = stream.write_all(head.as_bytes());
+            let _ = stream.flush();
+            return true;
+        }
+        Some((first, last)) => {
+            let last = last.unwrap_or(total - 1).min(total.saturating_sub(1));
+            (
+                "HTTP/1.1 206 Partial Content",
+                vec![format!("Content-Range: bytes {first}-{last}/{total}")],
+                &body[first as usize..=last as usize],
+            )
+        }
+        // No range asked for: the whole thing, the way any file server
+        // answers a plain GET.
+        None => ("HTTP/1.1 200 OK", Vec::new(), body),
+    };
+
+    headers.push("Content-Type: application/octet-stream".to_string());
+    headers.push("Accept-Ranges: bytes".to_string());
+    headers.push(format!("Content-Length: {}", slice.len()));
+
+    let mut head = String::from(status);
+    for header in &headers {
+        head.push_str("\r\n");
+        head.push_str(header);
+    }
+    head.push_str("\r\n\r\n");
+    let _ = stream.write_all(head.as_bytes());
+    let _ = stream.write_all(slice);
+    let _ = stream.flush();
+    true
 }
 
 fn parse_query(query: &str) -> HashMap<String, String> {
