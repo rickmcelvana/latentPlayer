@@ -403,8 +403,17 @@ returned `WouldBlock` before the request had arrived and the server closed
 connections mid-request -- intermittent under parallel tests, invisible when run
 alone. Both are written up where they happened, in `tests/common/mod.rs`.
 
-### What remains before M2 closes
+### Closed (2026-08-17)
 
-The web shell's live run: `/remote.html` with a server connected in the app,
-which plays a real track off the real server in a browser and checks the seek and
-the gapless hand-off after it. Everything it needs is built.
+**User-confirmed on both shells.** The native live run (`remote_smoke`) and the
+web one (`/remote.html`, in a real browser against the real Navidrome) both pass
+every check: a random track opens over the network, the container's length agrees
+with the length the server stated, playback advances in real time, the analysis
+tap shows audio actually reached the output, a seek lands where it says, and a
+queued server track takes over at the seam.
+
+So the phase's point is proven: a track that lives on the server plays through
+the same engine, the same DSP path and the same meters as a file on disk, on both
+shells -- one over range requests as it decodes, one fetched whole first, and the
+difference visible nowhere above `playlist.ts`. M3 can browse a server whose
+tracks are already known to play.
