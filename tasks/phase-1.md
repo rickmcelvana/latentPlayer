@@ -1271,3 +1271,93 @@ restarting (found during M7, a UI-level disagreement between `playing` and
 `finished`), and closing the scope window by hand panics its redraw thread
 (pre-existing M6 code). Neither belonged inside a milestone that wasn't about
 them, and both are worth clearing before Phase 2 rather than carrying forward.
+
+## Both open bugs, closed (2026-08-17)
+
+The two ordinary bugs the section above left standing, cleared before Phase 2
+starts. Neither was a milestone, so neither gets one; what they do get is the
+decision each turned out to need.
+
+### Play at the end of a track paused instead of restarting
+
+Small, and small in a way worth being precise about, because there were two
+candidate fixes and only one of them is right.
+
+The engine reports `playing` and `finished` separately, and at the end of a
+queue both are true. The obvious fix is to clear `playing` when a track
+finishes, which makes the transport self-consistent -- and breaks something
+real: `playing` staying true is what lets a track queued *after* the music
+stopped start on its own, which is how a playlist extended at its end keeps
+going (App.tsx's queue effect, `decoder_loop`'s park-and-wait). So the flag
+stays as it is, and the disagreement is resolved where it is visible:
+
+1. **The button is labelled from `playing && !finished`** (App.tsx). One change
+   for both shells, since the two adapters expose the same `TransportState` and
+   this component is the only thing that draws it. The button now says what
+   pressing it will do.
+2. **Play-from-finished rewinds, in the engine on both sides.**
+   `playerEngine.ts`'s `play()` has seeked to zero since M2; `Playback::play`
+   now does the same. Putting it in the engine rather than in the shells is what
+   keeps one press of one button meaning one thing on both -- and the desktop
+   shell was the odd one out, not the design.
+
+**Verified.** Native: `cargo run -p player-core --example transport_smoke`,
+**15/15**, up from 13 -- the two new checks run the track to its end a second
+time, press play, and watch the position come back to **0.000s** with
+`finished=false`. The second one is the one that matters: half a second later
+the ramp encoded in the test track's right channel reads **0.015** where
+~0.017 is the start of the track and ~1.0 would mean the position had been
+rewound without the audio following it. Web: driven in-browser against the dev
+server, a synthesised 2s WAV pushed through the app's own file input, played to
+its end -- button reads **"Play"** (it read "Pause" before this), position
+parked at 2.000 -- then **one** press: 0.32s, 0.92s, label "Pause", integrated
+loudness -14.7 LUFS while it replayed. Before the fix that press stopped the
+transport and a second was needed to hear anything.
+
+### Closing the scope window by hand panicked its redraw thread
+
+This one needed a lifecycle decision rather than a patch, and the decision is
+written up in ARCHITECTURE.md's "The scope window's lifecycle": **the scope
+window belongs to the app, not to the window manager.** Its close button hides
+it (`prevent_close` + `hide`, the same thing the UI's toggle does), so the
+window always outlives the renderer holding a surface built from its handle.
+
+The rejected alternative was to make `Renderer` keep a window handle and rebuild
+its surface, letting the window come and go. That is real work in the crate
+furthest from the problem, and it buys a window the user can destroy and then
+has to be given some way to recreate -- when "put it away" is what pressing that
+button means.
+
+Three things follow from it, and all three are the decision rather than
+gold-plating:
+
+- **The UI can no longer assume it is the only one hiding the window**, so
+  `ScopeControls` polls `scope_state` once a second. Without it the panel says
+  "Hide" about a window the user just closed, and takes two presses to undo.
+- **A hidden scope should cost nothing**, now that hiding it is one click on the
+  window itself: the redraw thread parks instead of drawing. Measured at 281ms
+  of process CPU per 3s visible against **0ms** hidden. It asks the window
+  whether it is visible rather than tracking a flag beside it -- several parties
+  hide that window now, and a mirror of all of them will eventually disagree
+  with it.
+- **Closing the main window has to end the app**, which it did not before: Tauri
+  exits when its last window closes, and a scope window that never closes is a
+  window, so the UI would have vanished leaving the process behind it. Shutdown
+  stops and joins the redraw thread first, so the renderer is dropped while its
+  window still exists -- on a thread of its own, because the redraw loop asks the
+  main thread for the window's size and joining it from there would be each
+  waiting on the other.
+
+**Verified** against `cargo tauri dev` by sending the scope window a real
+`WM_CLOSE` -- what its X button sends -- rather than by reasoning about it: the
+window survives (`IsWindow` true, `IsWindowVisible` false), the process carries
+on, the redraw thread parks, and the session log holds **no panic at all**,
+where the same action used to produce `ERROR_SURFACE_LOST_KHR` and then a fatal
+wgpu validation error. Closing the main window then exits the app cleanly, with
+no orphan window and no process left running.
+
+What is *not* covered by that: bringing the scope back with the UI's "Show"
+button, and the trace still drawing afterwards, needs the desktop UI driven by
+hand -- the webview's buttons are out of reach of both the automation browser
+and UI Automation. It is the same class of claim every milestone here has ended
+on, and it wants the same live confirmation.

@@ -5,7 +5,9 @@
 //! window's raw handle. Proves the same Rust render code that will later
 //! target a browser canvas (`player-rt-wasm`) also runs natively.
 
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
+use std::thread::JoinHandle;
 use std::time::Duration;
 
 use player_core::eq::{self, EqSettings, BAND_FREQUENCIES, EQ_BANDS};
@@ -22,6 +24,60 @@ const SCOPE_LABEL: &str = "scope";
 
 /// What the scope window opens at.
 const SCOPE_DEFAULT_SIZE: f64 = 480.0;
+
+/// The scope window's lifecycle, shared with the thread that redraws it.
+///
+/// The decision this holds (2026-08-17): **the scope window belongs to the app,
+/// not to the window manager.** It is built once at startup, hidden and shown on
+/// request, and destroyed only when the app itself goes away -- so the window
+/// always outlives the renderer drawing into it.
+///
+/// That is forced by what the renderer is. `Renderer::new` consumes the window
+/// it turns into a `wgpu::Surface` and keeps no handle of its own, so it cannot
+/// rebuild a surface whose window has gone; and a *destroyed* window's surface
+/// does not report itself as `Lost` (which `draw_frame` returns to the caller)
+/// but as `Outdated`, whose handling is to call `surface.configure()` -- which
+/// panics inside wgpu, since wgpu treats validation errors as fatal by default.
+/// Closing the window by hand therefore used to kill the redraw thread and leave
+/// the scope dark for the rest of the session (observed live 2026-08-16).
+///
+/// The alternative was to teach `Renderer` to rebuild its surface from a handle
+/// it kept, and let the window come and go. That is real work in the crate
+/// furthest from this problem, in exchange for a window the user can destroy and
+/// then has to be given some way to recreate -- when "hide it" is what the close
+/// button already means to everyone pressing it.
+struct ScopeWindow {
+    /// Cleared to stop the redraw thread for good. Only shutdown sets it.
+    running: AtomicBool,
+    /// The redraw thread, so shutdown can wait for it to stop *before* the
+    /// window it draws into is destroyed.
+    redraw: Mutex<Option<JoinHandle<()>>>,
+}
+
+impl ScopeWindow {
+    fn new() -> Self {
+        Self {
+            running: AtomicBool::new(true),
+            redraw: Mutex::new(None),
+        }
+    }
+
+    /// Stops the redraw thread and waits for it, which drops the renderer and
+    /// with it the surface.
+    ///
+    /// **Never call this from the main thread.** The redraw loop asks the window
+    /// how big it is, and that question is answered by the main thread's event
+    /// loop -- so a main thread blocked in this join would be waiting for a
+    /// thread that is waiting for it. Callers on the main thread (the window
+    /// event handlers in `setup`) hand this to a thread of its own.
+    fn stop(&self) {
+        self.running.store(false, Ordering::Release);
+        let handle = self.redraw.lock().ok().and_then(|mut slot| slot.take());
+        if let Some(handle) = handle {
+            let _ = handle.join();
+        }
+    }
+}
 
 type SharedPlayback = Arc<Mutex<Option<Playback>>>;
 
@@ -425,9 +481,10 @@ fn set_scope_size(width: u32, height: u32, app: tauri::AppHandle) -> Result<(), 
         .map_err(|e| e.to_string())
 }
 
-/// Shows or hides the scope window. Hiding rather than closing it: the
-/// renderer holds the surface built from this window's handle, and closing it
-/// would leave a renderer drawing into nothing.
+/// Shows or hides the scope window. Hiding rather than closing it: the renderer
+/// holds the surface built from this window's handle, and closing it would leave
+/// a renderer drawing into nothing (see `ScopeWindow`). Pressing the window's own
+/// close button ends up here too, by way of the handler in `setup`.
 #[tauri::command]
 fn set_scope_visible(visible: bool, app: tauri::AppHandle) -> Result<(), String> {
     let window = app
@@ -623,6 +680,64 @@ pub fn run() {
                 .build()?;
             let size = scope_window.inner_size()?;
 
+            // Not managed state: nothing the webview can invoke touches this.
+            // The scope window's lifecycle is the shell's own business, and the
+            // UI's part in it is `set_scope_visible`, which speaks to the window
+            // rather than to this.
+            let scope = Arc::new(ScopeWindow::new());
+
+            // The close button hides the window instead of destroying it, which
+            // is the whole of the lifecycle decision written up on
+            // `ScopeWindow`: the renderer cannot survive its window going away,
+            // and every user pressing that button means "put it away", not
+            // "tear down the visualiser for the rest of this session".
+            {
+                let handle = app.handle().clone();
+                let scope = Arc::clone(&scope);
+                scope_window.on_window_event(move |event| match event {
+                    tauri::WindowEvent::CloseRequested { api, .. } => {
+                        api.prevent_close();
+                        if let Some(window) = handle.get_window(SCOPE_LABEL) {
+                            if let Err(e) = window.hide() {
+                                log::warn!("hiding the scope window failed: {e}");
+                            }
+                        }
+                    }
+                    // Not reachable while the app is running, given the above --
+                    // but if anything ever does destroy this window, the redraw
+                    // thread has to hear about it before it draws again.
+                    tauri::WindowEvent::Destroyed => {
+                        scope.running.store(false, Ordering::Release);
+                    }
+                    _ => {}
+                });
+            }
+
+            // Closing the *main* window ends the app, and does it in an order
+            // that leaves nothing drawing into a window that is going away: stop
+            // the redraw thread first, exit second. Without this the app would
+            // not even quit -- Tauri exits when its last window closes, and the
+            // scope window (which no longer closes) is a window, so the UI would
+            // disappear leaving the process and the scope behind it.
+            //
+            // On a thread of its own because `ScopeWindow::stop` may not run on
+            // the main thread: see its own note.
+            if let Some(main_window) = app.get_window("main") {
+                let handle = app.handle().clone();
+                let scope = Arc::clone(&scope);
+                main_window.on_window_event(move |event| {
+                    if let tauri::WindowEvent::CloseRequested { api, .. } = event {
+                        api.prevent_close();
+                        let handle = handle.clone();
+                        let scope = Arc::clone(&scope);
+                        std::thread::spawn(move || {
+                            scope.stop();
+                            handle.exit(0);
+                        });
+                    }
+                });
+            }
+
             // Keep a handle for the redraw loop to ask the window how big it
             // currently is. `Renderer::new` consumes the one it turns into a
             // surface target, and the renderer holds no window handle of its
@@ -639,9 +754,26 @@ pub fn run() {
             .map_err(|e| format!("scope renderer init failed: {e}"))?;
 
             let shared = app.state::<SharedPlayback>().inner().clone();
-            std::thread::spawn(move || {
+            let redraw_scope = Arc::clone(&scope);
+            let redraw = std::thread::spawn(move || {
                 let mut last_size = size;
-                loop {
+                while redraw_scope.running.load(Ordering::Acquire) {
+                    // A hidden scope is drawn for nobody, so this parks instead
+                    // of spending a GPU frame every 16ms on something no one can
+                    // see -- which is now a state the user can reach directly,
+                    // since the window's own close button hides it.
+                    //
+                    // Asked of the window rather than tracked alongside it: the
+                    // window is hidden by the UI's toggle, by that close button
+                    // and by anything else that gets a handle to it, and a flag
+                    // mirroring all of those is a flag that will eventually
+                    // disagree with the truth. This is a message to the same
+                    // event loop the size question below already asks.
+                    if matches!(size_probe.is_visible(), Ok(false)) {
+                        std::thread::sleep(Duration::from_millis(100));
+                        continue;
+                    }
+
                     // Resizing the window invalidates the swapchain. The
                     // renderer can rebuild it at the old size on its own, but
                     // only the window knows the *new* size -- found live on
@@ -650,10 +782,25 @@ pub fn run() {
                     // rather than subscribing to a resize event keeps this on
                     // the one thread that owns the renderer; at 60Hz the cost
                     // is a syscall per frame.
-                    if let Ok(current) = size_probe.inner_size() {
-                        if current != last_size {
-                            renderer.resize(current.width, current.height);
-                            last_size = current;
+                    match size_probe.inner_size() {
+                        Ok(current) => {
+                            if current != last_size {
+                                renderer.resize(current.width, current.height);
+                                last_size = current;
+                            }
+                        }
+                        // The window stopped answering, which means it is no
+                        // longer there to answer -- the size question is a round
+                        // trip to the main thread's event loop. Drawing the next
+                        // frame would reconfigure a dead surface and panic
+                        // inside wgpu, so stop instead. Nothing should be able
+                        // to get here (see `ScopeWindow`); this is what happens
+                        // if something does.
+                        Err(e) => {
+                            log::warn!(
+                                "the scope window stopped answering, so the scope stops: {e}"
+                            );
+                            return;
                         }
                     }
 
@@ -679,6 +826,9 @@ pub fn run() {
                     std::thread::sleep(Duration::from_millis(16));
                 }
             });
+            // Handed over so shutdown can wait for this thread rather than
+            // racing it (`ScopeWindow::stop`).
+            *scope.redraw.lock().unwrap() = Some(redraw);
 
             Ok(())
         })

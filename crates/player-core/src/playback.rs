@@ -437,7 +437,27 @@ impl Playback {
         }
     }
 
+    /// Starts or resumes playback.
+    ///
+    /// Playing a track that has already run to the end starts it again rather
+    /// than resuming at the end, where there is nothing left to play: `finished`
+    /// means the queue ran out, and "play" from there can only sensibly mean
+    /// "again". The rewind is the engine's job and not the shell's so that both
+    /// shells answer the same press the same way -- the web engine has done
+    /// exactly this since M2 (`playerEngine.ts`'s `play()`), and only the
+    /// desktop one was left parked at the end.
+    ///
+    /// Note what this deliberately does *not* do: it does not clear `playing`
+    /// when a track finishes. That flag stays true precisely so that a track
+    /// queued after the music stopped starts on its own, which is how a
+    /// playlist extended at the end keeps going. The disagreement it causes --
+    /// a transport reporting `playing` with nothing playing -- is resolved
+    /// where it is visible, by the UI labelling the button from `playing &&
+    /// !finished` (App.tsx).
     pub fn play(&self) {
+        if self.is_finished() {
+            self.seek(0.0);
+        }
         self.shared.playing.store(true, Ordering::Relaxed);
     }
 

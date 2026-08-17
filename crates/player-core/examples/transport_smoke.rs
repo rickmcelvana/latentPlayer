@@ -256,6 +256,49 @@ fn main() {
         ),
     );
 
+    // --- play, at the end -------------------------------------------------
+    //
+    // Pressing play on a track that has already ended used to leave it parked
+    // there: the engine read `play()` as "resume" and there was nothing left to
+    // resume, so the position sat at the end and nothing came out (fixed
+    // 2026-08-17). Run to the end again to ask.
+    playback.seek(SECONDS as f64 - 0.3);
+    let mut finished_again = false;
+    for _ in 0..40 {
+        sleep(Duration::from_millis(50));
+        if playback.is_finished() {
+            finished_again = true;
+            break;
+        }
+    }
+    playback.play();
+    let restarted_at = playback.position_seconds();
+    check(
+        "playing a finished track starts it again",
+        finished_again && !playback.is_finished() && near(restarted_at, 0.0, 0.05),
+        format!(
+            "reached the end again: {finished_again}; position {restarted_at:.3}s (want 0.000s), \
+             finished={}",
+            playback.is_finished()
+        ),
+    );
+
+    // And the audio agrees with the clock: the ramp would read ~1.0 if the
+    // rewind had moved the position without moving what is being decoded.
+    sleep(Duration::from_millis(500));
+    let restarted_fraction = played_position_fraction(&playback);
+    check(
+        "the audio restarts with it",
+        near(restarted_fraction, 0.5 / SECONDS as f64, 0.05)
+            && near(playback.position_seconds(), 0.5, 0.25),
+        format!(
+            "ramp reads {restarted_fraction:.3} (want ~{:.3}; ~1.0 would mean it was still \
+             playing the end), position {:.3}s",
+            0.5 / SECONDS as f64,
+            playback.position_seconds()
+        ),
+    );
+
     drop(playback);
     let _ = std::fs::remove_file(&short);
     let _ = std::fs::remove_file(&long);

@@ -72,6 +72,15 @@ function App() {
 
   const tauri = isTauri();
   const loaded = current !== null;
+  // A finished track is not a playing one, whatever the engine's flag says.
+  // `playing` deliberately stays true at the end of the queue so that a track
+  // queued afterwards starts on its own (see `Playback::play`), which left the
+  // button reading "Pause" with nothing playing -- so pressing it stopped the
+  // transport instead of replaying the track, and it took a second press to get
+  // any sound. The button has to say what pressing it will do, and at the end
+  // of a track that is "play again": both engines rewind to zero rather than
+  // resuming at the end.
+  const playing = state.playing && !state.finished;
 
   // Web build only: the scope canvas lives inline in this window (no
   // second native window to put it in -- see PLAN.md §3/§8.3, web is the
@@ -184,7 +193,7 @@ function App() {
 
   async function togglePlaying() {
     try {
-      setState(await setPlaying(!state.playing));
+      setState(await setPlaying(!playing));
     } catch (e) {
       setError(String(e));
     }
@@ -266,7 +275,7 @@ function App() {
             Prev
           </button>
           <button type="button" onClick={togglePlaying} disabled={!loaded}>
-            {state.playing ? "Pause" : "Play"}
+            {playing ? "Pause" : "Play"}
           </button>
           <button
             type="button"

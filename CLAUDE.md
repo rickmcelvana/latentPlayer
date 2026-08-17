@@ -92,11 +92,15 @@ agree exactly. `cargo run -p player-core --example eq_smoke` reports 14/14 and
 works because the filters sit ahead of the tap.
 
 **Phase 1's milestone list is complete** (2026-08-16) -- M1 to M8, all
-user-confirmed on both shells. The tracked limitations in ARCHITECTURE.md's
-"Known gaps" remain open, two of which are plain bugs rather than design trades
-(play at the end of a track pauses instead of restarting; closing the scope
-window by hand panics its redraw thread). See `tasks/phase-1.md`'s closing
-section.
+user-confirmed on both shells. The two plain bugs it left standing are **fixed
+(2026-08-17)**, before Phase 2 rather than carried into it: play at the end of a
+track now restarts it (the engines rewind on both shells; the button is labelled
+from `playing && !finished`), and the scope window can no longer be destroyed
+under its renderer -- its close button hides it, and the app owns that window's
+whole lifecycle, including stopping the redraw thread before exiting. See
+ARCHITECTURE.md's "The scope window's lifecycle" for that decision and
+`tasks/phase-1.md`'s closing sections for both. The rest of ARCHITECTURE.md's
+"Known gaps" are design trades and remain open.
 
 `cargo run -p player-core --example seek_smoke -- <path>` checks that seeking a given file yields
 the same audio as playing through to that point — written for MP3, whose bit reservoir makes

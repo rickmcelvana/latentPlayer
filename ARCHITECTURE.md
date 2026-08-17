@@ -117,6 +117,11 @@ src-tauri/           Tauri 2 desktop shell. Two windows: the React webview
                      Playback and the scope's sample feed are both pure
                      Rust; the webview only sends transport commands
                      (load_file/set_playing) and never touches audio data.
+                     That second window is the app's rather than the window
+                     manager's -- its close button hides it, its redraw thread
+                     parks while it is hidden, and closing the main window stops
+                     that thread before ending the app. See "The scope window's
+                     lifecycle" below for why it cannot simply be closed.
 
                      Transport (play/pause/seek/volume/position) is exposed
                      as `#[tauri::command]`s returning one `TransportState`
@@ -226,6 +231,56 @@ thread during `tauri::Builder::setup()` (wgpu's own docs: Metal surface
 creation must happen on the main thread, so this is done unconditionally
 rather than "working by luck" on Linux/Windows only); only the redraw loop
 itself moves to a background thread.
+
+## The scope window's lifecycle (decided 2026-08-17)
+
+**The scope window belongs to the app, not to the window manager.** It is built
+once at startup, hidden and shown on request, and destroyed only when the app
+itself goes away -- so it always outlives the renderer drawing into it.
+
+That is forced by what the renderer is. `Renderer::new` consumes the window it
+turns into a `wgpu::Surface` and keeps no handle of its own, so it cannot rebuild
+a surface whose window has gone. Worse, a *destroyed* window's surface does not
+report itself as `Lost` (which `draw_frame` returns to its caller for exactly
+this reason) but as `Outdated`, whose handling is `surface.configure()` -- and
+that panics inside wgpu, which treats validation errors as fatal by default.
+Closing the window by hand therefore used to kill the redraw thread and leave the
+scope dark for the rest of the session. The alternative was to teach `Renderer`
+to keep a window handle and rebuild its surface, which is real work in the crate
+furthest from the problem, in exchange for a window the user can destroy and then
+has to be offered some way to get back -- when "put it away" is what everyone
+pressing that button means anyway.
+
+What the decision costs, in `src-tauri/src/lib.rs`:
+
+- The scope window's `CloseRequested` is intercepted (`api.prevent_close()`) and
+  turned into a `hide()` -- the same thing `set_scope_visible(false)` does, so
+  its close button and the UI's toggle are one behaviour with two entry points.
+  `ScopeControls` polls `scope_state` once a second because of this: the window
+  is no longer only the UI's to change, and a panel whose button says "Hide"
+  about a window the user just closed takes two presses to undo.
+- The redraw thread asks the window whether it is visible and parks while it is
+  not, so a hidden scope costs nothing rather than a GPU frame every 16ms.
+  Measured: 281ms of process CPU per 3s with the scope up, 0ms with it hidden.
+  Visibility is *asked of the window* rather than tracked beside it -- several
+  parties hide it, and a mirror of all of them is a mirror that will eventually
+  disagree.
+- Closing the **main** window ends the app, stopping and joining the redraw
+  thread first so the renderer is dropped while its window still exists. This
+  half is not optional once the scope window stops closing: Tauri exits when its
+  last window closes (`tauri-runtime-wry`'s `Destroyed` handler, which only
+  raises `ExitRequested` once the window store is empty), so without it the UI
+  would disappear and leave the process and the scope behind. The join runs on a
+  thread of its own, because the redraw loop asks the main thread for the
+  window's size -- joining from the main thread would be each waiting on the
+  other.
+
+Verified 2026-08-17 by sending the scope window a real `WM_CLOSE` (what its X
+button sends) against `cargo tauri dev`: the window survives, hidden; the process
+carries on; the redraw thread parks; and the session's log contains no panic,
+where the same action used to produce `ERROR_SURFACE_LOST_KHR` followed by a
+fatal validation error. Closing the main window then exits the app cleanly, with
+no orphan window and nothing left running.
 
 ## Resolved: the blank web scope was environmental (closed 2026-08-15)
 
@@ -367,9 +422,13 @@ at the correct rate, re-verified with the same probe.
   rather than as `0:00`, which is at least honest about the difference. What M7
   did *not* add is the estimate or the decode-to-measure pass, either of which
   would need the scan to do real work per file rather than a probe.
-- **Closing the scope window by hand panics the redraw thread** (observed live
-  2026-08-16, in a ~90-minute desktop session; pre-existing M6 code, surfaced
-  while M7 was being confirmed). The log:
+- ~~**Closing the scope window by hand panics the redraw thread**~~ Fixed
+  2026-08-17 -- the close button hides the window instead of destroying it, and
+  the app now owns that window's whole lifecycle; see "The scope window's
+  lifecycle" above for the decision and what it costs. The report, kept because
+  it is the evidence for that decision (observed live 2026-08-16, in a
+  ~90-minute desktop session; pre-existing M6 code, surfaced while M7 was being
+  confirmed). The log:
 
   ```
   [wgpu_hal::vulkan::swapchain::native][ERROR]
@@ -391,26 +450,32 @@ at the correct rate, re-verified with the same probe.
   as fatal by default. The same panic is reachable from the `needs_reconfigure`
   branch at the top of `draw_frame`.
 
-  Consequences are contained but real: the redraw thread dies and the scope
-  goes permanently dark, while the rest of the app carries on -- the same
+  Consequences were contained but real: the redraw thread died and the scope
+  went permanently dark, while the rest of the app carried on -- the same
   session decoded another MP3 31 seconds after the panic. `set_scope_visible`
-  only ever *hides* the window precisely because the renderer holds a surface
-  built from its handle, but nothing stops the user closing it with its own
-  close button. A fix needs both halves: stop the redraw loop (or rebuild the
-  surface) when the window is gone, and prevent or intercept the manual close
-  rather than assuming the UI is the only thing that can hide the window.
-- **Play at the end of a track pauses instead of restarting** (both shells,
-  found live during M7 but *not* caused by it -- the transport is untouched by
-  that milestone). When a track finishes, `TransportState::playing` stays true,
-  so the button still reads "Pause"; clicking it therefore calls
-  `set_playing(false)` and the position sits at the end. Measured on the web
-  build: position parked at 3.000 on a 3s track, the label flipping
-  Pause -> Play but never moving. M2's own check exercised the engine's `play()`
-  directly and so never saw this -- it is a UI-level disagreement between
-  `playing` and `finished`, not an engine one. A fix is small (treat `finished`
-  as not-playing when labelling the button, and make play-from-finished seek to
-  zero first) but it belongs with transport work rather than being smuggled into
-  a library milestone.
+  only ever *hid* the window precisely because the renderer holds a surface
+  built from its handle, but nothing stopped the user closing it with its own
+  close button. The fix has both halves the diagnosis asked for: the manual
+  close is intercepted rather than assumed away, and the redraw loop stops when
+  the window is gone (it treats a window that no longer answers the size
+  question as gone, since that question is a round trip to the event loop).
+- ~~**Play at the end of a track pauses instead of restarting**~~ Fixed
+  2026-08-17, both halves the diagnosis called for. The bug (found live during M7
+  but *not* caused by it -- the transport is untouched by that milestone): when a
+  track finishes, `TransportState::playing` stays true, so the button still read
+  "Pause", and clicking it called `set_playing(false)` and left the position at
+  the end. It was a UI-level disagreement between `playing` and `finished` rather
+  than an engine one, which is why M2's own check -- driving the engine's `play()`
+  directly -- never saw it.
+  `playing` still stays true at the end, deliberately: it is what makes a track
+  queued after the music stopped start on its own. So the button is labelled from
+  `playing && !finished` (App.tsx, one change for both shells), and
+  play-from-finished rewinds to zero in the *engine* on both sides
+  (`Playback::play`; `playerEngine.ts`'s `play()` has done this since M2, and the
+  desktop one was the odd one out). Checked by `transport_smoke`'s last two
+  checks, which watch the position return to 0.000 and then confirm the audio
+  came with it -- the ramp in the synthesised track reads 0.015 where the end of
+  the track would read ~1.0.
 - **The web library reads each file whole to scan it.** `WasmTags::read` takes
   the file's bytes, because a browser hands over a `File` rather than something
   seekable a decoder can read a few hundred bytes of. Reading a prefix instead
