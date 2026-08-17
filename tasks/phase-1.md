@@ -1356,8 +1356,19 @@ where the same action used to produce `ERROR_SURFACE_LOST_KHR` and then a fatal
 wgpu validation error. Closing the main window then exits the app cleanly, with
 no orphan window and no process left running.
 
-What is *not* covered by that: bringing the scope back with the UI's "Show"
-button, and the trace still drawing afterwards, needs the desktop UI driven by
-hand -- the webview's buttons are out of reach of both the automation browser
-and UI Automation. It is the same class of claim every milestone here has ended
-on, and it wants the same live confirmation.
+What that could *not* cover: bringing the scope back with the UI's "Show"
+button, and the trace still drawing afterwards. The webview's buttons are out of
+reach of both the automation browser and UI Automation, so this is the same
+class of claim every milestone here has ended on and it took the same live
+confirmation -- **user-confirmed 2026-08-17: "Show / hide works. Play at the end
+button works. All tests passed."** That covers both fixes on the desktop shell:
+the scope surviving its own close button and coming back on demand, and the play
+button on real music rather than on a synthesised ramp.
+
+### Both bugs closed
+
+Phase 1 now ends with nothing outstanding but design trades. What remains in
+ARCHITECTURE.md's "Known gaps" is all of that kind -- unknown durations, Opus,
+output-device changes, WebGL2 fallback, the scope's aspect, EQ coefficient
+smoothing -- each of which is a decision waiting for the phase that needs it,
+not a defect waiting to be found again.

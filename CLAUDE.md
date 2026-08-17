@@ -93,8 +93,9 @@ works because the filters sit ahead of the tap.
 
 **Phase 1's milestone list is complete** (2026-08-16) -- M1 to M8, all
 user-confirmed on both shells. The two plain bugs it left standing are **fixed
-(2026-08-17)**, before Phase 2 rather than carried into it: play at the end of a
-track now restarts it (the engines rewind on both shells; the button is labelled
+and user-confirmed (2026-08-17)**, before Phase 2 rather than carried into it:
+play at the end of a track now restarts it (the engines rewind on both shells;
+the button is labelled
 from `playing && !finished`), and the scope window can no longer be destroyed
 under its renderer -- its close button hides it, and the app owns that window's
 whole lifecycle, including stopping the redraw thread before exiting. See

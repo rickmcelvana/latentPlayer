@@ -280,7 +280,11 @@ button sends) against `cargo tauri dev`: the window survives, hidden; the proces
 carries on; the redraw thread parks; and the session's log contains no panic,
 where the same action used to produce `ERROR_SURFACE_LOST_KHR` followed by a
 fatal validation error. Closing the main window then exits the app cleanly, with
-no orphan window and nothing left running.
+no orphan window and nothing left running. **User-confirmed live the same day**
+("Show / hide works"), which is the half no automation here can reach -- the
+webview's own buttons are out of reach of both the automation browser and UI
+Automation, so that the scope comes back and keeps drawing is a person's
+observation.
 
 ## Resolved: the blank web scope was environmental (closed 2026-08-15)
 
@@ -475,7 +479,8 @@ at the correct rate, re-verified with the same probe.
   desktop one was the odd one out). Checked by `transport_smoke`'s last two
   checks, which watch the position return to 0.000 and then confirm the audio
   came with it -- the ramp in the synthesised track reads 0.015 where the end of
-  the track would read ~1.0.
+  the track would read ~1.0. User-confirmed live on the desktop shell the same
+  day ("Play at the end button works"), on real music rather than on a ramp.
 - **The web library reads each file whole to scan it.** `WasmTags::read` takes
   the file's bytes, because a browser hands over a `File` rather than something
   seekable a decoder can read a few hundred bytes of. Reading a prefix instead
