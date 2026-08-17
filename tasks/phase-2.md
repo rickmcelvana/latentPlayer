@@ -219,3 +219,88 @@ itself.
 - [ureq](https://crates.io/crates/ureq) 3.4 -- blocking HTTP with rustls and no
   async runtime, which is what `src-tauri` wants for decision 2's native
   transport: `player-core` has no executor and should not grow one for this.
+
+## M1 -- Connection and credentials: built, awaiting a live authenticated run
+
+The seam every other milestone calls through. What landed:
+
+**The protocol, once, for both shells.** `player-core/src/subsonic/mod.rs` builds
+requests and parses responses and does no IO at all; `subsonic/http.rs` is the
+desktop transport (ureq, blocking, native-only beside `playback.rs` and
+`library.rs`); `subsonicWeb.ts` is the web one (`fetch`), calling the *same*
+Rust through two wasm bindings. Decision 2 held up under the compiler: the
+protocol module builds for `wasm32-unknown-unknown` unchanged, so the classifier
+that decides "is this the password's fault" is one implementation rather than
+two that will drift.
+
+**The trap, handled where it can only be handled once.** A Subsonic failure is
+an **HTTP 200** carrying `"status":"failed"` and a code. `parse` is the only way
+the module hands back a payload, so there is no path that skips the check. The
+test fixtures for it are not invented: they are the bytes this repo's own
+Navidrome 0.63.2 returned on 2026-08-17, kept verbatim.
+
+**Auth.** Token auth is `md5(password + salt)`, checked against the spec's own
+worked example -- `sesame` + `c19b2d` = `26719a1196d2a940705a59634eb18eab` -- on
+both shells, because a wasm md5 that disagreed with the native one would be a
+bug nobody would look for in a *hash*. Salts are the shell's (`getrandom`
+natively, `crypto.getRandomValues` on the web), 16 bytes each, and a fresh one
+per request is asserted rather than assumed.
+
+**Where the secret lives**, per decision 4: the OS credential store natively
+(`keyring`, per-platform backend features), IndexedDB on the web -- which is
+plaintext, has no alternative in a browser, and is therefore *stated in the
+panel where the secret is typed* rather than left for the user to assume. The
+address and username are ordinary settings and live beside the library index.
+Worth recording early: **this Navidrome does not offer `apiKeyAuthentication`**
+(its extensions are transcodeOffset, formPost, songLyrics, indexBasedQueue,
+transcoding, playbackReport), so the password path is the one that will actually
+be exercised here, not the fallback.
+
+**One decision refined by contact with the code.** Decision 2 says player-core
+holds no IO; the native transport is nevertheless *in* player-core, behind
+`#[cfg(not(target_arch = "wasm32"))]`. The rule it actually encodes is that the
+wasm build has no HTTP client and the protocol module has no opinion about
+transport -- both still true. `LocalFile` does file IO in the same crate for the
+same reason: a source is a source, and M2's `RemoteSource` will want to live
+beside this.
+
+### Verified
+
+- **`cargo test -p player-core --test subsonic_http`: 11/11**, against a fake
+  server that misbehaves on purpose -- an error envelope inside a 200, a 502, a
+  router login page where JSON should be, a truncated body, a closed port, an
+  old server that has never heard of `getOpenSubsonicExtensions` (which must be
+  "no extensions", not a failure to connect), and an API key travelling with no
+  username beside it. Two of them read what the client put *on the wire*: that
+  the token is the hash of the password and the salt that travelled with it, and
+  that no two requests share a salt.
+- **16 protocol tests** in `subsonic/mod.rs` and 3 in `src-tauri/src/servers.rs`
+  (settings round-trip, no secret in the settings file, credential keys scoped
+  per server *and* user). Total `player-core` unit tests: **117**, up from 101.
+- **Live, native**: `cargo run -p player-core --example subsonic_smoke` against
+  the real Navidrome -- a wrong password comes back as `BadCredentials` (which
+  also proves the request shape was accepted: a malformed one would be error 10,
+  not 40), and the server's real extension list parses.
+- **Live, web**: `/subsonic.html`, **7/7** in a real browser against the same
+  server -- including the two checks with no native counterpart, that the
+  browser can reach it at all (CORS) and that no mixed-content rule applies. The
+  server's CORS headers were confirmed directly before any of this was written:
+  `Access-Control-Allow-Origin: *` with `Vary: Origin`, and a preflight that
+  answers. Decision 5's assumption is now a measurement.
+- **The panel, driven in a browser** through React's own handlers: a scheme-less
+  address, a wrong password, and a port with nothing on it each produce a
+  message naming the thing to change -- and each leaves the form open with the
+  typed values in it. That last part was a bug this driving *found*: the panel
+  derived "show the form" from `configured`, and a failed attempt set that flag,
+  so a rejected address rendered as a saved server. Both shells now answer
+  `configured` from what is stored rather than from what was typed.
+
+### Not yet done
+
+The **authenticated** half needs credentials this session should not handle: run
+`/subsonic.html` with a username and password filled in, or set
+`LATENTPLAYER_SUBSONIC_USER`/`LATENTPLAYER_SUBSONIC_PASSWORD` and rerun
+`subsonic_smoke`, and connect the app's own panel once on each shell. Until then
+what is proven is that a *wrong* password is rejected and correctly classified;
+what is not is that a *right* one is accepted -- i.e. the token scheme end to
+end. It is the one claim in M1 that cannot be made without a real account.

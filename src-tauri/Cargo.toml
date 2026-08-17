@@ -34,3 +34,19 @@ pollster = "1"
 
 player-core = { path = "../crates/player-core" }
 player-render = { path = "../crates/player-render" }
+
+# Phase 2 M1: the Subsonic secret goes to the OS credential store rather than
+# beside the library index, because the token scheme means this client has to
+# keep the password itself (tasks/phase-2.md decision 4). Per platform, because
+# keyring 4 makes the backend an explicit feature -- with none of them enabled
+# it compiles and has nowhere to put anything -- and each OS wants a different
+# one. `v1` is the module the classic Entry API lives in as of keyring 4.
+[target.'cfg(windows)'.dependencies]
+keyring = { version = "4.1", features = ["v1", "windows-native-keyring-store"] }
+
+[target.'cfg(target_os = "macos")'.dependencies]
+keyring = { version = "4.1", features = ["v1", "apple-native-keyring-store"] }
+
+# zbus rather than dbus: pure Rust, so a Linux build needs no libdbus headers.
+[target.'cfg(target_os = "linux")'.dependencies]
+keyring = { version = "4.1", features = ["v1", "zbus-secret-service-keyring-store"] }

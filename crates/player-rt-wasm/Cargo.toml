@@ -18,6 +18,11 @@ js-sys = "0.3"
 player-core = { path = "../player-core" }
 player-render = { path = "../player-render" }
 wgpu = "30"
+# Phase 2 M1: the Subsonic bindings hand JSON strings across to TypeScript
+# rather than structured JS objects -- two calls made when a user types a server
+# address, so a serialisation dependency on the JS side would be a lot of
+# machinery for nothing. player-core already parses with this.
+serde_json = "1"
 
 [dependencies.web-sys]
 version = "0.3"

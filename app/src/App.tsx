@@ -19,6 +19,7 @@ import { Goniometer } from "./Goniometer";
 import { LibraryPanel } from "./LibraryPanel";
 import { Loudness } from "./Loudness";
 import { ScopeControls } from "./ScopeControls";
+import { ServerPanel } from "./ServerPanel";
 import { Spectrum } from "./Spectrum";
 import { DEFAULT_SCOPE_SIZE, attachWebCanvas } from "./scope";
 import { startScope } from "./webScope";
@@ -348,6 +349,10 @@ function App() {
         {error && <p className="error">{error}</p>}
 
         <LibraryPanel onPlay={playFromLibrary} onQueue={queueFromLibrary} queue={tracks} />
+
+        {/* Phase 2 M1 connects to a server; browsing what is on it is M3, so
+            this sits below the local library rather than beside it for now. */}
+        <ServerPanel />
 
         <ScopeControls />
 

@@ -67,12 +67,16 @@ export interface StoredPlaylist {
 const DB_NAME = "latentplayer-library";
 /// Bumped only when the schema changes; `onupgradeneeded` creates whatever is
 /// missing, so an existing database gains new stores rather than being dropped.
-const DB_VERSION = 1;
+/// Bumped to 2 in Phase 2 M1 for the `servers` store. The upgrade path is the
+/// existing one: every store is created only if absent, so an existing library
+/// gains the new store and keeps its rows.
+const DB_VERSION = 2;
 
 const TRACKS = "tracks";
 const COVERS = "covers";
 const FOLDERS = "folders";
 const PLAYLISTS = "playlists";
+const SERVERS = "servers";
 
 let db: Promise<IDBDatabase> | null = null;
 
@@ -96,6 +100,9 @@ function open(): Promise<IDBDatabase> {
       }
       if (!database.objectStoreNames.contains(PLAYLISTS)) {
         database.createObjectStore(PLAYLISTS, { keyPath: "id" });
+      }
+      if (!database.objectStoreNames.contains(SERVERS)) {
+        database.createObjectStore(SERVERS, { keyPath: "id" });
       }
     };
     request.onsuccess = () => resolve(request.result);
@@ -130,6 +137,49 @@ async function withStore<T>(
     tx.onabort = () => reject(tx.error ?? new Error("IndexedDB transaction aborted"));
   });
   return result;
+}
+
+/// A music server the web build can reach (Phase 2 M1).
+///
+/// The secret is here in **plaintext**, and that is worth stating rather than
+/// hiding: a browser has no keychain to put it in. The desktop shell stores its
+/// secret in the OS credential store (src-tauri/src/servers.rs); the web build's
+/// lives in this origin's IndexedDB, readable by anything with script access to
+/// this origin. The panel says so where the user types it, because a weaker
+/// guarantee the user does not know about is the worst of both (phase-2
+/// decision 4).
+///
+/// One row, keyed `current`: M1 connects to one server. A list of them is a
+/// later milestone's problem and this store is shaped to take it.
+export interface StoredServer {
+  id: string;
+  baseUrl: string;
+  user: string;
+  auth: "password" | "apiKey";
+  secret: string;
+}
+
+export const CURRENT_SERVER = "current";
+
+export async function storedServer(): Promise<StoredServer | null> {
+  return withStore(SERVERS, "readonly", async (tx) => {
+    const found = await promisify<StoredServer | undefined>(
+      tx.objectStore(SERVERS).get(CURRENT_SERVER),
+    );
+    return found ?? null;
+  });
+}
+
+export async function putServer(server: StoredServer): Promise<void> {
+  await withStore(SERVERS, "readwrite", (tx) => {
+    tx.objectStore(SERVERS).put(server);
+  });
+}
+
+export async function deleteServer(): Promise<void> {
+  await withStore(SERVERS, "readwrite", (tx) => {
+    tx.objectStore(SERVERS).delete(CURRENT_SERVER);
+  });
 }
 
 export async function allTracks(): Promise<StoredTrack[]> {

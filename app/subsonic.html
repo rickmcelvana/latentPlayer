@@ -1,0 +1,43 @@
+<!doctype html>
+<!--
+  Dev-only harness for the web build's Subsonic client (Phase 2 M1). Served at
+  /subsonic.html by `npm run dev`; deliberately not in vite's build inputs, so
+  it never ships. The native counterparts are
+  `cargo test -p player-core --test subsonic_http` (the fake-server half) and
+  `cargo run -p player-core --example subsonic_smoke` (the live half), running
+  the same checks against the same claims.
+
+  What only this side can check: that a browser can reach the server at all.
+  CORS and mixed content have no native counterpart, and are the two ways this
+  build fails where the desktop one works (tasks/phase-2.md decision 5).
+
+  Credentials are typed here rather than baked in, and are not stored by this
+  page -- the app's own panel is what stores them.
+-->
+<html lang="en">
+  <head>
+    <meta charset="UTF-8" />
+    <title>subsonic smoke</title>
+    <style>
+      body { background: #14161a; color: #dfe3ea; font: 13px/1.6 ui-monospace, monospace; padding: 24px; }
+      button, input { font: inherit; padding: 6px 10px; background: #1d2027; color: inherit; border: 1px solid #333842; border-radius: 4px; }
+      label { display: block; margin: 8px 0; }
+      label span { display: inline-block; width: 90px; opacity: 0.7; }
+      pre { white-space: pre-wrap; }
+      .note { opacity: 0.6; }
+    </style>
+  </head>
+  <body>
+    <p>Checks the web Subsonic client against a real server, from a browser.</p>
+    <label><span>Address</span><input id="url" type="url" value="http://localhost:4533" size="36" /></label>
+    <label><span>Username</span><input id="user" type="text" autocomplete="off" size="24" /></label>
+    <label><span>Password</span><input id="secret" type="password" autocomplete="off" size="24" /></label>
+    <p class="note">
+      The unauthenticated checks run without these. Fill them in to check that the
+      token this client computes is one the server actually accepts.
+    </p>
+    <button id="run">Run</button>
+    <pre id="out"></pre>
+    <script type="module" src="/src/subsonicSmoke.ts"></script>
+  </body>
+</html>

@@ -103,7 +103,21 @@ ARCHITECTURE.md's "The scope window's lifecycle" for that decision and
 `tasks/phase-1.md`'s closing sections for both. The rest of ARCHITECTURE.md's
 "Known gaps" are design trades and remain open.
 
-**Phase 2 is planned, not started** (2026-08-17) -- see `tasks/phase-2.md` for
+**Phase 2 M1 is built** (2026-08-17): the Subsonic protocol lives in
+`player-core::subsonic` (IO-free, cross-target -- the desktop transport is
+`subsonic/http.rs` with ureq, the web's is `fetch` in `subsonicWeb.ts` calling
+the same Rust through wasm), the secret goes to the OS credential store natively
+and IndexedDB on the web, and both shells have the server panel. Verified: 11/11
+fake-server tests, 7/7 in a real browser against the local Navidrome, and the
+native `subsonic_smoke`. The one claim still unproven is that a *correct*
+password is accepted -- that needs a real account, so run `/subsonic.html` (or
+`LATENTPLAYER_SUBSONIC_USER`/`_PASSWORD` + `subsonic_smoke`) to close it.
+
+`cargo run -p player-core --example subsonic_smoke` checks the client against a
+real server; `cargo test -p player-core --test subsonic_http` checks it against
+a fake one that misbehaves on purpose (`tests/common/mod.rs`, which M2 reuses).
+
+**Phase 2 is planned** (2026-08-17) -- see `tasks/phase-2.md` for
 the milestone plan (M1 connection, M2 remote playback, M3 browsing, M4
 playlists/scrobbling/stars, M5 failing well) and its eight decisions. The short
 version: Subsonic/OpenSubsonic only (Jellyfin does not speak it natively --

@@ -5,10 +5,14 @@
 //! window's raw handle. Proves the same Rust render code that will later
 //! target a browser canvas (`player-rt-wasm`) also runs natively.
 
+mod servers;
+
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
 use std::thread::JoinHandle;
 use std::time::Duration;
+
+use servers::SharedServer;
 
 use player_core::eq::{self, EqSettings, BAND_FREQUENCIES, EQ_BANDS};
 use player_core::library::{Library, LibraryTrack, Playlist, ScanSummary};
@@ -600,7 +604,11 @@ pub fn run() {
             forget_folder,
             playlists,
             save_playlist,
-            delete_playlist
+            delete_playlist,
+            servers::server_state,
+            servers::connect_server,
+            servers::reconnect_server,
+            servers::forget_server
         ])
         // Cover art, served straight to the webview rather than serialised
         // through a command (M7 decision 5). The response carries an explicit
@@ -661,6 +669,18 @@ pub fn run() {
             // where that is (it depends on the bundle identifier and the OS).
             let data_dir = app.path().app_data_dir()?;
             app.manage(SharedLibrary::new(Mutex::new(Library::open(&data_dir)?)));
+
+            // The music server (Phase 2 M1). The directory is managed too, since
+            // the server's settings live beside the library index and the
+            // commands that read them run long after `setup` has returned.
+            app.manage(data_dir.clone());
+            let server = SharedServer::default();
+            app.manage(Arc::clone(&server));
+            // Reconnecting at startup happens off the main thread: it is a
+            // network round trip, and a server that is not there takes the
+            // request timeout to say so -- which on this thread would be the
+            // window not appearing for twenty seconds.
+            std::thread::spawn(move || servers::reconnect_stored(&data_dir, &server));
 
             // Second, plain (no-webview) window hosting the wgpu-rendered
             // scope. Built and configured here, on the main thread -- wgpu

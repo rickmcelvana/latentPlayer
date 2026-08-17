@@ -19,6 +19,9 @@ pub mod resample;
 pub mod source;
 pub mod spectrum;
 pub mod stream;
+/// The Subsonic/OpenSubsonic protocol (Phase 2). Cross-target and IO-free by
+/// design -- the shells move the bytes, this decides what they mean.
+pub mod subsonic;
 pub mod tags;
 pub mod tap;
 
@@ -38,5 +41,6 @@ pub use playback::Playback;
 pub use source::{InMemorySource, LocalFile, PlaybackSource};
 pub use spectrum::SpectrumAnalyzer;
 pub use stream::StreamingDecoder;
+pub use subsonic::{Credentials, Server, SubsonicError};
 pub use tags::{read_tags, CoverArt, TrackTags};
 pub use tap::{AnalysisTap, TapCursor, TapRead};

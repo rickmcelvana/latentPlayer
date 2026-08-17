@@ -681,3 +681,124 @@ input[type="range"] {
     }
   }
 }
+
+/* The music server (Phase 2 M1). Sized and spaced like the library panel it
+   sits under, since it is the same kind of thing: a source of music that is
+   configured once and then mostly out of the way. */
+.server-panel {
+  margin-top: 16px;
+  padding: 12px;
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  text-align: left;
+  font-size: 13px;
+
+  .server-header {
+    display: flex;
+    align-items: baseline;
+    justify-content: space-between;
+    gap: 8px;
+  }
+
+  .label {
+    text-transform: uppercase;
+    letter-spacing: 0.04em;
+    font-size: 11px;
+    opacity: 0.7;
+  }
+
+  .server-status {
+    font-size: 11px;
+    opacity: 0.6;
+  }
+
+  /* Connected is the one state worth colouring: everything else the panel says
+     in words, because "why not" matters more than "not". */
+  .server-status.connected {
+    color: var(--accent);
+    opacity: 1;
+  }
+
+  .server-address {
+    margin: 8px 0 0;
+    font-family: inherit;
+  }
+
+  .server-user,
+  .server-detail {
+    opacity: 0.6;
+    font-size: 12px;
+  }
+
+  .server-detail {
+    margin: 2px 0 0;
+  }
+
+  .server-form {
+    display: flex;
+    flex-direction: column;
+    gap: 8px;
+    margin-top: 8px;
+
+    label {
+      display: flex;
+      flex-direction: column;
+      gap: 3px;
+      font-size: 11px;
+      text-transform: uppercase;
+      letter-spacing: 0.04em;
+      opacity: 0.8;
+    }
+
+    input {
+      font: inherit;
+      font-size: 13px;
+      text-transform: none;
+      letter-spacing: normal;
+      padding: 6px 8px;
+      border-radius: 5px;
+      border: 1px solid var(--border);
+      background: var(--bg);
+      color: inherit;
+    }
+
+    input:focus {
+      outline: none;
+      border-color: var(--accent);
+    }
+  }
+
+  /* Where the secret goes, said next to the field it is typed into. The two
+     shells cannot promise the same thing, and the difference is the user's to
+     know (phase-2 decision 4). */
+  .server-note {
+    margin: 0;
+    font-size: 11px;
+    opacity: 0.55;
+    text-transform: none;
+    letter-spacing: normal;
+  }
+
+  .server-actions {
+    display: flex;
+    gap: 6px;
+    margin-top: 10px;
+  }
+
+  .server-error {
+    margin: 10px 0 0;
+    font-size: 12px;
+    color: #ff6b6b;
+  }
+
+  button.link {
+    background: none;
+    border: none;
+    padding: 0 0 0 6px;
+    color: var(--accent);
+    font: inherit;
+    font-size: 12px;
+    cursor: pointer;
+    text-decoration: underline;
+  }
+}

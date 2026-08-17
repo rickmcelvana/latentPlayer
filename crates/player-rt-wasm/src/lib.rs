@@ -525,3 +525,116 @@ impl WasmRenderer {
 pub fn scope_window_samples(sample_rate: u32, channels: u16) -> usize {
     player_render::window_samples(sample_rate, channels)
 }
+
+// --- Subsonic (Phase 2 M1) --------------------------------------------------
+//
+// The web shell's transport is `fetch`, in TypeScript; what it is emphatically
+// not allowed to be is a second implementation of the protocol. So the two
+// halves that decide anything -- what a request must contain, and what a
+// response means -- cross to JS through here, out of the same
+// `player_core::subsonic` the desktop shell calls directly (tasks/phase-2.md
+// decision 2).
+//
+// Both entry points speak JSON strings rather than structured JS objects: this
+// crate has no serde-wasm-bindgen and needs none for two calls that happen when
+// a user types a server address, not per audio block.
+
+/// Builds the URL for one call.
+///
+/// `salt` comes from the browser's own `crypto.getRandomValues` (decision 3:
+/// randomness is the shell's, hashing is the protocol's) and is ignored for
+/// API-key credentials.
+#[wasm_bindgen(js_name = subsonicRequestUrl)]
+pub fn subsonic_request_url(
+    base_url: &str,
+    user: &str,
+    secret: &str,
+    is_api_key: bool,
+    endpoint: &str,
+    salt: &str,
+    params_json: &str,
+) -> Result<String, JsValue> {
+    let server = player_core::subsonic::Server::new(base_url)
+        .map_err(|e| JsValue::from_str(&e.to_string()))?;
+    let credentials = if is_api_key {
+        player_core::subsonic::Credentials::ApiKey {
+            key: secret.to_string(),
+        }
+    } else {
+        player_core::subsonic::Credentials::Password {
+            user: user.to_string(),
+            password: secret.to_string(),
+        }
+    };
+    // Extra parameters arrive as a JSON object so this signature does not grow
+    // a variant per endpoint.
+    let extra: std::collections::BTreeMap<String, String> = if params_json.trim().is_empty() {
+        Default::default()
+    } else {
+        serde_json::from_str(params_json)
+            .map_err(|e| JsValue::from_str(&format!("bad parameters: {e}")))?
+    };
+    let params: Vec<(&str, &str)> = extra
+        .iter()
+        .map(|(k, v)| (k.as_str(), v.as_str()))
+        .collect();
+
+    player_core::subsonic::request_url(&server, &credentials, endpoint, &params, salt)
+        .map_err(|e| JsValue::from_str(&e.to_string()))
+}
+
+/// Parses one response body, and classifies a failure.
+///
+/// Returns JSON rather than throwing, in both directions, because a Subsonic
+/// failure is not an exception -- it is the answer, and the UI draws it. The
+/// shape:
+///
+/// ```json
+/// {"ok":true,"info":{...},"payload":{...}}
+/// {"ok":false,"error":{"kind":"server","code":40,"message":"...","credentials":true}}
+/// ```
+///
+/// `kind`/`credentials` are decided here rather than in TypeScript for the
+/// reason this whole seam exists: "is this the password's fault" must have one
+/// answer on both shells.
+#[wasm_bindgen(js_name = subsonicParse)]
+pub fn subsonic_parse(bytes: &[u8]) -> String {
+    use player_core::subsonic::{parse, SubsonicError};
+
+    match parse::<serde_json::Value>(bytes) {
+        Ok(parsed) => serde_json::json!({
+            "ok": true,
+            "info": {
+                "version": parsed.info.version,
+                "serverType": parsed.info.server_type,
+                "serverVersion": parsed.info.server_version,
+                "openSubsonic": parsed.info.open_subsonic,
+            },
+            "payload": parsed.payload,
+        })
+        .to_string(),
+        Err(error) => {
+            let (kind, code, credentials) = match &error {
+                SubsonicError::Server { code, .. } => (
+                    "server",
+                    Some(format!("{code:?}")),
+                    code.is_credentials_problem(),
+                ),
+                SubsonicError::Http { .. } => ("http", None, false),
+                SubsonicError::Malformed(_) => ("malformed", None, false),
+                SubsonicError::Transport(_) => ("transport", None, false),
+                SubsonicError::BadUrl(_) => ("badUrl", None, false),
+            };
+            serde_json::json!({
+                "ok": false,
+                "error": {
+                    "kind": kind,
+                    "code": code,
+                    "message": error.to_string(),
+                    "credentials": credentials,
+                },
+            })
+            .to_string()
+        }
+    }
+}

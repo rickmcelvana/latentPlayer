@@ -194,3 +194,47 @@ export async function setScopeSize(width: number, height: number): Promise<void>
 export async function setScopeVisible(visible: boolean): Promise<void> {
   return invoke("set_scope_visible", { visible });
 }
+
+/// The music server's state (Phase 2 M1). Mirrors `ServerState` in
+/// src-tauri/src/servers.rs, and `subsonicWeb.ts`'s copy on the web side -- one
+/// shape, so `ServerPanel` never branches on which shell it is in.
+export interface ServerState {
+  configured: boolean;
+  connected: boolean;
+  baseUrl: string;
+  user: string;
+  auth: string;
+  serverType: string;
+  serverVersion: string;
+  apiVersion: string;
+  openSubsonic: boolean;
+  supportsApiKey: boolean;
+  error: string;
+  errorIsCredentials: boolean;
+}
+
+export async function serverState(): Promise<ServerState> {
+  return invoke<ServerState>("server_state");
+}
+
+/// Connects and, if the server accepts the secret, remembers it -- the address
+/// in the app data directory, the secret in the OS credential store.
+///
+/// A rejected password comes back as a `ServerState` carrying the reason rather
+/// than as a thrown error: it is an ordinary outcome the panel draws.
+export async function connectServer(
+  baseUrl: string,
+  user: string,
+  secret: string,
+  auth: "password" | "apiKey",
+): Promise<ServerState> {
+  return invoke<ServerState>("connect_server", { baseUrl, user, secret, auth });
+}
+
+export async function reconnectServer(): Promise<ServerState> {
+  return invoke<ServerState>("reconnect_server");
+}
+
+export async function forgetServer(): Promise<ServerState> {
+  return invoke<ServerState>("forget_server");
+}

@@ -80,6 +80,20 @@ crates/
                      metadata *before* the container, so an MP3 yields
                      [ID3v1, ID3v2] and first-wins would prefer the truncated
                      ID3v1 title.
+                     subsonic/ (Phase 2 M1) is the Subsonic/OpenSubsonic
+                     protocol: mod.rs builds requests and parses responses and
+                     does no IO at all, so both shells reach the same conclusion
+                     about what a response means -- including the one that
+                     matters, that a Subsonic *failure* arrives as an HTTP 200
+                     with `"status":"failed"` inside it. `parse` is the only way
+                     to get a payload out, so nothing can skip that check.
+                     Token auth is md5(password + salt), held to the spec's own
+                     worked example rather than to itself. subsonic/http.rs is
+                     the desktop transport (ureq, blocking, on threads that may
+                     block); the web's is `fetch` in app/src/subsonicWeb.ts,
+                     calling this same code through two wasm bindings. Salts come
+                     from whichever shell is asking, since a browser and an OS
+                     have different RNGs and only one of them needs a build flag.
                      library.rs is the desktop library and is native-only by
                      necessity -- a browser has directory handles, not paths.
                      It walks folders, keeps a versioned JSON index plus a
@@ -132,6 +146,16 @@ src-tauri/           Tauri 2 desktop shell. Two windows: the React webview
                      than in the engine -- `Playback` is rebuilt per track, so
                      `load_file` hands the stored setting to each new one.
 
+                     servers.rs (Phase 2 M1) is the music server's desktop half:
+                     the address and username live beside the library index, the
+                     *secret* goes to the OS credential store through `keyring`,
+                     and the two are separate because Subsonic's token scheme
+                     hashes the password per request -- so a client that speaks
+                     it has to keep the password itself, and keeps it where the
+                     OS keeps such things. Connecting runs on the blocking pool:
+                     a server that is not there takes the whole request timeout
+                     to say so.
+
                      The library's commands live here too (M7), with the scan
                      itself on a blocking thread rather than the main one --
                      a folder of a few thousand tracks is tens of seconds of
@@ -175,15 +199,26 @@ app/                 React + TS + Vite. Same component tree renders in the
                      session; the worker resamples every track to it. Web
                      volume rides a GainNode, since Web Audio smooths it and
                      the worklet would zipper.
-                     playlist.ts, analysis.ts, scope.ts, library.ts and eq.ts
-                     are the five adapter modules components actually call:
+                     subsonicWeb.ts is the web build's Subsonic transport
+                     (Phase 2 M1) -- `fetch` and nothing else, since the protocol
+                     itself is the wasm-compiled player-core. It owns the two
+                     limits that have no native counterpart and must be named
+                     rather than reported as "failed to fetch": a browser can
+                     only reach a server that sends CORS headers, and a page on
+                     https: may not talk to an http: server at all. Its
+                     credentials go in IndexedDB in plaintext, because a browser
+                     has no credential store -- which the panel says, next to the
+                     field the secret is typed into.
+                     playlist.ts, analysis.ts, scope.ts, library.ts, eq.ts and
+                     server.ts are the six adapter modules components call:
                      playlist.ts picks the shell for playback, analysis.ts for
                      metering, scope.ts for the scope's size and visibility (a
                      separate OS window natively, a canvas on the web -- one
                      component, ScopeControls, drives both), library.ts for the
-                     library, and eq.ts for the equaliser (which also owns
+                     library, eq.ts for the equaliser (which also owns
                      remembering the setting between sessions, in localStorage
-                     -- ten numbers and a flag, unlike the library).
+                     -- ten numbers and a flag, unlike the library), and
+                     server.ts for the music server.
                      eqFilter.ts is the one piece of DSP in this app that
                      exists twice: the worklet's copy of player-core's biquad
                      difference equation, deliberately holding nothing but that
@@ -209,11 +244,13 @@ app/                 React + TS + Vite. Same component tree renders in the
                      which is two lines of arithmetic and still lives in Rust
                      so the two shells cannot draw different figures.
                      gapless.html, spectrum.html, loudness.html, scope.html,
-                     library.html and eq.html
+                     library.html, eq.html and subsonic.html
                      (with their *Smoke.ts) are dev-only harnesses -- served at
                      those paths, never bundled -- running the same checks as
                      the native gapless_smoke, spectrum_smoke, loudness_smoke,
-                     scope_smoke, library_smoke and eq_smoke examples.
+                     scope_smoke, library_smoke, eq_smoke and subsonic_smoke
+                     examples. subsonic.html additionally checks the two things
+                     only a browser can fail at, CORS and mixed content.
                      webScope.ts drives the web build's scope canvas
                      (WasmRenderer, via rAF) -- the web-side counterpart of
                      src-tauri's native redraw thread.

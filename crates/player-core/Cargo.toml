@@ -12,6 +12,16 @@ thiserror = "1"
 # track to it rather than tearing the context down between tracks.
 rubato = "5"
 realfft = "3.5"
+# Cross-target since Phase 2: the M7 library index is native-only, but the
+# Subsonic protocol (subsonic.rs) is parsed on both shells out of the same code,
+# which is the whole point of keeping the protocol in Rust and the transport out
+# of it (tasks/phase-2.md decision 2).
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+# Subsonic's token auth is md5(password + salt) -- not a choice this client gets
+# to make, and not used for anything else here. Pure Rust and no_std-capable, so
+# it builds for wasm32 like the rest of this crate.
+md-5 = "0.11"
 
 # cpal doesn't target wasm32 -- native playback output lives behind this cfg
 # and is simply absent from wasm builds (player-rt-wasm drives output via the
@@ -19,11 +29,14 @@ realfft = "3.5"
 [target.'cfg(not(target_arch = "wasm32"))'.dependencies]
 cpal = "0.18"
 rtrb = "0.3.4"
-# The library index (M7) is native-only for the same reason its scanner is:
-# a browser has directory handles, not paths, and persists its own index in
-# IndexedDB (see app/src/libraryStore.ts). Nothing on the wasm side needs
-# either of these.
-serde = { version = "1", features = ["derive"] }
-serde_json = "1"
+# The desktop shell's Subsonic transport (Phase 2 M1). Blocking, because every
+# caller is a thread allowed to block and none of them is the audio callback --
+# an async client would cost this crate an executor it does not otherwise have.
+# rustls by default, so no OpenSSL to find on Windows.
+ureq = "3.4"
+# Salts for Subsonic's token auth, from the OS. Native-only on purpose: the web
+# shell has crypto.getRandomValues and this crate stays free of the wasm feature
+# flag getrandom would otherwise need (tasks/phase-2.md decision 3).
+getrandom = "0.3"
 
 [dev-dependencies]
