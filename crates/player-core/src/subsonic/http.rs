@@ -15,9 +15,10 @@ use std::time::Duration;
 
 use serde::de::DeserializeOwned;
 
+use super::browse::{cover_art_params, parse_browse, BrowseRequest, BrowseResult, TrackRow};
 use super::{
     request_url, salt_hex, stream_params, Credentials, Extensions, NoPayload, Parsed, RandomSongs,
-    Server, ServerInfo, Song, SubsonicError,
+    Server, ServerInfo, SubsonicError,
 };
 use crate::remote::RemoteSource;
 
@@ -43,11 +44,45 @@ const MAX_RESPONSE_BYTES: u64 = 32 * 1024 * 1024;
 /// sixteen bytes, i.e. 32 hex characters of real randomness.
 const SALT_BYTES: usize = 16;
 
+/// Most one piece of cover art may be (M3). A thumbnail asked for at a size is
+/// tens of kilobytes; this is far above that and still a bound, for the same
+/// reason [`MAX_RESPONSE_BYTES`] is one -- what arrives is not always what was
+/// asked for.
+const MAX_COVER_BYTES: u64 = 16 * 1024 * 1024;
+
+/// One image, with the type the server said it is.
+///
+/// Carried as bytes rather than written to a file because each shell puts it
+/// somewhere different: the desktop shell answers a `cover://` request with it,
+/// the web shell makes a blob URL. Neither sends it through JSON.
+pub struct CoverArt {
+    pub bytes: Vec<u8>,
+    pub content_type: String,
+}
+
+/// Its size and type rather than its bytes: a derived `Debug` on an image prints
+/// a hundred kilobytes of numbers into whatever was logging it.
+impl std::fmt::Debug for CoverArt {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(
+            f,
+            "CoverArt({}, {} bytes)",
+            self.content_type,
+            self.bytes.len()
+        )
+    }
+}
+
 /// A connection to one server, with the credentials to use on it.
 ///
 /// Cheap to clone in the sense that matters -- the `ureq::Agent` inside pools
-/// connections, so a second request to the same server reuses the first one's
-/// TCP and TLS handshake rather than paying for them again.
+/// connections, so a clone shares the pool and a second request to the same
+/// server reuses the first one's TCP and TLS handshake rather than paying for
+/// them again. Cloning is what lets a caller take the client out from under a
+/// lock and then spend a network round trip without holding it (M3's cover art
+/// does exactly that: a gridful of thumbnails must not queue up behind one
+/// mutex).
+#[derive(Clone)]
 pub struct HttpClient {
     agent: ureq::Agent,
     server: Server,
@@ -116,13 +151,97 @@ impl HttpClient {
     /// Not a browse API -- that is M3 -- but the smallest call that produces
     /// real, playable track ids, which is what M2 needs to prove that remote
     /// playback works at all.
-    pub fn random_songs(&self, count: u32) -> Result<Vec<Song>, SubsonicError> {
+    pub fn random_songs(&self, count: u32) -> Result<Vec<TrackRow>, SubsonicError> {
         let size = count.to_string();
         Ok(self
             .get::<RandomSongs>("getRandomSongs", &[("size", size.as_str())])?
             .payload
             .inner
-            .song)
+            .song
+            .into_iter()
+            .map(TrackRow::from)
+            .collect())
+    }
+
+    /// One browse request (Phase 2 M3): artists, one artist's albums, a page of
+    /// albums, one album's tracks, or a search.
+    ///
+    /// Which endpoint that is and what it must carry are [`BrowseRequest`]'s
+    /// business, and what comes back is [`parse_browse`]'s -- so this method
+    /// knows nothing about any of the five and cannot disagree with the web
+    /// shell, which calls the same two functions through wasm.
+    pub fn browse(&self, request: &BrowseRequest) -> Result<BrowseResult, SubsonicError> {
+        let owned = request.params();
+        let params: Vec<(&str, &str)> = owned
+            .iter()
+            .map(|(k, v)| (k.as_str(), v.as_str()))
+            .collect();
+        let url = request_url(
+            &self.server,
+            &self.credentials,
+            request.endpoint(),
+            &params,
+            &fresh_salt()?,
+        )?;
+        Ok(parse_browse(request, &self.fetch(&url)?)?.payload)
+    }
+
+    /// One piece of cover art, scaled by the server.
+    ///
+    /// The odd one out among these calls: it answers with an *image*, not an
+    /// envelope, so there is nothing to parse and the usual "a failure is an
+    /// HTTP 200" rule needs its own handling -- a server that cannot find the
+    /// art sends a document rather than a picture, which this turns into an
+    /// error instead of handing the webview bytes it will not draw.
+    pub fn cover_art(&self, id: &str, size: u32) -> Result<CoverArt, SubsonicError> {
+        let owned = cover_art_params(id, size);
+        let params: Vec<(&str, &str)> = owned
+            .iter()
+            .map(|(k, v)| (k.as_str(), v.as_str()))
+            .collect();
+        let url = request_url(
+            &self.server,
+            &self.credentials,
+            "getCoverArt",
+            &params,
+            &fresh_salt()?,
+        )?;
+
+        let mut response = self.agent.get(&url).call().map_err(|e| match e {
+            ureq::Error::StatusCode(status) => SubsonicError::Http { status },
+            other => SubsonicError::Transport(other.to_string()),
+        })?;
+        let content_type = response
+            .headers()
+            .get(ureq::http::header::CONTENT_TYPE)
+            .and_then(|value| value.to_str().ok())
+            .unwrap_or_default()
+            .to_string();
+        let bytes = response
+            .body_mut()
+            .with_config()
+            .limit(MAX_COVER_BYTES)
+            .read_to_vec()
+            .map_err(|e| SubsonicError::Transport(format!("reading the cover failed: {e}")))?;
+
+        if !content_type.starts_with("image/") {
+            // The spec says an error here is an XML document; Navidrome sends
+            // the ordinary JSON envelope instead. So the envelope is tried
+            // first, because it carries the server's own words -- and anything
+            // that is neither an image nor an envelope (a proxy's login page,
+            // say) is reported by naming what did arrive, which is the only
+            // useful thing left to say about it.
+            return Err(match super::parse::<NoPayload>(&bytes) {
+                Err(server @ SubsonicError::Server { .. }) => server,
+                _ => {
+                    SubsonicError::Malformed(format!("asked for cover art and got {content_type}"))
+                }
+            });
+        }
+        Ok(CoverArt {
+            bytes,
+            content_type,
+        })
     }
 
     /// A `PlaybackSource` for one track on this server.

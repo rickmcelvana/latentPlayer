@@ -14,11 +14,15 @@
 // and a server that does not send CORS headers is unreachable from any origin
 // but its own.
 import init, {
+  subsonicBrowseResult,
+  subsonicBrowseUrl,
+  subsonicCoverUrl,
   subsonicParse,
   subsonicRandomSongs,
   subsonicRequestUrl,
   subsonicStreamUrl,
 } from "./wasm/player_rt_wasm.js";
+import type { BrowseRequest, BrowseResult, ServerTrack } from "./serverTypes";
 import {
   CURRENT_SERVER,
   deleteServer,
@@ -312,21 +316,85 @@ export async function forgetServer(): Promise<ServerState> {
   return emptyServerState();
 }
 
-/// One track on the server, as much of it as playing one needs. Mirrors
-/// `ServerTrack` in src-tauri/src/servers.rs field for field, the way
-/// `ServerState` does -- and the rows are built by the same Rust either way
-/// (`subsonicRandomSongs`), so the two shells cannot disagree about what a
-/// response contained.
-export interface ServerTrack {
-  id: string;
-  title: string;
-  artist: string;
-  album: string;
-  suffix: string;
-  durationSeconds: number;
+type ParsedSongs = { ok: true; songs: ServerTrack[] } | { ok: false; error: ParsedError };
+
+type ParsedBrowse = (BrowseResult & { ok: true }) | { ok: false; error: ParsedError };
+
+/// One browse request against the server's library (Phase 2 M3).
+///
+/// Note what this function does not contain: an endpoint name, a query
+/// parameter, or any knowledge of where in a response the artists live. The
+/// request goes to Rust as JSON, comes back as a URL; the bytes go to Rust and
+/// come back as rows. This module still only decides how bytes travel.
+export async function browse(request: BrowseRequest): Promise<BrowseResult> {
+  const server = await requireServer();
+  await ready();
+  const requestJson = JSON.stringify(request);
+  const url = subsonicBrowseUrl(
+    server.baseUrl,
+    server.user,
+    server.secret,
+    server.auth === "apiKey",
+    freshSalt(),
+    requestJson,
+  );
+  const response = await get(server, url);
+  const bytes = new Uint8Array(await response.arrayBuffer());
+  const parsed = JSON.parse(subsonicBrowseResult(requestJson, bytes)) as ParsedBrowse;
+  if (!parsed.ok) throw new SubsonicFailure(parsed.error);
+  return { artists: parsed.artists, albums: parsed.albums, tracks: parsed.tracks };
 }
 
-type ParsedSongs = { ok: true; songs: ServerTrack[] } | { ok: false; error: ParsedError };
+/// Object URLs for server cover art, keyed by the server's cover id.
+///
+/// Keyed on the *promise* for the reason library.ts's cache is: a list's rows
+/// all render in the same tick and all ask for the same album's art, and a cache
+/// written only once the blob has arrived is still empty when the second and
+/// third callers look -- so each of them creates its own object URL, a live
+/// reference to a blob that nothing will ever revoke.
+const coverUrls = new Map<string, Promise<string | null>>();
+
+/// A URL for one piece of the server's cover art, or null if it cannot be had.
+///
+/// The web counterpart of the desktop shell's `cover://` handler, and the reason
+/// it cannot simply be the server's own URL in an `<img src>`: this app sets
+/// `Cross-Origin-Embedder-Policy: require-corp`, under which a cross-origin
+/// image loaded the ordinary way is a no-cors request and is blocked before the
+/// network sees it. Fetching it in CORS mode and wrapping the bytes in a blob
+/// URL is what satisfies that header -- the same reason the Subsonic calls
+/// themselves are `mode: "cors"`.
+export function serverCoverUrl(coverArt: string): Promise<string | null> {
+  const existing = coverUrls.get(coverArt);
+  if (existing) return existing;
+
+  const pending = fetchCover(coverArt);
+  coverUrls.set(coverArt, pending);
+  // A failure is not cached as a permanent "no art": the server may simply have
+  // been unreachable for a moment, and the row is perfectly playable either way.
+  void pending.catch(() => coverUrls.delete(coverArt));
+  return pending;
+}
+
+async function fetchCover(coverArt: string): Promise<string | null> {
+  const server = await requireServer();
+  await ready();
+  const url = subsonicCoverUrl(
+    server.baseUrl,
+    server.user,
+    server.secret,
+    server.auth === "apiKey",
+    freshSalt(),
+    coverArt,
+  );
+  const response = await get(server, url);
+  const type = response.headers.get("content-type") ?? "";
+  // `getCoverArt` answers with an image on success and with a document on
+  // failure -- an HTTP 200 either way, like everything else in this protocol.
+  // A blob URL over the failure would render as a broken image with no
+  // explanation, so it becomes "no art" instead, which is what the row shows.
+  if (!type.startsWith("image/")) return null;
+  return URL.createObjectURL(await response.blob());
+}
 
 /// A handful of tracks at random, so there is something to play before browsing
 /// exists (M3). Mirrors `server_random_tracks` on the desktop shell.

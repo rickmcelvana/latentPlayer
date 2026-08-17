@@ -22,6 +22,7 @@
 //! entirely, and this module prefers it when a server offers one; the Navidrome
 //! this was built against (0.63.2) does not.
 
+use std::collections::{HashMap, VecDeque};
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex};
 
@@ -313,7 +314,11 @@ pub async fn connect_server(
     auth: AuthKind,
     data_dir: tauri::State<'_, PathBuf>,
     shared: tauri::State<'_, SharedServer>,
+    covers: tauri::State<'_, SharedCovers>,
 ) -> Result<ServerState, String> {
+    // Whatever art is held belongs to the server being replaced, and a cover id
+    // means nothing on a different one.
+    covers.clear();
     let settings = ServerSettings {
         base_url,
         user,
@@ -373,7 +378,9 @@ pub async fn reconnect_server(
 pub fn forget_server(
     data_dir: tauri::State<PathBuf>,
     shared: tauri::State<SharedServer>,
+    covers: tauri::State<SharedCovers>,
 ) -> Result<ServerState, String> {
+    covers.clear();
     if let Some(settings) = load_settings(&data_dir) {
         forget_secret(&settings);
         let path = settings_path(&data_dir);
@@ -497,56 +504,159 @@ mod tests {
     }
 }
 
-/// One track on the server, as the UI needs it (Phase 2 M2).
+/// One track on the server, as the UI needs it.
 ///
-/// M3 replaces the way these are found -- browsing, searching -- but not their
-/// shape: a row is an id, enough words to show, and the suffix the decoder needs
-/// as a hint.
-#[derive(Debug, Clone, serde::Serialize)]
-#[serde(rename_all = "camelCase")]
-pub struct ServerTrack {
-    pub id: String,
-    pub title: String,
-    pub artist: String,
-    pub album: String,
-    pub suffix: String,
-    pub duration_seconds: f64,
-}
+/// Not defined here: it is `player_core::subsonic::TrackRow`, built by the same
+/// code the web shell's rows come out of, so a row means the same thing on both
+/// shells rather than nearly the same thing.
+pub use player_core::subsonic::TrackRow as ServerTrack;
 
-impl From<player_core::subsonic::Song> for ServerTrack {
-    fn from(song: player_core::subsonic::Song) -> Self {
-        Self {
-            id: song.id,
-            title: song.title,
-            artist: song.artist,
-            album: song.album,
-            suffix: song.suffix,
-            duration_seconds: song.duration.unwrap_or(0) as f64,
-        }
-    }
-}
-
-/// A handful of tracks at random, so there is something to play before browsing
-/// exists (M3). Blocking pool, like everything else that touches the network.
+/// A handful of tracks at random. Kept past M3 because it is still the shortest
+/// path from a connected server to sound, and because `remote_smoke` uses it.
+/// Blocking pool, like everything else that touches the network.
 #[tauri::command]
 pub async fn server_random_tracks(
     count: u32,
     shared: tauri::State<'_, SharedServer>,
 ) -> Result<Vec<ServerTrack>, String> {
-    let shared = Arc::clone(shared.inner());
+    let client = client_for(&shared)?;
     tauri::async_runtime::spawn_blocking(move || {
-        let guard = shared.lock().unwrap();
-        let connection = guard
-            .as_ref()
-            .ok_or_else(|| "no music server is connected".to_string())?;
-        connection
-            .client
-            .random_songs(count)
-            .map(|songs| songs.into_iter().map(ServerTrack::from).collect())
-            .map_err(|e| e.to_string())
+        client.random_songs(count).map_err(|e| e.to_string())
     })
     .await
     .map_err(|e| e.to_string())?
+}
+
+/// One browse request against the server's library (Phase 2 M3).
+///
+/// One command for all five requests rather than five commands, because the
+/// thing that differs between them -- the endpoint, its parameters, and where
+/// its answer hides the list -- is `player_core::subsonic::browse`'s business on
+/// both shells. This shell's job is to be on a thread that may block.
+#[tauri::command]
+pub async fn server_browse(
+    request: player_core::subsonic::BrowseRequest,
+    shared: tauri::State<'_, SharedServer>,
+) -> Result<player_core::subsonic::BrowseResult, String> {
+    let client = client_for(&shared)?;
+    tauri::async_runtime::spawn_blocking(move || client.browse(&request).map_err(|e| e.to_string()))
+        .await
+        .map_err(|e| e.to_string())?
+}
+
+/// The connected server's client, cloned out from under the lock.
+///
+/// Cloned deliberately: every caller below then spends a network round trip, and
+/// holding the lock across that would make two browse requests -- or twenty
+/// cover fetches -- take turns for no reason. The clone shares the connection
+/// pool, so it is cheap in the way that matters.
+fn client_for(shared: &tauri::State<'_, SharedServer>) -> Result<HttpClient, String> {
+    let guard = shared.lock().unwrap();
+    guard
+        .as_ref()
+        .map(|connection| connection.client.clone())
+        .ok_or_else(|| "no music server is connected".to_string())
+}
+
+/// Size, in pixels, cover art is asked for at -- the same number the web shell
+/// asks for, because it is defined once, in the protocol module.
+use player_core::subsonic::COVER_SIZE_PX;
+
+/// One piece of cover art, and what it is.
+pub struct CachedCover {
+    pub bytes: Vec<u8>,
+    pub content_type: String,
+}
+
+/// Server cover art fetched this session.
+///
+/// Needed rather than nice: the webview asks for a row's art every time the row
+/// is drawn, so scrolling a list without this is a request per row per redraw.
+/// Bounded by bytes and evicted oldest-first -- a cache that grows with the
+/// library is the same bug as no cache at all, just slower to notice.
+#[derive(Default)]
+pub struct CoverCache {
+    inner: Mutex<CoverCacheInner>,
+}
+
+#[derive(Default)]
+struct CoverCacheInner {
+    by_id: HashMap<String, Arc<CachedCover>>,
+    /// Insertion order, for eviction. Ids repeat only if re-inserted after an
+    /// eviction, which the removal below tolerates.
+    order: VecDeque<String>,
+    bytes: usize,
+}
+
+/// Most the cover cache may hold. At [`COVER_SIZE_PX`] a cover is tens of
+/// kilobytes, so this is hundreds of them -- more than any one view shows.
+const MAX_COVER_CACHE_BYTES: usize = 32 * 1024 * 1024;
+
+impl CoverCache {
+    pub fn get(&self, id: &str) -> Option<Arc<CachedCover>> {
+        self.inner.lock().unwrap().by_id.get(id).cloned()
+    }
+
+    pub fn put(&self, id: &str, cover: Arc<CachedCover>) {
+        let mut inner = self.inner.lock().unwrap();
+        if inner.by_id.contains_key(id) {
+            return;
+        }
+        inner.bytes += cover.bytes.len();
+        inner.by_id.insert(id.to_string(), cover);
+        inner.order.push_back(id.to_string());
+        while inner.bytes > MAX_COVER_CACHE_BYTES {
+            let Some(oldest) = inner.order.pop_front() else {
+                break;
+            };
+            if let Some(evicted) = inner.by_id.remove(&oldest) {
+                inner.bytes -= evicted.bytes.len();
+            }
+        }
+    }
+
+    /// Forgets everything. Called when the server changes, since ids mean
+    /// nothing on a different server and a stale hit would draw the wrong art.
+    pub fn clear(&self) {
+        let mut inner = self.inner.lock().unwrap();
+        inner.by_id.clear();
+        inner.order.clear();
+        inner.bytes = 0;
+    }
+}
+
+pub type SharedCovers = Arc<CoverCache>;
+
+/// Fetches one piece of cover art, or hands back the copy already held.
+///
+/// Called from the `cover://` protocol handler on a thread of its own -- art
+/// does not travel through `invoke` on either shell (M7 decision 5), and now it
+/// does not travel through the main thread either, because fetching it reaches
+/// the network.
+pub fn cover_art(
+    shared: &SharedServer,
+    covers: &CoverCache,
+    id: &str,
+) -> Result<Arc<CachedCover>, String> {
+    if let Some(held) = covers.get(id) {
+        return Ok(held);
+    }
+    let client = {
+        let guard = shared.lock().unwrap();
+        guard
+            .as_ref()
+            .map(|connection| connection.client.clone())
+            .ok_or_else(|| "no music server is connected".to_string())?
+    };
+    let fetched = client
+        .cover_art(id, COVER_SIZE_PX)
+        .map_err(|e| e.to_string())?;
+    let cover = Arc::new(CachedCover {
+        bytes: fetched.bytes,
+        content_type: fetched.content_type,
+    });
+    covers.put(id, Arc::clone(&cover));
+    Ok(cover)
 }
 
 /// Builds a playback source for one server track.

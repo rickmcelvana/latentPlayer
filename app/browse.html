@@ -1,0 +1,38 @@
+<!doctype html>
+<!--
+  Dev-only harness for browsing the music server from a browser (Phase 2 M3).
+  Served at /browse.html by `npm run dev`; deliberately not in vite's build
+  inputs, so it never ships. The native counterparts are
+  `cargo test -p player-core --test subsonic_browse` (the fake-server half) and
+  `cargo run -p player-core --example browse_smoke` (the live half), making the
+  same claims about the same things.
+
+  What only this side can check: that cover art fetched from another origin
+  actually renders under this app's own Cross-Origin-Embedder-Policy, which
+  blocks the straightforward <img src> a desktop app never has to think about.
+
+  There is nowhere to type a password here: this uses the server the app's own
+  panel stored. Connect one in the app first. It plays a second of music.
+-->
+<html lang="en">
+  <head>
+    <meta charset="UTF-8" />
+    <title>browse smoke</title>
+    <style>
+      body { background: #14161a; color: #dfe3ea; font: 13px/1.6 ui-monospace, monospace; padding: 24px; }
+      button { font: inherit; padding: 6px 10px; background: #1d2027; color: inherit; border: 1px solid #333842; border-radius: 4px; }
+      pre { white-space: pre-wrap; }
+      .note { opacity: 0.6; }
+    </style>
+  </head>
+  <body>
+    <p>Browses the music server from this browser, through the app's own adapter.</p>
+    <p class="note">
+      Uses the server set up in the app (same origin, same IndexedDB). The offline
+      checks run without one. Takes a few seconds, and makes a little sound.
+    </p>
+    <button id="run">Run</button>
+    <pre id="out"></pre>
+    <script type="module" src="/src/browseSmoke.ts"></script>
+  </body>
+</html>

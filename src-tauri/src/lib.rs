@@ -609,6 +609,100 @@ fn cover_response(
         .unwrap_or_else(|_| tauri::http::Response::new(Vec::new()))
 }
 
+/// What marks a `cover://` id as the music server's rather than the local
+/// library's (M3).
+///
+/// One scheme for both, rather than a second protocol, because the difference is
+/// where the bytes come from and nothing else: the component drawing the row
+/// asks for a URL and gets one, exactly as it did in M7.
+const SERVER_COVER_PREFIX: &str = "server:";
+
+/// One cover out of the local library's cache.
+fn library_cover(app: &tauri::AppHandle, id: &str) -> tauri::http::Response<Vec<u8>> {
+    let Some(library) = app.try_state::<SharedLibrary>() else {
+        return cover_response(404, "application/octet-stream", Vec::new());
+    };
+    let path = {
+        let guard = library.lock().unwrap();
+        let known = guard
+            .tracks()
+            .iter()
+            .any(|track| track.cover_id.as_deref() == Some(id));
+        known.then(|| guard.cover_path(id))
+    };
+    match path.and_then(|path| std::fs::read(path).ok()) {
+        Some(bytes) => cover_response(200, sniff_image_type(&bytes), bytes),
+        None => cover_response(404, "application/octet-stream", Vec::new()),
+    }
+}
+
+/// One cover off the music server, fetched or held (M3).
+///
+/// A failure here is a 404 and a blank square, not a message: art is decoration,
+/// and a server that cannot produce a thumbnail must not make a playable row
+/// look broken. The reason still reaches the log.
+fn server_cover(app: &tauri::AppHandle, id: &str) -> tauri::http::Response<Vec<u8>> {
+    let (Some(server), Some(covers)) = (
+        app.try_state::<servers::SharedServer>(),
+        app.try_state::<servers::SharedCovers>(),
+    ) else {
+        return cover_response(404, "application/octet-stream", Vec::new());
+    };
+    match servers::cover_art(&server, &covers, id) {
+        Ok(cover) => {
+            // The server's own content type, but only after sniffing agrees it
+            // is an image at all -- the same rule the library covers follow, and
+            // for the same reason: a browser told the wrong type draws nothing.
+            let sniffed = sniff_image_type(&cover.bytes);
+            let content_type = if sniffed == "application/octet-stream" {
+                cover.content_type.as_str()
+            } else {
+                sniffed
+            };
+            cover_response(200, content_type, cover.bytes.clone())
+        }
+        Err(e) => {
+            eprintln!("fetching cover art {id} from the server failed: {e}");
+            cover_response(404, "application/octet-stream", Vec::new())
+        }
+    }
+}
+
+/// Percent-decoding for one path segment.
+///
+/// `convertFileSrc` builds these with `encodeURIComponent`, so an id containing
+/// anything outside the unreserved set -- including the `:` this app's own
+/// server prefix uses -- arrives escaped.
+fn percent_decode(segment: &str) -> String {
+    let bytes = segment.as_bytes();
+    let mut out = Vec::with_capacity(bytes.len());
+    let mut i = 0;
+    while i < bytes.len() {
+        match bytes[i] {
+            b'%' if i + 2 < bytes.len() => {
+                match u8::from_str_radix(
+                    std::str::from_utf8(&bytes[i + 1..i + 3]).unwrap_or(""),
+                    16,
+                ) {
+                    Ok(byte) => {
+                        out.push(byte);
+                        i += 3;
+                    }
+                    Err(_) => {
+                        out.push(bytes[i]);
+                        i += 1;
+                    }
+                }
+            }
+            other => {
+                out.push(other);
+                i += 1;
+            }
+        }
+    }
+    String::from_utf8_lossy(&out).into_owned()
+}
+
 /// The image's type from its own first bytes rather than from what the tag
 /// claimed. `player-core` records the media type symphonia reported, but this
 /// side only has the cached file, and a browser that is told `image/jpeg`
@@ -658,6 +752,7 @@ pub fn run() {
             load_server_track,
             set_next_server_track,
             servers::server_random_tracks,
+            servers::server_browse,
             servers::server_state,
             servers::connect_server,
             servers::reconnect_server,
@@ -671,41 +766,27 @@ pub fn run() {
         // under that header a subresource without CORP is blocked. Without it
         // every cover would silently fail to load and the cause would look
         // like a broken path.
-        .register_uri_scheme_protocol(COVER_SCHEME, |ctx, request| {
-            let Some(library) = ctx.app_handle().try_state::<SharedLibrary>() else {
-                return cover_response(404, "application/octet-stream", Vec::new());
-            };
+        // Asynchronous since Phase 2 M3, and that is not a refactor: a server
+        // cover is *fetched*, and answering a request on the main thread would
+        // mean the whole UI waiting on the network once per row. The library's
+        // own covers are a file read and could still be answered inline; they
+        // go the same way so there is one path to reason about.
+        .register_asynchronous_uri_scheme_protocol(COVER_SCHEME, |ctx, request, responder| {
+            let app = ctx.app_handle().clone();
             // The id is the last path segment: `cover://localhost/<id>`, which
             // on Windows the webview rewrites to `http://cover.localhost/<id>`.
             // Taking the segment rather than the whole path is also what keeps
-            // a crafted `..` from naming a file outside the cache -- the id is
-            // then checked against the library's own rows below, so only a
+            // a crafted `..` from naming a file outside the cache -- a library
+            // id is then checked against the library's own rows, so only a
             // cover this app wrote can be served.
-            let id = request
-                .uri()
-                .path()
-                .rsplit('/')
-                .next()
-                .unwrap_or_default()
-                .to_string();
+            let id = percent_decode(request.uri().path().rsplit('/').next().unwrap_or_default());
 
-            let path = {
-                let guard = library.lock().unwrap();
-                let known = guard
-                    .tracks()
-                    .iter()
-                    .any(|track| track.cover_id.as_deref() == Some(id.as_str()));
-                if !known {
-                    None
-                } else {
-                    Some(guard.cover_path(&id))
-                }
-            };
-
-            match path.and_then(|path| std::fs::read(path).ok()) {
-                Some(bytes) => cover_response(200, sniff_image_type(&bytes), bytes),
-                None => cover_response(404, "application/octet-stream", Vec::new()),
-            }
+            std::thread::spawn(move || {
+                responder.respond(match id.strip_prefix(SERVER_COVER_PREFIX) {
+                    Some(server_id) => server_cover(&app, server_id),
+                    None => library_cover(&app, &id),
+                });
+            });
         })
         .setup(|app| {
             if cfg!(debug_assertions) {
@@ -729,6 +810,10 @@ pub fn run() {
             app.manage(data_dir.clone());
             let server = SharedServer::default();
             app.manage(Arc::clone(&server));
+            // Cover art fetched from the server, kept for the session (M3). Its
+            // own state rather than part of the connection, so a fetch never
+            // holds the lock the browse commands need.
+            app.manage(servers::SharedCovers::default());
             // Reconnecting at startup happens off the main thread: it is a
             // network round trip, and a server that is not there takes the
             // request timeout to say so -- which on this thread would be the

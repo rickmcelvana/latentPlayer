@@ -600,6 +600,107 @@ pub fn subsonic_stream_url(
     .map_err(|e| JsValue::from_str(&e.to_string()))
 }
 
+/// Builds the URL for one browse request (Phase 2 M3).
+///
+/// `request_json` is a `BrowseRequest` -- `{"kind":"albums","sort":...}` -- so
+/// which endpoint that is and what parameters it must carry are decided in Rust,
+/// by the same code the desktop shell calls. The browser chooses *what to ask
+/// for*, never how to ask.
+#[wasm_bindgen(js_name = subsonicBrowseUrl)]
+pub fn subsonic_browse_url(
+    base_url: &str,
+    user: &str,
+    secret: &str,
+    is_api_key: bool,
+    salt: &str,
+    request_json: &str,
+) -> Result<String, JsValue> {
+    let request = browse_request(request_json)?;
+    let owned = request.params();
+    let params: Vec<(&str, &str)> = owned
+        .iter()
+        .map(|(k, v)| (k.as_str(), v.as_str()))
+        .collect();
+    player_core::subsonic::request_url(
+        &subsonic_server(base_url)?,
+        &subsonic_credentials(user, secret, is_api_key),
+        request.endpoint(),
+        &params,
+        salt,
+    )
+    .map_err(|e| JsValue::from_str(&e.to_string()))
+}
+
+/// Reads the answer to one browse request.
+///
+/// The five endpoints hide their lists in five different places, and that is
+/// known once, in `player_core::subsonic::browse` -- so this returns the same
+/// rows the desktop shell's `server_browse` command does, out of the same code:
+///
+/// ```json
+/// {"ok":true,"artists":[...],"albums":[...],"tracks":[...]}
+/// {"ok":false,"error":{"kind":"server","code":"BadCredentials",...}}
+/// ```
+#[wasm_bindgen(js_name = subsonicBrowseResult)]
+pub fn subsonic_browse_result(request_json: &str, bytes: &[u8]) -> String {
+    let request = match browse_request(request_json) {
+        Ok(request) => request,
+        Err(_) => {
+            return serde_json::json!({
+                "ok": false,
+                "error": {
+                    "kind": "malformed",
+                    "code": serde_json::Value::Null,
+                    "message": "the browse request could not be read",
+                    "credentials": false,
+                },
+            })
+            .to_string()
+        }
+    };
+    match player_core::subsonic::parse_browse(&request, bytes) {
+        Ok(parsed) => {
+            let mut value = serde_json::to_value(&parsed.payload)
+                .unwrap_or_else(|_| serde_json::json!({"artists":[],"albums":[],"tracks":[]}));
+            if let Some(object) = value.as_object_mut() {
+                object.insert("ok".into(), serde_json::Value::Bool(true));
+            }
+            value.to_string()
+        }
+        Err(error) => subsonic_failure_json(&error).to_string(),
+    }
+}
+
+/// The URL for one piece of cover art, at the size both shells ask for.
+#[wasm_bindgen(js_name = subsonicCoverUrl)]
+pub fn subsonic_cover_url(
+    base_url: &str,
+    user: &str,
+    secret: &str,
+    is_api_key: bool,
+    salt: &str,
+    id: &str,
+) -> Result<String, JsValue> {
+    let owned = player_core::subsonic::cover_art_params(id, player_core::subsonic::COVER_SIZE_PX);
+    let params: Vec<(&str, &str)> = owned
+        .iter()
+        .map(|(k, v)| (k.as_str(), v.as_str()))
+        .collect();
+    player_core::subsonic::request_url(
+        &subsonic_server(base_url)?,
+        &subsonic_credentials(user, secret, is_api_key),
+        "getCoverArt",
+        &params,
+        salt,
+    )
+    .map_err(|e| JsValue::from_str(&e.to_string()))
+}
+
+fn browse_request(request_json: &str) -> Result<player_core::subsonic::BrowseRequest, JsValue> {
+    serde_json::from_str(request_json)
+        .map_err(|e| JsValue::from_str(&format!("bad browse request: {e}")))
+}
+
 fn subsonic_server(base_url: &str) -> Result<player_core::subsonic::Server, JsValue> {
     player_core::subsonic::Server::new(base_url).map_err(|e| JsValue::from_str(&e.to_string()))
 }

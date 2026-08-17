@@ -802,3 +802,103 @@ input[type="range"] {
     text-decoration: underline;
   }
 }
+
+/* Which music is being looked at (M3), and where in the server's library the
+   browser is. Styled as tabs rather than as a dropdown because there are two
+   sources and both should be one click away. */
+.library-sources,
+.browser-tabs {
+  display: flex;
+  align-items: center;
+  gap: 4px;
+}
+
+.tab {
+  font-size: 12px;
+  padding: 4px 10px;
+  border-radius: 6px;
+  border: 1px solid transparent;
+  background: none;
+  color: var(--text);
+  cursor: pointer;
+
+  &:hover {
+    color: var(--text-h);
+  }
+}
+
+.tab.current {
+  border-color: var(--border);
+  background: var(--code-bg);
+  color: var(--accent);
+}
+
+.server-browser {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+
+  .browser-head {
+    display: flex;
+    align-items: center;
+    gap: 8px;
+    flex-wrap: wrap;
+  }
+
+  select {
+    font: inherit;
+    font-size: 12px;
+    padding: 3px 6px;
+    border-radius: 6px;
+    border: 1px solid var(--border);
+    background: var(--bg);
+    color: var(--text-h);
+  }
+
+  /* Where you are, and the way back out of it. */
+  .browser-crumb {
+    display: flex;
+    align-items: baseline;
+    flex-wrap: wrap;
+    gap: 8px;
+    margin: 0;
+    font-size: 13px;
+  }
+
+  .crumb-name {
+    color: var(--text-h);
+    font-weight: 600;
+  }
+
+  .crumb-meta {
+    font-size: 12px;
+    opacity: 0.6;
+  }
+
+  /* Section headings, which only a search produces -- a browse view shows one
+     kind of thing at a time and does not need to say which. */
+  .browser-section {
+    margin: 2px 0 0;
+    font-size: 11px;
+    text-transform: uppercase;
+    letter-spacing: 0.04em;
+    opacity: 0.6;
+  }
+
+  .browser-more {
+    align-self: center;
+    font-size: 12px;
+    padding: 5px 14px;
+  }
+
+  button.link {
+    background: none;
+    border: none;
+    padding: 0;
+    color: var(--accent);
+    font: inherit;
+    font-size: 12px;
+    cursor: pointer;
+    text-decoration: underline;
+  }
+}

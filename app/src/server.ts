@@ -20,21 +20,27 @@ import {
   connectServer as connectNative,
   forgetServer as forgetNative,
   reconnectServer as reconnectNative,
+  serverBrowse as browseNative,
+  serverCoverUrl as coverNative,
   serverRandomTracks as randomNative,
   serverState as stateNative,
   type ServerState,
-  type ServerTrack,
 } from "./nativePlayer";
 import {
+  browse as browseWeb,
   connectServer as connectWeb,
   emptyServerState,
   forgetServer as forgetWeb,
   randomTracks as randomWeb,
   reconnectServer as reconnectWeb,
+  serverCoverUrl as coverWeb,
   serverState as stateWeb,
 } from "./subsonicWeb";
+import type { BrowseRequest, BrowseResult, ServerTrack } from "./serverTypes";
 
-export type { ServerState, ServerTrack };
+export type { ServerState };
+export type { AlbumRow, AlbumSort, ArtistRow, BrowseRequest, BrowseResult, ServerTrack } from "./serverTypes";
+export { emptyBrowseResult } from "./serverTypes";
 export { emptyServerState };
 
 /// How the secret is being kept, so the panel can say it plainly where the user
@@ -75,4 +81,25 @@ export async function forgetServer(): Promise<ServerState> {
 /// person can press rather than something only a harness exercises.
 export async function serverRandomTracks(count: number): Promise<ServerTrack[]> {
   return isTauri() ? randomNative(count) : randomWeb(count);
+}
+
+/// Browsing the server's library (Phase 2 M3): artists, one artist's albums, a
+/// page of albums, one album's tracks, or a search.
+///
+/// The whole adapter is these two lines, which is the point: what a request is
+/// and what its answer means live in Rust, so this only picks the shell.
+export async function serverBrowse(request: BrowseRequest): Promise<BrowseResult> {
+  return isTauri() ? browseNative(request) : browseWeb(request);
+}
+
+/// A URL for one piece of the server's cover art, or null when there is none to
+/// be had.
+///
+/// Asynchronous on both shells even though the desktop one answers immediately:
+/// the web shell has to fetch the bytes before it has a URL at all (COEP blocks
+/// a plain cross-origin `<img src>`), and a component should not have to know
+/// which shell it is drawing in -- the same shape `coverUrl` takes in library.ts.
+export async function serverCoverUrl(coverArt: string | null): Promise<string | null> {
+  if (!coverArt) return null;
+  return isTauri() ? coverNative(coverArt) : coverWeb(coverArt);
 }

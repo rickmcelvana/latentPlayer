@@ -9,8 +9,9 @@
 // picks files; it never touches audio data itself. Compare playerEngine.ts,
 // which is the equivalent adapter for the web build, where all of that runs
 // in the browser instead (§5's "Web audio I/O" note).
-import { invoke } from "@tauri-apps/api/core";
+import { convertFileSrc, invoke } from "@tauri-apps/api/core";
 import { open } from "@tauri-apps/plugin-dialog";
+import type { BrowseRequest, BrowseResult, ServerTrack } from "./serverTypes";
 
 const AUDIO_FILTERS = [
   { name: "Audio", extensions: ["mp3", "flac", "wav", "aac", "m4a", "ogg"] },
@@ -239,21 +240,30 @@ export async function forgetServer(): Promise<ServerState> {
   return invoke<ServerState>("forget_server");
 }
 
-/// One track on the server (Phase 2 M2). Mirrors `ServerTrack` in
-/// src-tauri/src/servers.rs, and subsonicWeb.ts's copy on the web side.
-export interface ServerTrack {
-  id: string;
-  title: string;
-  artist: string;
-  album: string;
-  suffix: string;
-  durationSeconds: number;
-}
-
-/// A handful of tracks at random, so there is something to play before browsing
-/// exists (M3).
+/// A handful of tracks at random -- still the shortest path from a connected
+/// server to sound, and what `remote_smoke` plays.
 export async function serverRandomTracks(count: number): Promise<ServerTrack[]> {
   return invoke<ServerTrack[]>("server_random_tracks", { count });
+}
+
+/// One browse request against the server's library (Phase 2 M3).
+///
+/// One command for all five, because which endpoint a request is and what its
+/// answer means are `player_core::subsonic::browse`'s business -- the same
+/// module the web shell calls through wasm.
+export async function serverBrowse(request: BrowseRequest): Promise<BrowseResult> {
+  return invoke<BrowseResult>("server_browse", { request });
+}
+
+/// A URL for one piece of the server's cover art.
+///
+/// Synchronous, and an ordinary URL an `<img src>` takes: the `cover://` scheme
+/// this shell already serves the local library's art through, with a prefix that
+/// marks the id as the server's. The fetch happens inside that handler, off the
+/// main thread, so a list of rows does not hold up the UI (M7 decision 5 --
+/// art never travels through `invoke`).
+export function serverCoverUrl(coverArt: string): string {
+  return convertFileSrc(`server:${coverArt}`, "cover");
 }
 
 /// Opens a server track and starts playing it. The same shape as `loadFile`,

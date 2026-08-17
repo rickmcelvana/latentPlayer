@@ -76,11 +76,7 @@ fn main() {
     let song = &songs[0];
     println!(
         "track:   {} -- {} ({}, {}s, {})",
-        song.artist,
-        song.title,
-        song.album,
-        song.duration.unwrap_or(0),
-        song.suffix
+        song.artist, song.title, song.album, song.duration_seconds, song.suffix
     );
 
     // --- open it, which is the first network read -------------------------
@@ -116,7 +112,7 @@ fn main() {
     // The server states a duration in the browse response; the container states
     // one too. They should agree, and disagreeing means the wrong track was
     // opened -- which a URL built with the wrong id would do silently.
-    let stated = song.duration.unwrap_or(0) as f64;
+    let stated = song.duration_seconds;
     let container = playback.duration_seconds();
     check(
         "the track opened is the track asked for",

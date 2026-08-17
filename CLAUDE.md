@@ -139,7 +139,26 @@ audio decoded over real TCP matching the same bytes decoded locally, worst
 difference 0.0, and a server that stalls mid-track), plus both live runs against
 the real Navidrome -- `cargo run -p player-core --example remote_smoke` and
 `/remote.html` in a browser, **user-run 2026-08-17, all checks passed on both**.
-M3 (browsing) is next.
+
+**Phase 2 M3 is built** (2026-08-17): browsing the server. `subsonic/browse.rs`
+holds the five requests *and* the five payload shapes their answers arrive in
+(`getArtists` hides artists under an alphabetical index, `getAlbum` nests songs
+inside the album, `search3` returns all three kinds), so no endpoint name or
+query parameter appears in TypeScript on either shell, and all five answer with
+one `BrowseResult` -- which is what lets one set of rows draw a search and a
+browse. Cover art goes over the existing `cover://` scheme natively, with a
+`server:` prefix and an **asynchronous** handler (a server cover is fetched, and
+the main thread may not wait on the network per row) plus a byte-bounded session
+cache; on the web it is fetched in CORS mode and wrapped in a blob URL, because
+this app's own `Cross-Origin-Embedder-Policy: require-corp` blocks a plain
+cross-origin `<img src>` before the network sees it. The library panel gained a
+source switch, and `Rows.tsx` is now every row in the app -- local or server,
+same markup, same meaning for clicking one.
+Verified so far: **7/7** `cargo test -p player-core --test subsonic_browse`,
+11 new unit tests in `browse.rs` (129 in `player-core`, up from 119), and 3/3
+offline in `/browse.html`. What remains before M3 closes is the live pair:
+`cargo run -p player-core --example browse_smoke` and `/browse.html` in a
+browser, against the real Navidrome.
 
 **Phase 2 is planned** (2026-08-17) -- see `tasks/phase-2.md` for
 the milestone plan (M1 connection, M2 remote playback, M3 browsing, M4

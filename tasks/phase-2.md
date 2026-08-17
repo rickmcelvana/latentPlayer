@@ -417,3 +417,80 @@ the same engine, the same DSP path and the same meters as a file on disk, on bot
 shells -- one over range requests as it decodes, one fetched whole first, and the
 difference visible nowhere above `playlist.ts`. M3 can browse a server whose
 tracks are already known to play.
+
+## M3 -- Browsing the server: built, awaiting a live run on both shells
+
+M2 could play anything the server offered at random. M3 is how a person finds
+something in particular.
+
+**Five endpoints, five payload shapes, one place that knows them.**
+`player-core/src/subsonic/browse.rs` holds both halves: `BrowseRequest` says
+which endpoint a request is and what parameters it carries, and `parse_browse`
+knows where each answer hides its list -- `getArtists` under an alphabetical
+index, `getAlbum` with its songs nested inside the album, `search3` returning all
+three kinds at once. Both shells call both functions, natively and through wasm,
+so no endpoint name or query parameter appears in TypeScript at all. The payload
+shapes were read off the OpenSubsonic documentation rather than remembered, and
+one of them earns its own note: `getAlbumList2` states an album's name in `name`
+and `getArtist`'s nested albums state it in `album`. A client that reads only one
+shows a list of blank rows against the other -- a bug that looks like an empty
+library -- so both are read and there is a test holding them to each other.
+
+**One shape comes back.** `BrowseResult` is artists, albums and tracks, with
+whatever the request had nothing to say about left empty. That is what lets the
+same rows draw a search result and a browse, and it is why the UI's five views
+are one component rather than five.
+
+**Cover art, and the two different things it means.** Natively it is served over
+the same `cover://` scheme M7 built for the local library, with a `server:`
+prefix on the id -- the component asks for a URL and gets one, exactly as before.
+But the handler is now **asynchronous**, and that is not tidying: a server cover
+is fetched, and answering on the main thread would mean the whole UI waiting on
+the network once per row. Fetched covers are held in a byte-bounded cache for the
+session, cleared when the server changes, because the webview asks again every
+time a row is drawn. On the web there is no `cover://`, and the obvious thing --
+pointing an `<img src>` at the server -- is blocked by this app's own
+`Cross-Origin-Embedder-Policy: require-corp` before the network sees it, since a
+plain cross-origin image load is a no-cors request. So the web shell fetches the
+art in CORS mode and wraps it in a blob URL, cached by promise for the reason
+M7's local covers are (rows render together, and a cache written after the fetch
+resolves is still empty when the third caller looks).
+
+**The library panel grew a source switch, and the rows did not change.** Local
+and server music are genuinely different underneath -- a scanned index that is
+filtered in memory, versus a server asked live (decision 6) -- so the server's
+half is its own component. What they share is what the listener sees, which is
+now literally one implementation: `Rows.tsx` draws every row in the app, and
+clicking one means the same thing on either side (play the list you can see, from
+where you clicked). Searching the server is debounced, because unlike the local
+search it is a request to someone's machine rather than a filter over an array.
+
+### Verified
+
+- **`cargo test -p player-core --test subsonic_browse`: 7/7** against the fake
+  server -- what went on the wire for a page of albums (endpoint, `type`, `size`,
+  `offset`, a token and no password), an album's tracks coming back with the
+  suffix playback needs, a search sending all three counts with an ampersand in
+  the query correctly escaped, a failure envelope inside an HTTP 200 that must
+  not read as an empty library, and the three ways cover art can answer: an
+  image, a Subsonic error, and a proxy's login page.
+- **11 new unit tests in `browse.rs`**, holding the five payload shapes to known
+  answers -- including the `name`/`album` case above and a server with no artists
+  at all, which answers `{"artists":{}}` rather than with an empty index.
+  `player-core` unit tests: **129**, up from 119.
+- **`/browse.html`, offline half: 3/3** in a real browser -- a browse URL naming
+  its endpoint and parameters with no password in it, artists read out of the
+  index, an album carrying its tracks.
+- The full suite stayed green: 129 `player-core` unit tests, 10 `remote_source`,
+  11 `subsonic_http`, 7 `subsonic_browse`, 4 in `src-tauri`, 16 in
+  `player-render`, clippy and fmt clean, `tsc` and oxlint clean.
+
+### What remains before M3 closes
+
+The live runs, on both shells, against the real Navidrome:
+`cargo run -p player-core --example browse_smoke` and `/browse.html`. Between
+them they check the same claims -- artists, a page of albums and the page after
+it being different music, an album's tracks, a search that finds something and a
+search that finds nothing, and that a browsed track is one this app can actually
+play -- plus, on the web only, that cover art fetched from another origin really
+decodes under this app's COEP header.

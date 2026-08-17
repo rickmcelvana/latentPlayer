@@ -33,9 +33,13 @@ interface Props {
   /// the library panel gets, because "play this" means the same thing wherever
   /// the rows came from.
   onPlay: (tracks: PlaylistTrack[], index: number) => void;
+  /// Told whenever the connection's state changes, so the app can offer the
+  /// library panel's server tab the moment there is a server to browse rather
+  /// than at the next reload (M3).
+  onState: (state: ServerState) => void;
 }
 
-export function ServerPanel({ onPlay }: Props) {
+export function ServerPanel({ onPlay, onState }: Props) {
   const [state, setState] = useState<ServerState>(emptyServerState());
   const [baseUrl, setBaseUrl] = useState("");
   const [user, setUser] = useState("");
@@ -51,12 +55,17 @@ export function ServerPanel({ onPlay }: Props) {
   // Read once at mount. Not polled, unlike the scope's geometry: nothing else
   // changes this, and polling it would mean a network round trip per second on
   // the web build.
+  //
+  // The desktop shell reconnects a stored server at startup, off the main
+  // thread, so this can land before that finishes -- which is why the panel's
+  // Check button exists and why `onState` is called from `run` too.
   useEffect(() => {
     let cancelled = false;
     serverState()
       .then((next) => {
         if (cancelled) return;
         setState(next);
+        onState(next);
         setBaseUrl(next.baseUrl);
         setUser(next.user);
         setShowForm(!next.configured);
@@ -67,6 +76,9 @@ export function ServerPanel({ onPlay }: Props) {
     return () => {
       cancelled = true;
     };
+    // Mount only: `onState` is a callback the app holds steady, and re-running
+    // this on every render would be a request per render.
+    // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
 
   const apiKeyMode = state.supportsApiKey && state.auth === "apiKey";
@@ -99,6 +111,7 @@ export function ServerPanel({ onPlay }: Props) {
     try {
       const next = await work();
       setState(next);
+      onState(next);
       setBaseUrl(next.baseUrl || baseUrl);
       setUser(next.user || user);
       if (next.connected) {

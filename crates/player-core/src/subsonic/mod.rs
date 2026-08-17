@@ -38,6 +38,15 @@
 #[cfg(not(target_arch = "wasm32"))]
 pub mod http;
 
+/// Browsing the server's library (Phase 2 M3): the five requests, and the five
+/// payload shapes their answers arrive in. Cross-target, like this module.
+pub mod browse;
+
+pub use browse::{
+    cover_art_params, parse_browse, AlbumRow, AlbumSort, ArtistRow, BrowseRequest, BrowseResult,
+    TrackRow, COVER_SIZE_PX,
+};
+
 use serde::de::DeserializeOwned;
 use serde::Deserialize;
 
@@ -307,6 +316,13 @@ pub struct Song {
     /// going to be expensive before asking for it.
     #[serde(default)]
     pub size: Option<u64>,
+    /// The id to fetch this track's art with (M3). An id, not an image and not
+    /// a URL -- art is fetched separately on both shells, never carried as JSON.
+    #[serde(rename = "coverArt", default)]
+    pub cover_art: Option<String>,
+    /// Track number within its album, for ordering an album view.
+    #[serde(default)]
+    pub track: Option<u32>,
 }
 
 /// `getRandomSongs`.

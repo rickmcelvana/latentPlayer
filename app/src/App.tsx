@@ -20,6 +20,7 @@ import { LibraryPanel } from "./LibraryPanel";
 import { Loudness } from "./Loudness";
 import { ScopeControls } from "./ScopeControls";
 import { ServerPanel } from "./ServerPanel";
+import type { ServerState } from "./server";
 import { Spectrum } from "./Spectrum";
 import { DEFAULT_SCOPE_SIZE, attachWebCanvas } from "./scope";
 import { startScope } from "./webScope";
@@ -60,6 +61,7 @@ function App() {
   // than the poll -- otherwise every poll yanks the thumb back to the real
   // play position mid-drag.
   const [scrubbing, setScrubbing] = useState<number | null>(null);
+  const [serverConnected, setServerConnected] = useState(false);
   const canvasRef = useRef<HTMLCanvasElement>(null);
   const scopeStarted = useRef(false);
   // The playlist index that was last handed to `loadTrack`. The engine's
@@ -167,6 +169,13 @@ function App() {
     },
     [play],
   );
+
+  /// Whether the library panel should offer its server tab (M3). The server
+  /// panel owns the connection and tells the app when it changes, which is one
+  /// piece of state rather than two components polling the same question.
+  const handleServerState = useCallback((state: ServerState) => {
+    setServerConnected(state.connected);
+  }, []);
 
   /// Appends to the queue without disturbing what is playing. The queue effect
   /// picks the new tail up if it is what comes next.
@@ -349,13 +358,18 @@ function App() {
 
         {error && <p className="error">{error}</p>}
 
-        <LibraryPanel onPlay={playTracks} onQueue={queueFromLibrary} queue={tracks} />
+        <LibraryPanel
+          onPlay={playTracks}
+          onQueue={queueFromLibrary}
+          queue={tracks}
+          serverConnected={serverConnected}
+        />
 
         {/* Phase 2 M1 connects to a server and M2 plays from it; browsing what
             is on it is M3, so this sits below the local library rather than
             beside it for now. Server tracks land in the same queue as local
             ones -- the playlist is one list, whatever a row plays. */}
-        <ServerPanel onPlay={playTracks} />
+        <ServerPanel onPlay={playTracks} onState={handleServerState} />
 
         <ScopeControls />
 

@@ -1,12 +1,21 @@
-// The library view (M7): folders, rows, search and saved playlists.
+// The library view (M7): folders, rows, search and saved playlists -- and,
+// since Phase 2 M3, a switch between the music on this machine and the music on
+// the server.
 //
 // Draws what library.ts hands it and computes nothing of its own -- the same
 // rule Spectrum.tsx, Loudness.tsx and Goniometer.tsx follow. Which shell it is
 // running in never appears here; that is the adapter's business.
+//
+// The two sources are genuinely different underneath (a scanned index here, a
+// live server there, and browsing one is nothing like filtering the other), so
+// the server's half is its own component. What they share is what the listener
+// sees: the same rows, the same search box in the same place, and the same
+// meaning for clicking one -- which is why Rows.tsx exists.
 import { useCallback, useEffect, useMemo, useState } from "react";
+import { Row } from "./Rows";
+import { ServerBrowser } from "./ServerBrowser";
 import {
   addFolder,
-  coverUrl,
   deletePlaylist,
   displayName,
   folders as readFolders,
@@ -32,48 +41,20 @@ interface LibraryPanelProps {
   onQueue: (tracks: PlaylistTrack[]) => void;
   /// The current queue, so a playlist can be saved out of it.
   queue: PlaylistTrack[];
+  /// Whether there is a server to browse. The panel offers the switch only when
+  /// there is one, rather than showing a tab that can only produce an error.
+  serverConnected: boolean;
 }
 
-/// mm:ss, or an em dash when the container never said how long the track is --
-/// which is a real case (a VBR MP3 with no Xing header) and one the UI should
-/// not render as "0:00", since that is a different claim.
-function formatDuration(seconds: number | null): string {
-  if (seconds === null || !Number.isFinite(seconds) || seconds <= 0) return "—";
-  const total = Math.round(seconds);
-  return `${Math.floor(total / 60)}:${(total % 60).toString().padStart(2, "0")}`;
-}
-
-/// One row's cover thumbnail. Resolves its own URL, because a URL is
-/// asynchronous on the web (a blob out of IndexedDB) and synchronous natively
-/// (a `cover://` address), and a component should not have to know which.
-function Cover({ coverId }: { coverId: string | null }) {
-  const [url, setUrl] = useState<string | null>(null);
-
-  useEffect(() => {
-    let live = true;
-    setUrl(null);
-    coverUrl(coverId)
-      .then((next) => {
-        if (live) setUrl(next);
-      })
-      .catch(() => {
-        // A missing cover is a blank square, not an error message: the row is
-        // still perfectly playable.
-        if (live) setUrl(null);
-      });
-    return () => {
-      live = false;
-    };
-  }, [coverId]);
-
-  return url ? (
-    <img className="cover" src={url} alt="" loading="lazy" />
-  ) : (
-    <span className="cover cover-empty" aria-hidden="true" />
-  );
-}
-
-export function LibraryPanel({ onPlay, onQueue, queue }: LibraryPanelProps) {
+export function LibraryPanel({
+  onPlay,
+  onQueue,
+  queue,
+  serverConnected,
+}: LibraryPanelProps) {
+  /// Which music is being looked at. Not persisted: it costs one click to
+  /// change and the honest default is the music that is definitely there.
+  const [source, setSource] = useState<"library" | "server">("library");
   const [rows, setRows] = useState<LibraryTrack[]>([]);
   const [folders, setFolders] = useState<LibraryFolder[]>([]);
   const [playlists, setPlaylists] = useState<LibraryPlaylist[]>([]);
@@ -134,7 +115,9 @@ export function LibraryPanel({ onPlay, onQueue, queue }: LibraryPanelProps) {
     setScanning(true);
     setStatus("Scanning…");
     try {
-      const summary = await addFolder((done, total) => setStatus(`Read ${done} of ${total}…`));
+      const summary = await addFolder((done, total) =>
+        setStatus(`Read ${done} of ${total}…`),
+      );
       if (!summary) {
         setStatus(null);
         return;
@@ -163,7 +146,9 @@ export function LibraryPanel({ onPlay, onQueue, queue }: LibraryPanelProps) {
         // The row that was actually clicked is the one failure worth
         // reporting: the listener asked for *that* track, so silently starting
         // a different one would be worse than saying so.
-        setError(`"${displayName(visible[index] ?? visible[0]!)}" could not be opened`);
+        setError(
+          `"${displayName(visible[index] ?? visible[0]!)}" could not be opened`,
+        );
         return;
       }
       // The clicked row's position in the surviving list, which is not its
@@ -171,7 +156,11 @@ export function LibraryPanel({ onPlay, onQueue, queue }: LibraryPanelProps) {
       const start = survived.slice(0, index).filter(Boolean).length;
       onPlay(tracks, start);
       const lost = survived.filter((ok) => !ok).length;
-      setStatus(lost > 0 ? `${lost} track(s) could not be opened and were skipped` : null);
+      setStatus(
+        lost > 0
+          ? `${lost} track(s) could not be opened and were skipped`
+          : null,
+      );
     } catch (e) {
       setError(String(e));
     }
@@ -213,7 +202,9 @@ export function LibraryPanel({ onPlay, onQueue, queue }: LibraryPanelProps) {
       .map((track) => track.libraryId)
       .filter((id): id is string => id !== null);
     if (trackIds.length === 0) {
-      setError("Nothing in the queue came from the library, so there is nothing to save");
+      setError(
+        "Nothing in the queue came from the library, so there is nothing to save",
+      );
       return;
     }
     setError(null);
@@ -243,7 +234,9 @@ export function LibraryPanel({ onPlay, onQueue, queue }: LibraryPanelProps) {
         .map((id) => byId.get(id))
         .filter((row): row is LibraryTrack => row !== undefined);
       if (found.length === 0) {
-        setError(`None of "${playlist.name}"'s tracks are in the library any more`);
+        setError(
+          `None of "${playlist.name}"'s tracks are in the library any more`,
+        );
         return;
       }
       const { tracks } = await resolve(found);
@@ -253,7 +246,9 @@ export function LibraryPanel({ onPlay, onQueue, queue }: LibraryPanelProps) {
       }
       onPlay(tracks, 0);
       const missing = playlist.trackIds.length - tracks.length;
-      setStatus(missing > 0 ? `Loaded "${playlist.name}" (${missing} missing)` : null);
+      setStatus(
+        missing > 0 ? `Loaded "${playlist.name}" (${missing} missing)` : null,
+      );
     } catch (e) {
       setError(String(e));
     }
@@ -273,124 +268,166 @@ export function LibraryPanel({ onPlay, onQueue, queue }: LibraryPanelProps) {
     <section className="library">
       <header className="library-head">
         <h2>Library</h2>
-        <button type="button" onClick={() => void handleAddFolder()} disabled={scanning}>
-          {scanning ? "Scanning…" : "Add folder…"}
-        </button>
-        <input
-          className="library-search"
-          type="search"
-          placeholder="Search title, artist, album…"
-          value={query}
-          onChange={(e) => setQuery(e.target.value)}
-          aria-label="Search the library"
-        />
-        <span className="library-count">
-          {query ? `${visible.length} of ${rows.length}` : `${rows.length} tracks`}
-        </span>
+        {serverConnected && (
+          <div className="library-sources">
+            <button
+              type="button"
+              className={source === "library" ? "tab current" : "tab"}
+              onClick={() => setSource("library")}
+            >
+              This machine
+            </button>
+            <button
+              type="button"
+              className={source === "server" ? "tab current" : "tab"}
+              onClick={() => setSource("server")}
+            >
+              Server
+            </button>
+          </div>
+        )}
+        {source === "library" && (
+          <>
+            <button
+              type="button"
+              onClick={() => void handleAddFolder()}
+              disabled={scanning}
+            >
+              {scanning ? "Scanning…" : "Add folder…"}
+            </button>
+            <input
+              className="library-search"
+              type="search"
+              placeholder="Search title, artist, album…"
+              value={query}
+              onChange={(e) => setQuery(e.target.value)}
+              aria-label="Search the library"
+            />
+            <span className="library-count">
+              {query
+                ? `${visible.length} of ${rows.length}`
+                : `${rows.length} tracks`}
+            </span>
+          </>
+        )}
       </header>
 
-      {folders.length > 0 && (
-        <ul className="folders">
-          {folders.map((folder) => (
-            <li key={folder.id} className={folder.available ? undefined : "unavailable"}>
-              <span className="folder-name" title={folder.id}>
-                {folder.name}
-              </span>
-              {!folder.available && (
-                <span className="folder-note">needs adding again to play</span>
-              )}
-              <button
-                type="button"
-                className="remove"
-                aria-label={`Remove ${folder.name}`}
-                onClick={() => void handleForget(folder)}
-              >
-                &times;
-              </button>
-            </li>
-          ))}
-        </ul>
+      {/* The server's own view. Its rows are the same rows, and clicking one
+          means the same thing -- what differs is that this list is asked for
+          rather than held (decision 6). */}
+      {source === "server" && (
+        <ServerBrowser onPlay={onPlay} onQueue={onQueue} />
       )}
-
-      {status && <p className="library-status">{status}</p>}
-      {error && <p className="error">{error}</p>}
-
-      {rows.length === 0 && !scanning && (
-        <p className="hint">
-          Add a folder of music and its tags, album art and lengths get read into the library.
-        </p>
-      )}
-
-      {visible.length > 0 && (
-        <ol className="library-rows">
-          {visible.map((row, index) => (
-            <li key={row.id}>
-              <button type="button" className="row" onClick={() => void handlePlay(index)}>
-                <Cover coverId={row.coverId} />
-                <span className="row-main">
-                  <span className="name">{displayName(row)}</span>
-                  <span className="meta">
-                    {[row.artist, row.album].filter(Boolean).join(" — ") || row.fileName}
+      {source === "library" && (
+        <>
+          {folders.length > 0 && (
+            <ul className="folders">
+              {folders.map((folder) => (
+                <li
+                  key={folder.id}
+                  className={folder.available ? undefined : "unavailable"}
+                >
+                  <span className="folder-name" title={folder.id}>
+                    {folder.name}
                   </span>
-                </span>
-                <span className="time">{formatDuration(row.durationSeconds)}</span>
-              </button>
+                  {!folder.available && (
+                    <span className="folder-note">
+                      needs adding again to play
+                    </span>
+                  )}
+                  <button
+                    type="button"
+                    className="remove"
+                    aria-label={`Remove ${folder.name}`}
+                    onClick={() => void handleForget(folder)}
+                  >
+                    &times;
+                  </button>
+                </li>
+              ))}
+            </ul>
+          )}
+
+          {status && <p className="library-status">{status}</p>}
+          {error && <p className="error">{error}</p>}
+
+          {rows.length === 0 && !scanning && (
+            <p className="hint">
+              Add a folder of music and its tags, album art and lengths get read
+              into the library.
+            </p>
+          )}
+
+          {visible.length > 0 && (
+            <ol className="library-rows">
+              {visible.map((row, index) => (
+                <Row
+                  key={row.id}
+                  coverSource="library"
+                  coverId={row.coverId}
+                  name={displayName(row)}
+                  meta={
+                    [row.artist, row.album].filter(Boolean).join(" — ") ||
+                    row.fileName
+                  }
+                  durationSeconds={row.durationSeconds}
+                  onOpen={() => void handlePlay(index)}
+                  onQueue={() => void handleQueue(row)}
+                />
+              ))}
+            </ol>
+          )}
+
+          {/* Saved playlists are this machine's, stored as local library ids
+              (M7). The server's own playlists are M4, and putting them here
+              would be the place to do it. */}
+          <div className="playlists">
+            <div className="playlist-save">
+              <input
+                type="text"
+                placeholder="Save queue as…"
+                value={playlistName}
+                onChange={(e) => setPlaylistName(e.target.value)}
+                aria-label="Playlist name"
+              />
               <button
                 type="button"
-                className="queue"
-                aria-label={`Queue ${displayName(row)}`}
-                onClick={() => void handleQueue(row)}
+                onClick={() => void handleSavePlaylist()}
+                disabled={!playlistName.trim() || queue.length === 0}
               >
-                +
+                Save
               </button>
-            </li>
-          ))}
-        </ol>
+            </div>
+
+            {playlists.length > 0 && (
+              <ul className="saved-playlists">
+                {playlists.map((playlist) => (
+                  <li key={playlist.id}>
+                    <button
+                      type="button"
+                      className="row"
+                      onClick={() => void handleLoadPlaylist(playlist)}
+                    >
+                      <span className="name">{playlist.name}</span>
+                      <span className="meta">
+                        {playlist.trackIds.length} tracks
+                      </span>
+                    </button>
+                    <button
+                      type="button"
+                      className="remove"
+                      aria-label={`Delete ${playlist.name}`}
+                      onClick={() => void handleDeletePlaylist(playlist)}
+                    >
+                      &times;
+                    </button>
+                  </li>
+                ))}
+              </ul>
+            )}
+          </div>
+        </>
       )}
-
-      <div className="playlists">
-        <div className="playlist-save">
-          <input
-            type="text"
-            placeholder="Save queue as…"
-            value={playlistName}
-            onChange={(e) => setPlaylistName(e.target.value)}
-            aria-label="Playlist name"
-          />
-          <button
-            type="button"
-            onClick={() => void handleSavePlaylist()}
-            disabled={!playlistName.trim() || queue.length === 0}
-          >
-            Save
-          </button>
-        </div>
-
-        {playlists.length > 0 && (
-          <ul className="saved-playlists">
-            {playlists.map((playlist) => (
-              <li key={playlist.id}>
-                <button
-                  type="button"
-                  className="row"
-                  onClick={() => void handleLoadPlaylist(playlist)}
-                >
-                  <span className="name">{playlist.name}</span>
-                  <span className="meta">{playlist.trackIds.length} tracks</span>
-                </button>
-                <button
-                  type="button"
-                  className="remove"
-                  aria-label={`Delete ${playlist.name}`}
-                  onClick={() => void handleDeletePlaylist(playlist)}
-                >
-                  &times;
-                </button>
-              </li>
-            ))}
-          </ul>
-        )}
-      </div>
     </section>
   );
 }

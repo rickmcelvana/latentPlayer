@@ -94,6 +94,15 @@ crates/
                      calling this same code through two wasm bindings. Salts come
                      from whichever shell is asking, since a browser and an OS
                      have different RNGs and only one of them needs a build flag.
+                     subsonic/browse.rs (M3) is the other half of the protocol:
+                     five requests and the five payload shapes their answers
+                     arrive in. Both halves are here rather than in the shells
+                     because both are things a client gets subtly wrong and then
+                     shows an empty list for -- a parameter under the wrong name,
+                     a list nested somewhere it isn't. One `BrowseResult` comes
+                     back from all five, which is what lets one set of rows draw
+                     a search and a browse. Cover art is asked for at a size,
+                     once, for both shells.
                      remote.rs (Phase 2 M2) is a PlaybackSource over HTTP, and
                      is the whole of what remote playback adds to the engine:
                      one 512KB chunk held at a time, seeks that move a cursor
@@ -182,6 +191,15 @@ src-tauri/           Tauri 2 desktop shell. Two windows: the React webview
                      cross-origin` -- the COEP header below is `require-corp`
                      for the SharedArrayBuffer's sake, and a subresource
                      without CORP is blocked under it.
+                     Since Phase 2 M3 that scheme serves the *server's* art too,
+                     marked by a `server:` prefix on the id, and is registered
+                     asynchronously: a server cover is fetched, and answering on
+                     the main thread would be the whole UI waiting on the network
+                     once per row. Fetched covers are held in a byte-bounded
+                     session cache (servers.rs), cleared when the server changes,
+                     because the webview asks again every time a row is drawn.
+                     Browsing is one command for all five requests, since which
+                     endpoint a request is belongs to player-core.
 
 app/                 React + TS + Vite. Same component tree renders in the
                      Tauri webview and (eventually) the plain web build --
@@ -230,6 +248,11 @@ app/                 React + TS + Vite. Same component tree renders in the
                      credentials go in IndexedDB in plaintext, because a browser
                      has no credential store -- which the panel says, next to the
                      field the secret is typed into.
+                     Its M3 half browses (`browse`) and fetches cover art into
+                     blob URLs -- which is not a preference: a plain
+                     cross-origin `<img src>` is a no-cors load and this app's
+                     own COEP header blocks it before the network sees it, so
+                     art has to be fetched in CORS mode and wrapped.
                      Its M2 half fetches a server track's bytes *whole* before
                      playing them: a browser has no MediaSource for the worker
                      to pull through, so there is no web counterpart to
@@ -238,6 +261,19 @@ app/                 React + TS + Vite. Same component tree renders in the
                      shell already does for a picked local file -- and leaves
                      everything after it identical, including instant seeking
                      and a stall that cannot underrun the ring.
+                     ServerBrowser.tsx is the server's half of the library panel
+                     (M3): albums, artists, one artist, one album, and a search
+                     box that replaces whichever of those you are in. It holds no
+                     index -- decision 6, the server is asked live -- so the
+                     search is debounced, which the local one need not be.
+                     Rows.tsx is every row in the app, local or server: the two
+                     sources differ in where a row comes from and not at all in
+                     what it looks like or what clicking it means.
+                     serverTypes.ts is the one place the browse shapes are
+                     written in TypeScript, imported by both adapters rather than
+                     mirrored into each -- five types is where that convention
+                     stops paying. They are a transcription of browse.rs, which
+                     is what fills them on both shells.
                      playlist.ts, analysis.ts, scope.ts, library.ts, eq.ts and
                      server.ts are the six adapter modules components call:
                      playlist.ts picks the shell for playback, analysis.ts for
@@ -273,16 +309,20 @@ app/                 React + TS + Vite. Same component tree renders in the
                      which is two lines of arithmetic and still lives in Rust
                      so the two shells cannot draw different figures.
                      gapless.html, spectrum.html, loudness.html, scope.html,
-                     library.html, eq.html, subsonic.html and remote.html
+                     library.html, eq.html, subsonic.html, remote.html and
+                     browse.html
                      (with their *Smoke.ts) are dev-only harnesses -- served at
                      those paths, never bundled -- running the same checks as
                      the native gapless_smoke, spectrum_smoke, loudness_smoke,
-                     scope_smoke, library_smoke, eq_smoke, subsonic_smoke and
-                     remote_smoke examples. subsonic.html additionally checks
-                     the two things only a browser can fail at, CORS and mixed
-                     content; remote.html plays a real server track through the
-                     app's own playlist path and takes its server from what the
-                     panel stored, so there is nowhere to type a password in it.
+                     scope_smoke, library_smoke, eq_smoke, subsonic_smoke,
+                     remote_smoke and browse_smoke examples. subsonic.html
+                     additionally checks the two things only a browser can fail
+                     at, CORS and mixed content; remote.html plays a real server
+                     track through the app's own playlist path; browse.html adds
+                     the one only a browser can make, that cover art from another
+                     origin decodes under this app's COEP header. All three take
+                     their server from what the panel stored, so there is nowhere
+                     to type a password in any of them.
                      webScope.ts drives the web build's scope canvas
                      (WasmRenderer, via rAF) -- the web-side counterpart of
                      src-tauri's native redraw thread.
