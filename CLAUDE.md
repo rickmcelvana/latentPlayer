@@ -108,10 +108,13 @@ ARCHITECTURE.md's "The scope window's lifecycle" for that decision and
 `subsonic/http.rs` with ureq, the web's is `fetch` in `subsonicWeb.ts` calling
 the same Rust through wasm), the secret goes to the OS credential store natively
 and IndexedDB on the web, and both shells have the server panel. Verified: 11/11
-fake-server tests, 7/7 in a real browser against the local Navidrome, and the
-native `subsonic_smoke`. The one claim still unproven is that a *correct*
-password is accepted -- that needs a real account, so run `/subsonic.html` (or
-`LATENTPLAYER_SUBSONIC_USER`/`_PASSWORD` + `subsonic_smoke`) to close it.
+fake-server tests, **8/8 in a real browser** against the local Navidrome (the
+eighth user-run, closing the token scheme end to end -- "a correct password
+authenticates: navidrome 0.63.2, API 1.16.1, OpenSubsonic"), the native
+`subsonic_smoke`, and a real round trip through the Windows Credential Manager.
+What is left is the desktop shell's own live authenticated run: `subsonic_smoke`
+with `LATENTPLAYER_SUBSONIC_USER`/`_PASSWORD` set, plus connecting the app's
+panel once.
 
 `cargo run -p player-core --example subsonic_smoke` checks the client against a
 real server; `cargo test -p player-core --test subsonic_http` checks it against

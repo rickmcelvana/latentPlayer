@@ -281,12 +281,22 @@ beside this.
   the real Navidrome -- a wrong password comes back as `BadCredentials` (which
   also proves the request shape was accepted: a malformed one would be error 10,
   not 40), and the server's real extension list parses.
-- **Live, web**: `/subsonic.html`, **7/7** in a real browser against the same
+- **Live, web**: `/subsonic.html`, **8/8** in a real browser against the same
   server -- including the two checks with no native counterpart, that the
   browser can reach it at all (CORS) and that no mixed-content rule applies. The
   server's CORS headers were confirmed directly before any of this was written:
   `Access-Control-Allow-Origin: *` with `Vary: Origin`, and a preflight that
   answers. Decision 5's assumption is now a measurement.
+  The eighth check is the one this session could not make for itself, since it
+  needs a real account -- **user-run 2026-08-17: "a correct password
+  authenticates: navidrome 0.63.2 (be10f89c), API 1.16.1, OpenSubsonic"**. That
+  is the token scheme proven end to end: computed here, accepted there.
+- **The OS credential store, written to and read back** on the real Windows
+  Credential Manager (`servers.rs`'s own test, using an obviously-fake secret
+  under a `.invalid` address, and deleting what it wrote). It also asserts that
+  forgetting a server leaves nothing behind, which is the whole point of that
+  button. The most likely thing to fail silently on a given machine, and the
+  failure mode is a password that seems to save and is gone by the next launch.
 - **The panel, driven in a browser** through React's own handlers: a scheme-less
   address, a wrong password, and a port with nothing on it each produce a
   message naming the thing to change -- and each leaves the form open with the
@@ -297,10 +307,13 @@ beside this.
 
 ### Not yet done
 
-The **authenticated** half needs credentials this session should not handle: run
-`/subsonic.html` with a username and password filled in, or set
-`LATENTPLAYER_SUBSONIC_USER`/`LATENTPLAYER_SUBSONIC_PASSWORD` and rerun
-`subsonic_smoke`, and connect the app's own panel once on each shell. Until then
-what is proven is that a *wrong* password is rejected and correctly classified;
-what is not is that a *right* one is accepted -- i.e. the token scheme end to
-end. It is the one claim in M1 that cannot be made without a real account.
+The **desktop shell's own live run**: `cargo run -p player-core --example
+subsonic_smoke` with `LATENTPLAYER_SUBSONIC_USER`/`_PASSWORD` set, and
+connecting the app's panel once so the stored settings are reloaded at the next
+launch. What is already covered by composition: the token is computed by the
+same Rust on both sides and matches the spec's worked example on both; the
+native transport builds the same URL and its request shape is asserted off the
+wire; a wrong password reaches error 40 rather than 10 against the real server;
+and the credential store round-trips. What is not yet observed is ureq carrying
+a *correct* token to Navidrome, and the panel doing it for real -- the live
+confirmation every milestone here ends on.

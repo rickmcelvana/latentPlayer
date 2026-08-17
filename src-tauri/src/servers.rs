@@ -430,6 +430,49 @@ mod tests {
         std::fs::remove_dir_all(&dir).ok();
     }
 
+    /// The OS credential store, actually written to and read back.
+    ///
+    /// Worth a real test rather than a mocked one: this is the integration most
+    /// likely to fail silently on a machine, and the failure mode is a password
+    /// that appears to save and is gone at the next launch. It uses an
+    /// obviously-fake secret under an address that cannot exist (`.invalid` is
+    /// reserved for exactly this), and deletes what it wrote.
+    ///
+    /// On Windows the Credential Manager is always there, so a failure is a real
+    /// failure. Elsewhere -- a headless Linux box with no secret service, say --
+    /// having no store is an environment rather than a bug, and this skips
+    /// instead of failing, the same way `subsonic_smoke` skips with no server.
+    #[test]
+    fn the_os_credential_store_round_trips() {
+        let settings = ServerSettings {
+            base_url: "http://credential-store-check.invalid".into(),
+            user: "latentplayer-test".into(),
+            auth: AuthKind::Password,
+        };
+        const FAKE: &str = "not-a-real-secret";
+
+        if let Err(e) = store_secret(&settings, FAKE) {
+            if cfg!(windows) {
+                panic!("the Windows Credential Manager should be available: {e}");
+            }
+            println!("skipping: no usable OS credential store here ({e})");
+            return;
+        }
+
+        assert_eq!(
+            read_secret(&settings).as_deref(),
+            Ok(FAKE),
+            "what went into the credential store should come back out"
+        );
+
+        forget_secret(&settings);
+        assert!(
+            read_secret(&settings).is_err(),
+            "forgetting a server must leave no secret behind -- that is the whole \
+             point of the button"
+        );
+    }
+
     /// Two accounts, or two servers, must not share one credential slot.
     #[test]
     fn credential_keys_are_scoped_to_the_server_and_the_user() {
