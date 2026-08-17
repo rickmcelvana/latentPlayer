@@ -305,15 +305,15 @@ beside this.
   so a rejected address rendered as a saved server. Both shells now answer
   `configured` from what is stored rather than from what was typed.
 
-### Not yet done
+### Closed (2026-08-17)
 
-The **desktop shell's own live run**: `cargo run -p player-core --example
-subsonic_smoke` with `LATENTPLAYER_SUBSONIC_USER`/`_PASSWORD` set, and
-connecting the app's panel once so the stored settings are reloaded at the next
-launch. What is already covered by composition: the token is computed by the
-same Rust on both sides and matches the spec's worked example on both; the
-native transport builds the same URL and its request shape is asserted off the
-wire; a wrong password reaches error 40 rather than 10 against the real server;
-and the credential store round-trips. What is not yet observed is ureq carrying
-a *correct* token to Navidrome, and the panel doing it for real -- the live
-confirmation every milestone here ends on.
+**User-confirmed on both shells.** The web harness reports 8/8 against the real
+Navidrome, the eighth check being the one no amount of testing against ourselves
+could establish -- "a correct password authenticates: navidrome 0.63.2
+(be10f89c), API 1.16.1, OpenSubsonic" -- and the desktop shell's own live
+authenticated run passed too. The token is computed by one implementation,
+accepted by a real server, and reaches it through both transports.
+
+So M1's seam is real: a connection, credentials that survive a restart in the
+place each platform keeps such things, and a client that tells a wrong password
+apart from an unreachable server. M2 calls through it.

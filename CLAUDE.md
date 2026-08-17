@@ -103,7 +103,7 @@ ARCHITECTURE.md's "The scope window's lifecycle" for that decision and
 `tasks/phase-1.md`'s closing sections for both. The rest of ARCHITECTURE.md's
 "Known gaps" are design trades and remain open.
 
-**Phase 2 M1 is built** (2026-08-17): the Subsonic protocol lives in
+**Phase 2 M1 is done** (2026-08-17): the Subsonic protocol lives in
 `player-core::subsonic` (IO-free, cross-target -- the desktop transport is
 `subsonic/http.rs` with ureq, the web's is `fetch` in `subsonicWeb.ts` calling
 the same Rust through wasm), the secret goes to the OS credential store natively
@@ -112,9 +112,9 @@ fake-server tests, **8/8 in a real browser** against the local Navidrome (the
 eighth user-run, closing the token scheme end to end -- "a correct password
 authenticates: navidrome 0.63.2, API 1.16.1, OpenSubsonic"), the native
 `subsonic_smoke`, and a real round trip through the Windows Credential Manager.
-What is left is the desktop shell's own live authenticated run: `subsonic_smoke`
-with `LATENTPLAYER_SUBSONIC_USER`/`_PASSWORD` set, plus connecting the app's
-panel once.
+**M1 is closed, user-confirmed on both shells** -- the desktop shell's live
+authenticated run passed too, so the token scheme is proven through both
+transports against a real server.
 
 `cargo run -p player-core --example subsonic_smoke` checks the client against a
 real server; `cargo test -p player-core --test subsonic_http` checks it against
