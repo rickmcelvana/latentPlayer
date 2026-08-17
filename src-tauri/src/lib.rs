@@ -255,6 +255,56 @@ fn spectrum_bands(state: tauri::State<SharedPlayback>) -> Vec<f32> {
         .unwrap_or_default()
 }
 
+/// Opens a track from the music server and starts playing it (Phase 2 M2).
+///
+/// The same shape as `load_file`, and deliberately so: what differs is only
+/// which `PlaybackSource` is built. Everything downstream -- the ring, the EQ,
+/// the tap, every meter and the scope -- is unchanged and cannot tell.
+#[tauri::command]
+async fn load_server_track(
+    id: String,
+    suffix: String,
+    state: tauri::State<'_, SharedPlayback>,
+    eq: tauri::State<'_, SharedEq>,
+    server: tauri::State<'_, SharedServer>,
+) -> Result<TransportState, String> {
+    let source = servers::track_source(&server, &id, &suffix)?;
+    let settings = *eq.lock().unwrap();
+    // On the blocking pool: `Playback::open` reaches the network now (the first
+    // range request happens before it returns, so a bad track is an error here
+    // rather than silence later), and the main thread may not wait for that.
+    let playback = tauri::async_runtime::spawn_blocking(move || {
+        let playback = Playback::open(Box::new(source)).map_err(|e| e.to_string())?;
+        playback.set_eq(settings);
+        playback.play();
+        Ok::<_, String>(playback)
+    })
+    .await
+    .map_err(|e| e.to_string())??;
+
+    let transport = TransportState::read(&playback);
+    *state.lock().unwrap() = Some(playback);
+    Ok(transport)
+}
+
+/// Queues a server track to play when the current one ends -- the gapless
+/// hand-off, over the network. The decoder opens it when it runs out of the
+/// current track, which is where the prefetch happens: by the time the seam
+/// arrives, the first chunk is already in hand.
+#[tauri::command]
+fn set_next_server_track(
+    id: String,
+    suffix: String,
+    state: tauri::State<SharedPlayback>,
+    server: tauri::State<SharedServer>,
+) -> Result<(), String> {
+    let source = servers::track_source(&server, &id, &suffix)?;
+    if let Some(playback) = state.lock().unwrap().as_ref() {
+        playback.set_next(Box::new(source));
+    }
+    Ok(())
+}
+
 /// Queues the track to play when the current one ends, replacing whatever was
 /// queued before. The engine holds one track of lookahead and no more; the
 /// playlist itself lives in the UI (see `Playback::set_next`).
@@ -605,6 +655,9 @@ pub fn run() {
             playlists,
             save_playlist,
             delete_playlist,
+            load_server_track,
+            set_next_server_track,
+            servers::server_random_tracks,
             servers::server_state,
             servers::connect_server,
             servers::reconnect_server,

@@ -281,6 +281,59 @@ impl Extensions {
     }
 }
 
+/// One track on the server, as much of it as playing one needs (Phase 2 M2).
+///
+/// Browsing proper is M3's; this is the subset every browse response carries,
+/// so the same struct will serve it. `suffix` earns its place here: Subsonic's
+/// stream URL has no extension in it, and symphonia's probe wants a hint --
+/// without it a bare AAC stream is ambiguous to the format reader.
+#[derive(Debug, Clone, Default, Deserialize)]
+pub struct Song {
+    pub id: String,
+    #[serde(default)]
+    pub title: String,
+    #[serde(default)]
+    pub artist: String,
+    #[serde(default)]
+    pub album: String,
+    /// The file's own extension on the server, e.g. `flac`.
+    #[serde(default)]
+    pub suffix: String,
+    /// Seconds, as the server states them. Absent on some servers, which is why
+    /// the transport still measures its own position from what it played.
+    #[serde(default)]
+    pub duration: Option<u32>,
+    /// Bytes, which is how a caller can tell an unranged whole-file buffer is
+    /// going to be expensive before asking for it.
+    #[serde(default)]
+    pub size: Option<u64>,
+}
+
+/// `getRandomSongs`.
+#[derive(Debug, Clone, Default, Deserialize)]
+pub struct RandomSongs {
+    #[serde(rename = "randomSongs", default)]
+    pub inner: SongList,
+}
+
+#[derive(Debug, Clone, Default, Deserialize)]
+pub struct SongList {
+    #[serde(default)]
+    pub song: Vec<Song>,
+}
+
+/// The parameters for streaming a track's *original* file.
+///
+/// `format=raw` is decision 7 in one parameter: this player decodes with
+/// symphonia on the listener's own machine, so a server-side transcode is wasted
+/// work -- and worse, a transcoding response usually arrives chunked, with no
+/// length and no ranges, which is exactly what seeking needs. Servers that do
+/// not understand `raw` ignore it and send the original anyway; ones that
+/// transcode regardless are handled by `RemoteSource`'s whole-body fallback.
+pub fn stream_params(id: &str) -> [(&str, &str); 2] {
+    [("id", id), ("format", "raw")]
+}
+
 /// Parses one response body.
 ///
 /// The only way this module hands back a payload, so there is no path that skips

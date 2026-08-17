@@ -496,3 +496,76 @@ mod tests {
         assert_ne!(one.credential_key(), other_server.credential_key());
     }
 }
+
+/// One track on the server, as the UI needs it (Phase 2 M2).
+///
+/// M3 replaces the way these are found -- browsing, searching -- but not their
+/// shape: a row is an id, enough words to show, and the suffix the decoder needs
+/// as a hint.
+#[derive(Debug, Clone, serde::Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ServerTrack {
+    pub id: String,
+    pub title: String,
+    pub artist: String,
+    pub album: String,
+    pub suffix: String,
+    pub duration_seconds: f64,
+}
+
+impl From<player_core::subsonic::Song> for ServerTrack {
+    fn from(song: player_core::subsonic::Song) -> Self {
+        Self {
+            id: song.id,
+            title: song.title,
+            artist: song.artist,
+            album: song.album,
+            suffix: song.suffix,
+            duration_seconds: song.duration.unwrap_or(0) as f64,
+        }
+    }
+}
+
+/// A handful of tracks at random, so there is something to play before browsing
+/// exists (M3). Blocking pool, like everything else that touches the network.
+#[tauri::command]
+pub async fn server_random_tracks(
+    count: u32,
+    shared: tauri::State<'_, SharedServer>,
+) -> Result<Vec<ServerTrack>, String> {
+    let shared = Arc::clone(shared.inner());
+    tauri::async_runtime::spawn_blocking(move || {
+        let guard = shared.lock().unwrap();
+        let connection = guard
+            .as_ref()
+            .ok_or_else(|| "no music server is connected".to_string())?;
+        connection
+            .client
+            .random_songs(count)
+            .map(|songs| songs.into_iter().map(ServerTrack::from).collect())
+            .map_err(|e| e.to_string())
+    })
+    .await
+    .map_err(|e| e.to_string())?
+}
+
+/// Builds a playback source for one server track.
+///
+/// The engine takes a `PlaybackSource` and cannot tell a network from a disk,
+/// which is the whole reason this phase is a phase rather than a rewrite -- so
+/// this is the only new thing playback needs, and `load_file`'s path is
+/// otherwise unchanged.
+pub fn track_source(
+    shared: &SharedServer,
+    id: &str,
+    suffix: &str,
+) -> Result<player_core::RemoteSource, String> {
+    let guard = shared.lock().unwrap();
+    let connection = guard
+        .as_ref()
+        .ok_or_else(|| "no music server is connected".to_string())?;
+    connection
+        .client
+        .track_source(id, suffix)
+        .map_err(|e| e.to_string())
+}

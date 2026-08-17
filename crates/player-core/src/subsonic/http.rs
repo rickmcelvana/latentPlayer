@@ -16,9 +16,10 @@ use std::time::Duration;
 use serde::de::DeserializeOwned;
 
 use super::{
-    request_url, salt_hex, Credentials, Extensions, NoPayload, Parsed, Server, ServerInfo,
-    SubsonicError,
+    request_url, salt_hex, stream_params, Credentials, Extensions, NoPayload, Parsed, RandomSongs,
+    Server, ServerInfo, Song, SubsonicError,
 };
+use crate::remote::RemoteSource;
 
 /// How long any one request may take, end to end.
 ///
@@ -108,6 +109,42 @@ impl HttpClient {
             }
             Err(other) => Err(other),
         }
+    }
+
+    /// A handful of songs at random (Phase 2 M2).
+    ///
+    /// Not a browse API -- that is M3 -- but the smallest call that produces
+    /// real, playable track ids, which is what M2 needs to prove that remote
+    /// playback works at all.
+    pub fn random_songs(&self, count: u32) -> Result<Vec<Song>, SubsonicError> {
+        let size = count.to_string();
+        Ok(self
+            .get::<RandomSongs>("getRandomSongs", &[("size", size.as_str())])?
+            .payload
+            .inner
+            .song)
+    }
+
+    /// A `PlaybackSource` for one track on this server.
+    ///
+    /// The URL carries its own authentication -- for this protocol that is what
+    /// a credential *is* -- so the source needs nothing else from the client and
+    /// can be handed to the engine, which has no idea a network is involved.
+    ///
+    /// Note the salt is fixed at the moment the URL is built rather than per
+    /// request: the URL is used for the life of the track, including its range
+    /// requests. That is how every Subsonic client streams, and the token stays
+    /// valid because it is a hash of a password that has not changed.
+    pub fn track_source(&self, id: &str, suffix: &str) -> Result<RemoteSource, SubsonicError> {
+        let url = request_url(
+            &self.server,
+            &self.credentials,
+            "stream",
+            &stream_params(id),
+            &fresh_salt()?,
+        )?;
+        let hint = (!suffix.is_empty()).then(|| suffix.to_string());
+        Ok(RemoteSource::new(url, hint))
     }
 
     /// One GET, with the transport's own failures translated into this crate's
