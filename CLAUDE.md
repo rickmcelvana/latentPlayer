@@ -63,7 +63,9 @@ goniometer's own axes. The scope window is resizable and the UI owns its size
 and visibility (`scope.ts`/`ScopeControls.tsx`, driving a native window on one
 shell and the canvas on the other). `cargo run -p player-render --example
 scope_smoke` and `/scope.html` report 8/8 each, against pixels read back rather
-than eyeballed.
+than eyeballed. (Phase 3 M1 renamed all five of those: the modules are
+`visualizer.ts`/`webVisualizer.ts`/`VisualizerControls.tsx` and the checks are
+`visual_smoke`/`/visualizer.html`, which run M6's eight claims among their own.)
 
 M7 (library + tags + playlists) is done and user-confirmed on both shells:
 `tags.rs` reads ID3v2/Vorbis/RIFF/MP4
@@ -100,7 +102,7 @@ the button is labelled
 from `playing && !finished`), and the scope window can no longer be destroyed
 under its renderer -- its close button hides it, and the app owns that window's
 whole lifecycle, including stopping the redraw thread before exiting. See
-ARCHITECTURE.md's "The scope window's lifecycle" for that decision and
+ARCHITECTURE.md's "The visualizer window's lifecycle" for that decision and
 `tasks/phase-1.md`'s closing sections for both. The rest of ARCHITECTURE.md's
 "Known gaps" are design trades and remain open.
 
@@ -223,6 +225,39 @@ because the webview-less scope window receives no input events); switching
 visuals swaps the scene, never the window; MilkDrop goes the
 Butterchurn-guided route (MIT), never projectM (LGPL); AI-adaptive presets
 slip to Phase 6.
+
+**Phase 3 M1 is built and awaiting live confirmation** (2026-08-18): the
+visualizer host. `player-render` is now split along one seam (`visual.rs`) --
+**the host owns the surface, the analysis feed, selection and fullscreen; a
+visual owns only its scene** -- so `Renderer` holds a `BoxedVisual`,
+`set_visual` swaps the scene without touching the surface, and `draw_frame`
+takes a `VisualFrame` each shell assembles once per frame off the tap. A visual
+computes no DSP. `VisualKind` is the project's one registry of visuals (id,
+name, description), read by the gallery UI, the Tauri commands, the wasm
+bindings and both smokes, so no shell keeps a list of its own. The vectorscope
+moved to `visuals/vectorscope.rs` behind the trait, untouched.
+
+Fullscreen landed with the host, before any new visual, as decision 4 required:
+the Fullscreen API on the canvas's wrapper on the web, `set_fullscreen` on the
+existing window natively -- with Esc as a **global shortcut registered only
+while fullscreen is active**, because a webview-less window is delivered no
+keyboard events at all, and an exit on focus loss so that shortcut can never be
+held while another application is frontmost. `scope.ts`/`webScope.ts`/
+`ScopeControls.tsx` are now `visualizer.ts`/`webVisualizer.ts`/
+`VisualizerControls.tsx`, and the selection persists in localStorage as a
+`VisualKind::id`.
+Verified: **14/14** `cargo run -p player-render --example visual_smoke` and
+**17/17** at `/visualizer.html` in a real browser, agreeing figure for figure (a
+switch is byte-identical to a freshly built renderer on both). Two of
+ARCHITECTURE.md's "Known gaps" -- the scope's aspect and its channel pairing --
+turned out to describe the pre-M6 renderer rather than the current one; they are
+struck through with the checks that now pin them. **What is still to confirm is
+fullscreen itself**, on both shells: the automation browser refuses
+`requestFullscreen` outright (the pane hosts the page without
+`allow="fullscreen"`) and the desktop webview's buttons are out of reach of the
+automation, so Esc, the focus-loss exit and how it all looks under real music
+are a person's observation. `cargo run -p player-render --example visual_smoke`
+checks every visual in the registry; `/visualizer.html` is its web half.
 
 The certificate answer changed a finding into a fix: ureq defaults to
 webpki-roots, a bundle compiled into the binary, under which installing a

@@ -350,12 +350,23 @@ input[type="range"] {
   }
 }
 
-.scope-controls {
+/* The visualizer host's controls (Phase 3 M1): the gallery on one row, the
+   host's own buttons -- size, visibility, fullscreen -- on the next. Two rows
+   because they are two different things: which visual, and how it is shown. */
+.visualizer-controls {
   display: flex;
-  align-items: center;
+  flex-direction: column;
   gap: 6px;
   margin-top: 12px;
   font-size: 11px;
+
+  .gallery,
+  .host {
+    display: flex;
+    align-items: center;
+    gap: 6px;
+    flex-wrap: wrap;
+  }
 
   .label {
     text-transform: uppercase;
@@ -364,15 +375,25 @@ input[type="range"] {
     margin-right: 2px;
   }
 
+  .hint {
+    opacity: 0.6;
+  }
+
+  .hint.refused {
+    opacity: 1;
+    color: var(--warn, #e8b04b);
+  }
+
   button {
     font-size: 12px;
     padding: 4px 10px;
     border-radius: 5px;
   }
 
-  /* The size currently in effect, which the scope window may also have been
-     dragged to. */
-  button.size.current {
+  /* The size currently in effect, which the visualizer window may also have
+     been dragged to, and the visual currently selected. */
+  button.size.current,
+  button.visual.current {
     border-color: var(--accent);
   }
 }
@@ -383,6 +404,24 @@ input[type="range"] {
   margin-top: 12px;
   max-width: 100%;
   height: auto;
+}
+
+/* The element the Fullscreen API is given. Ordinary in the page; a black,
+   centred field once it holds the screen, so a visual sized to the display has
+   nothing around it but the display. */
+.visualizer-surface:fullscreen {
+  background: #000;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+
+  .scope {
+    border: none;
+    border-radius: 0;
+    margin: 0;
+    max-width: 100vw;
+    max-height: 100vh;
+  }
 }
 
 /* The ten-band EQ (M8): the curve above, the sliders that made it below, in

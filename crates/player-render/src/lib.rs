@@ -1,38 +1,44 @@
-//! The scope's renderer. This crate only knows how to draw into a
-//! `wgpu::Surface` (or an offscreen texture) it is handed -- nothing here is
+//! The visualizer host and its visuals. This crate only knows how to draw into
+//! a `wgpu::Surface` (or an offscreen texture) it is handed -- nothing here is
 //! native- or web-specific. `src-tauri` hands it a Tauri `Window`'s raw handle;
 //! `player-rt-wasm` hands it an `HtmlCanvasElement`. Same shader, same
-//! pipeline, same draw call, both places -- the thing Phase 0 existed to prove
-//! and the thing M6 keeps true now that the pipeline is a real 3D one.
+//! pipeline, same draw call, both places -- the thing Phase 0 existed to prove,
+//! M6 kept true through a real 3D pipeline, and Phase 3 M1 now keeps true for a
+//! *gallery* of scenes rather than one.
 //!
-//! # What M6 changed
+//! # What M1 changed
 //!
-//! Phase 0 drew a flat XY line strip in clip space: no camera, no depth, no
-//! third dimension to have an opinion about. The scope now extrudes that
-//! figure along a time axis (`trace.rs`), views it through a perspective
-//! camera (`camera.rs`), and draws it depth-tested and multisampled
-//! (`scene.rs`) -- PLAN.md section 4's hero feature, in its first form.
+//! M6 left one scene wired straight into the renderer, and `draw_frame(&[f32],
+//! channels)` was the vectorscope's signature rather than a visual's. PLAN.md
+//! section 4 asks for several selectable visuals, so M1 drew the line once
+//! (`visual.rs`, tasks/phase-3.md decision 1): **the host owns the surface, the
+//! analysis feed, selection and fullscreen; a visual owns only its scene.**
 //!
-//! The public surface is deliberately unchanged in shape: hand over the
-//! samples that reached the output and the layout they are interleaved in, and
-//! a frame gets drawn. Everything about how it looks stays in here.
+//! What that means here: [`Renderer`] holds a [`BoxedVisual`] instead of a
+//! concrete scene, [`Renderer::set_visual`] swaps it between frames without
+//! touching the surface (decision 5), and [`Renderer::draw_frame`] takes a
+//! [`VisualFrame`] -- the feed the host assembles once per frame from the
+//! analysis tap and the meters. Fullscreen is the shells', since a surface is
+//! all this crate ever sees of a window.
 
+mod attachments;
 mod camera;
 mod error;
-mod scene;
 pub mod trace;
+mod visual;
+mod visuals;
 
 pub use error::RenderError;
 pub use trace::{window_samples, TRACE_POINTS, TRACE_SECONDS};
-
-use scene::Scene;
+pub use visual::{BoxedVisual, Gpu, Visual, VisualFrame, VisualKind};
 
 pub struct Renderer {
     surface: wgpu::Surface<'static>,
     device: wgpu::Device,
     queue: wgpu::Queue,
     config: wgpu::SurfaceConfiguration,
-    scene: Scene,
+    visual: BoxedVisual,
+    kind: VisualKind,
     /// Set when the surface told us its texture no longer matches it, so
     /// the *next* frame reconfigures before drawing. Deferred rather than
     /// done on the spot because the surface texture is still in hand at
@@ -56,6 +62,7 @@ impl Renderer {
         target: impl Into<wgpu::SurfaceTarget<'static>>,
         width: u32,
         height: u32,
+        kind: VisualKind,
     ) -> Result<Self, RenderError> {
         let instance = wgpu::Instance::default();
         let surface = instance.create_surface(target)?;
@@ -76,16 +83,55 @@ impl Renderer {
             .ok_or(RenderError::UnsupportedSurface)?;
         surface.configure(&device, &config);
 
-        let scene = Scene::new(&device, &queue, config.format, config.width, config.height);
+        let visual = kind.create(
+            &Gpu {
+                device: &device,
+                queue: &queue,
+                format: config.format,
+            },
+            config.width,
+            config.height,
+        );
 
         Ok(Self {
             surface,
             device,
             queue,
             config,
-            scene,
+            visual,
+            kind,
             needs_reconfigure: false,
         })
+    }
+
+    /// The GPU handles as a visual sees them.
+    fn gpu(&self) -> Gpu<'_> {
+        Gpu {
+            device: &self.device,
+            queue: &self.queue,
+            format: self.config.format,
+        }
+    }
+
+    /// Which visual is being drawn.
+    pub fn visual(&self) -> VisualKind {
+        self.kind
+    }
+
+    /// Selects a visual, building its scene at the current size.
+    ///
+    /// The surface, the window and the canvas are all untouched (decision 5):
+    /// switching visuals is a scene swap, not a teardown -- which is what lets
+    /// the native shell keep one window for the whole session, and what keeps
+    /// the swap cheap enough to happen between two frames of the redraw loop.
+    ///
+    /// Selecting the visual already showing rebuilds it anyway rather than
+    /// returning early. It costs one pipeline and happens only when a person
+    /// clicks something, and the alternative is a "reset this visual" path that
+    /// would exist purely to be a second way of doing this.
+    pub fn set_visual(&mut self, kind: VisualKind) {
+        self.visual = kind.create(&self.gpu(), self.config.width, self.config.height);
+        self.kind = kind;
     }
 
     /// Reconfigures the surface for a new window/canvas size. Callers must
@@ -102,20 +148,21 @@ impl Renderer {
         self.config.width = width;
         self.config.height = height;
         self.surface.configure(&self.device, &self.config);
-        self.scene
-            .resize(&self.device, &self.queue, self.config.format, width, height);
+        let gpu = Gpu {
+            device: &self.device,
+            queue: &self.queue,
+            format: self.config.format,
+        };
+        self.visual.resize(&gpu, width, height);
         self.needs_reconfigure = false;
     }
 
-    /// `samples` is interleaved audio in the output's channel layout, newest
-    /// last -- exactly what the analysis tap holds. `channels` is that layout's
-    /// width, which need not be 2: the tap follows the output device, and a
-    /// device with more channels would otherwise be de-interleaved wrongly.
+    /// Draws one frame of the selected visual from the host's feed.
     ///
-    /// How many samples to hand over is [`window_samples`]: a fixed *duration*
-    /// of history, so the extrusion means the same thing at every sample rate
-    /// (M6 decision 1).
-    pub fn draw_frame(&mut self, samples: &[f32], channels: u16) -> Result<(), RenderError> {
+    /// How many samples the frame should carry is [`window_samples`]: a fixed
+    /// *duration* of history, so a visual means the same thing at every output
+    /// rate (M6 decision 1, now the host's question rather than the scope's).
+    pub fn draw_frame(&mut self, frame_data: &VisualFrame) -> Result<(), RenderError> {
         if self.needs_reconfigure {
             self.surface.configure(&self.device, &self.config);
             self.needs_reconfigure = false;
@@ -155,21 +202,25 @@ impl Renderer {
             .texture
             .create_view(&wgpu::TextureViewDescriptor::default());
 
-        let commands = self
-            .scene
-            .draw(&self.device, &self.queue, &view, samples, channels);
+        let gpu = Gpu {
+            device: &self.device,
+            queue: &self.queue,
+            format: self.config.format,
+        };
+        let commands = self.visual.draw(&gpu, &view, frame_data);
         self.queue.submit(Some(commands));
         self.queue.present(frame);
         Ok(())
     }
 }
 
-/// The same scene, rendered into a texture instead of onto a screen.
+/// The same visuals, rendered into a texture instead of onto a screen.
 ///
-/// This exists to be *checked* (M6 decision 5): a renderer verified by looking
-/// at it is a renderer that ships with a mirrored axis or a camera facing the
-/// wrong way. `crates/player-render/examples/scope_smoke.rs` draws known audio
-/// through this and asserts where the figure landed.
+/// This exists to be *checked* (M6 decision 5, carried into M1's decision 6): a
+/// renderer verified by looking at it is a renderer that ships with a mirrored
+/// axis or a camera facing the wrong way.
+/// `crates/player-render/examples/visual_smoke.rs` draws known audio through
+/// this, per visual, and asserts where the figure landed.
 ///
 /// Native-only, because reading pixels back means blocking on a device poll,
 /// and on the web that has to be awaited instead -- the check runs where the
@@ -179,7 +230,7 @@ impl Renderer {
 pub struct OffscreenRenderer {
     device: wgpu::Device,
     queue: wgpu::Queue,
-    scene: Scene,
+    visual: BoxedVisual,
     texture: wgpu::Texture,
     width: u32,
     height: u32,
@@ -191,7 +242,7 @@ impl OffscreenRenderer {
     /// sRGB, like a real surface, so the check sees the values a screen would.
     pub const FORMAT: wgpu::TextureFormat = wgpu::TextureFormat::Rgba8UnormSrgb;
 
-    pub async fn new(width: u32, height: u32) -> Result<Self, RenderError> {
+    pub async fn new(width: u32, height: u32, kind: VisualKind) -> Result<Self, RenderError> {
         let instance = wgpu::Instance::default();
         let adapter = instance
             .request_adapter(&wgpu::RequestAdapterOptions::default())
@@ -216,30 +267,52 @@ impl OffscreenRenderer {
             usage: wgpu::TextureUsages::RENDER_ATTACHMENT | wgpu::TextureUsages::COPY_SRC,
             view_formats: &[],
         });
-        let scene = Scene::new(&device, &queue, Self::FORMAT, width, height);
+        let visual = kind.create(
+            &Gpu {
+                device: &device,
+                queue: &queue,
+                format: Self::FORMAT,
+            },
+            width,
+            height,
+        );
 
         Ok(Self {
             device,
             queue,
-            scene,
+            visual,
             texture,
             width,
             height,
         })
     }
 
+    /// Selects a visual, at the same size. The offscreen path swaps scenes the
+    /// way the on-screen one does, so the check can exercise a *switch* rather
+    /// than only a freshly built renderer per kind (decision 6).
+    pub fn set_visual(&mut self, kind: VisualKind) {
+        self.visual = kind.create(
+            &Gpu {
+                device: &self.device,
+                queue: &self.queue,
+                format: Self::FORMAT,
+            },
+            self.width,
+            self.height,
+        );
+    }
+
     /// Draws one frame, then reads it back as RGBA8 rows, top row first.
-    pub fn draw_to_pixels(
-        &mut self,
-        samples: &[f32],
-        channels: u16,
-    ) -> Result<Vec<u8>, RenderError> {
+    pub fn draw_to_pixels(&mut self, frame: &VisualFrame) -> Result<Vec<u8>, RenderError> {
         let view = self
             .texture
             .create_view(&wgpu::TextureViewDescriptor::default());
-        let commands = self
-            .scene
-            .draw(&self.device, &self.queue, &view, samples, channels);
+        let gpu = Gpu {
+            device: &self.device,
+            queue: &self.queue,
+            format: Self::FORMAT,
+        };
+        let commands = self.visual.draw(&gpu, &view, frame);
         self.queue.submit(Some(commands));
         self.read_pixels()
     }

@@ -16,6 +16,7 @@ use player_core::{
     adapt_channels, read_tags, ChannelShape, InMemorySource, Meters, StreamingDecoder, TrackTags,
     GONIOMETER_POINTS,
 };
+use player_render::{VisualFrame, VisualKind};
 use wasm_bindgen::prelude::*;
 use web_sys::HtmlCanvasElement;
 
@@ -474,9 +475,16 @@ fn settings_from(enabled: bool, preamp_db: f32, gains_db: &[f32]) -> EqSettings 
     .clamped()
 }
 
-/// wasm-bindgen wrapper around `player_render::Renderer`, the same render
-/// engine `src-tauri` drives natively -- same shader, same pipeline, same
-/// draw call (PLAN.md §5/§8.1's whole point).
+/// wasm-bindgen wrapper around `player_render::Renderer` -- the visualizer
+/// host, the same one `src-tauri` drives natively: same registry, same shaders,
+/// same pipelines, same draw call (PLAN.md §5/§8.1's whole point, and Phase 3
+/// M1's decision 1 for everything above it).
+///
+/// What this crate deliberately does *not* add is a second opinion about
+/// anything. Selection is by `VisualKind::id`, the gallery comes from
+/// [`visual_catalog`], and the frame is the same `VisualFrame` the desktop
+/// shell assembles -- so the two shells cannot offer different visuals, name
+/// them differently, or feed them differently.
 #[wasm_bindgen]
 pub struct WasmRenderer {
     inner: player_render::Renderer,
@@ -487,14 +495,21 @@ impl WasmRenderer {
     /// Not a `#[wasm_bindgen(constructor)]` because it's async -- wasm-bindgen
     /// constructors can't be. JS calls this as a plain async function and
     /// gets a `Promise<WasmRenderer>`.
+    ///
+    /// `visual` is a `VisualKind::id`; an unknown one is an error rather than a
+    /// silent fallback, so a stored selection this build does not have is
+    /// something the caller decides about (see `visualizer.ts`).
     #[wasm_bindgen(js_name = create)]
     pub async fn create(
         canvas: HtmlCanvasElement,
         width: u32,
         height: u32,
+        visual: &str,
     ) -> Result<WasmRenderer, JsValue> {
+        let kind = VisualKind::from_id(visual)
+            .ok_or_else(|| JsValue::from_str(&format!("no visual called {visual:?}")))?;
         let inner =
-            player_render::Renderer::new(wgpu::SurfaceTarget::Canvas(canvas), width, height)
+            player_render::Renderer::new(wgpu::SurfaceTarget::Canvas(canvas), width, height, kind)
                 .await
                 .map_err(|e| JsValue::from_str(&e.to_string()))?;
         Ok(WasmRenderer { inner })
@@ -504,25 +519,78 @@ impl WasmRenderer {
         self.inner.resize(width, height);
     }
 
+    /// Selects a visual by id. The canvas and the surface are untouched
+    /// (decision 5) -- this is the web half of the same scene swap the desktop
+    /// shell's redraw thread performs.
+    #[wasm_bindgen(js_name = setVisual)]
+    pub fn set_visual(&mut self, visual: &str) -> Result<(), JsValue> {
+        let kind = VisualKind::from_id(visual)
+            .ok_or_else(|| JsValue::from_str(&format!("no visual called {visual:?}")))?;
+        self.inner.set_visual(kind);
+        Ok(())
+    }
+
+    /// The id of the visual currently being drawn.
+    #[wasm_bindgen(js_name = currentVisual)]
+    pub fn current_visual(&self) -> String {
+        self.inner.visual().id().to_string()
+    }
+
+    /// Draws one frame from the host's feed.
+    ///
     /// `channels` is the interleaving width of `samples` -- the output's, since
     /// that is what the tap holds. Passing it rather than assuming stereo is
-    /// M6's fix for a device that isn't.
-    pub fn draw_frame(&mut self, samples: &[f32], channels: u16) -> Result<(), JsValue> {
+    /// M6's fix for a device that isn't; `sample_rate` is what makes the window
+    /// a duration rather than a count.
+    pub fn draw_frame(
+        &mut self,
+        samples: &[f32],
+        channels: u16,
+        sample_rate: u32,
+    ) -> Result<(), JsValue> {
         self.inner
-            .draw_frame(samples, channels)
+            .draw_frame(&VisualFrame::new(samples, channels, sample_rate))
             .map_err(|e| JsValue::from_str(&e.to_string()))
     }
 }
 
-/// How many interleaved samples one frame of the scope should be drawn from.
+/// The gallery, as JSON: `[{id, name, description}]`.
 ///
-/// A fixed *duration* of history rather than a fixed sample count, so the
-/// extrusion means the same thing at every output rate (M6 decision 1). Exposed
-/// as a free function because the web's draw loop lives in TypeScript and has
-/// to ask the same question `src-tauri`'s redraw thread does -- of the same
-/// code, so the two shells cannot answer it differently.
-#[wasm_bindgen(js_name = scopeWindowSamples)]
-pub fn scope_window_samples(sample_rate: u32, channels: u16) -> usize {
+/// Out of `player_render::VisualKind`, which is the project's one list of
+/// visuals (decision 3) -- the web build no more keeps its own than the desktop
+/// one does. JSON rather than a structured value for the reason the Subsonic
+/// bindings below use it: this crate has no serde-wasm-bindgen and needs none
+/// for a call that happens when a panel mounts.
+#[wasm_bindgen(js_name = visualCatalog)]
+pub fn visual_catalog() -> String {
+    let entries: Vec<serde_json::Value> = VisualKind::ALL
+        .iter()
+        .map(|kind| {
+            serde_json::json!({
+                "id": kind.id(),
+                "name": kind.name(),
+                "description": kind.description(),
+            })
+        })
+        .collect();
+    serde_json::Value::Array(entries).to_string()
+}
+
+/// The id of the visual the gallery opens at when nothing has been chosen.
+#[wasm_bindgen(js_name = defaultVisual)]
+pub fn default_visual() -> String {
+    VisualKind::DEFAULT.id().to_string()
+}
+
+/// How many interleaved samples one frame's feed should carry.
+///
+/// A fixed *duration* of history rather than a fixed sample count, so a visual
+/// means the same thing at every output rate (M6 decision 1, the host's
+/// question since M1). Exposed as a free function because the web's draw loop
+/// lives in TypeScript and has to ask exactly what `src-tauri`'s redraw thread
+/// asks -- of the same code, so the two shells cannot answer it differently.
+#[wasm_bindgen(js_name = visualWindowSamples)]
+pub fn visual_window_samples(sample_rate: u32, channels: u16) -> usize {
     player_render::window_samples(sample_rate, channels)
 }
 

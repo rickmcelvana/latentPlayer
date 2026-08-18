@@ -18,12 +18,12 @@ import { Equalizer } from "./Equalizer";
 import { Goniometer } from "./Goniometer";
 import { LibraryPanel } from "./LibraryPanel";
 import { Loudness } from "./Loudness";
-import { ScopeControls } from "./ScopeControls";
+import { VisualizerControls } from "./VisualizerControls";
 import { ServerPanel } from "./ServerPanel";
 import { resetScrobbler, serverScrobbleTick, type ServerState } from "./server";
 import { Spectrum } from "./Spectrum";
-import { DEFAULT_SCOPE_SIZE, attachWebCanvas } from "./scope";
-import { startScope } from "./webScope";
+import { DEFAULT_VISUALIZER_SIZE, attachWebCanvas, storedVisual, visualCatalog } from "./visualizer";
+import { startVisualizer } from "./webVisualizer";
 
 const EMPTY: TransportState = {
   position: 0,
@@ -71,7 +71,7 @@ function App() {
   const [scrubbing, setScrubbing] = useState<number | null>(null);
   const [serverConnected, setServerConnected] = useState(false);
   const canvasRef = useRef<HTMLCanvasElement>(null);
-  const scopeStarted = useRef(false);
+  const visualizerStarted = useRef(false);
   // The playlist index that was last handed to `loadTrack`. The engine's
   // `trackIndex` counts hand-offs since then, so the track actually coming
   // out of the speakers is the sum of the two.
@@ -103,17 +103,23 @@ function App() {
   // resuming at the end.
   const playing = state.playing && !state.finished;
 
-  // Web build only: the scope canvas lives inline in this window (no
+  // Web build only: the visualizer canvas lives inline in this window (no
   // second native window to put it in -- see PLAN.md §3/§8.3, web is the
   // player; a second always-on wgpu window isn't a thing a browser tab has).
   useEffect(() => {
-    if (tauri || !canvasRef.current || scopeStarted.current) return;
-    scopeStarted.current = true;
-    // Handed to the scope adapter as well as to the renderer: the size
-    // controls resize this canvas, and scope.ts is what owns that on the web
-    // side without reaching into the DOM itself.
-    attachWebCanvas(canvasRef.current);
-    startScope(canvasRef.current).catch((e) => setError(String(e)));
+    if (tauri || !canvasRef.current || visualizerStarted.current) return;
+    visualizerStarted.current = true;
+    const canvas = canvasRef.current;
+    // Handed to the visualizer adapter as well as to the renderer: the size
+    // controls resize this canvas, and visualizer.ts is what owns that on the
+    // web side without reaching into the DOM itself.
+    attachWebCanvas(canvas);
+    // Started on the visual chosen last session rather than on the default and
+    // switched a moment later: the first frames of a session should be what the
+    // user picked, not a flash of something else (Phase 3 M1).
+    visualCatalog()
+      .then((entries) => startVisualizer(canvas, storedVisual(entries) ?? undefined))
+      .catch((e) => setError(String(e)));
   }, [tauri]);
 
   const play = useCallback(async (index: number, list: PlaylistTrack[]) => {
@@ -432,19 +438,25 @@ function App() {
             ones -- the playlist is one list, whatever a row plays. */}
         <ServerPanel onPlay={playTracks} onState={handleServerState} />
 
-        <ScopeControls />
+        <VisualizerControls />
 
         {tauri ? (
           <p className="hint">
-            The 3D vectorscope is in the second window this app opened alongside this one.
+            The visualizer is in the second window this app opened alongside this one.
           </p>
         ) : (
-          <canvas
-            ref={canvasRef}
-            width={DEFAULT_SCOPE_SIZE}
-            height={DEFAULT_SCOPE_SIZE}
-            className="scope"
-          />
+          // The wrapper is what goes fullscreen, not the canvas: a fullscreen
+          // canvas is stretched by the browser to fill the screen at whatever
+          // backing size it had, where a wrapper lets webVisualizer.ts resize
+          // the canvas to the screen and centre it (Phase 3 M1).
+          <div className="visualizer-surface">
+            <canvas
+              ref={canvasRef}
+              width={DEFAULT_VISUALIZER_SIZE}
+              height={DEFAULT_VISUALIZER_SIZE}
+              className="scope"
+            />
+          </div>
         )}
       </div>
     </main>

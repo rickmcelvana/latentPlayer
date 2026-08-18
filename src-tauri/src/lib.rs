@@ -17,21 +17,39 @@ use servers::SharedServer;
 use player_core::eq::{self, EqSettings, BAND_FREQUENCIES, EQ_BANDS};
 use player_core::library::{Library, LibraryTrack, Playlist, ScanSummary};
 use player_core::{LocalFile, Playback};
+use player_render::{VisualFrame, VisualKind};
 use tauri::Manager;
+use tauri_plugin_global_shortcut::{Code, GlobalShortcutExt, Shortcut, ShortcutState};
 
-/// The scope window's label, and the sizes the UI offers.
+/// The visualizer window's label.
 ///
 /// Since M6 the window is resizable and the UI owns its geometry: what was a
-/// constant in this file is now `set_scope_size`, so "make the visualiser
+/// constant in this file is now `set_visualizer_size`, so "make the visualiser
 /// bigger" is a thing the user can do rather than a rebuild (M6 decision 4).
-const SCOPE_LABEL: &str = "scope";
+/// Since Phase 3 M1 the UI also owns *which visual* it draws and whether it is
+/// fullscreen -- the window itself is unchanged, which is the point (decision
+/// 5: switching visuals swaps the scene, never the surface or the window).
+const VISUALIZER_LABEL: &str = "visualizer";
 
-/// What the scope window opens at.
-const SCOPE_DEFAULT_SIZE: f64 = 480.0;
+/// What the visualizer window opens at.
+const VISUALIZER_DEFAULT_SIZE: f64 = 480.0;
 
-/// The scope window's lifecycle, shared with the thread that redraws it.
+/// The key that leaves fullscreen on the desktop shell.
 ///
-/// The decision this holds (2026-08-17): **the scope window belongs to the app,
+/// A global shortcut, which is not a preference: this window has no webview, so
+/// it is delivered no keyboard events of its own -- a plain window's event
+/// stream is moves, resizes, focus and close, and nothing else. Registering
+/// globally is therefore the only way Esc reaches it, and registering it
+/// *only while fullscreen is active* is what keeps this from swallowing Esc
+/// for every other application on the machine (tasks/phase-3.md decision 4).
+/// (A function rather than a constant because `Shortcut::new` is not `const`.)
+fn fullscreen_exit_key() -> Shortcut {
+    Shortcut::new(None, Code::Escape)
+}
+
+/// The visualizer window's lifecycle, shared with the thread that redraws it.
+///
+/// The decision this holds (2026-08-17): **this window belongs to the app,
 /// not to the window manager.** It is built once at startup, hidden and shown on
 /// request, and destroyed only when the app itself goes away -- so the window
 /// always outlives the renderer drawing into it.
@@ -43,27 +61,55 @@ const SCOPE_DEFAULT_SIZE: f64 = 480.0;
 /// but as `Outdated`, whose handling is to call `surface.configure()` -- which
 /// panics inside wgpu, since wgpu treats validation errors as fatal by default.
 /// Closing the window by hand therefore used to kill the redraw thread and leave
-/// the scope dark for the rest of the session (observed live 2026-08-16).
+/// the visualizer dark for the rest of the session (observed live 2026-08-16).
 ///
 /// The alternative was to teach `Renderer` to rebuild its surface from a handle
 /// it kept, and let the window come and go. That is real work in the crate
 /// furthest from this problem, in exchange for a window the user can destroy and
 /// then has to be given some way to recreate -- when "hide it" is what the close
 /// button already means to everyone pressing it.
-struct ScopeWindow {
+struct VisualizerWindow {
     /// Cleared to stop the redraw thread for good. Only shutdown sets it.
     running: AtomicBool,
     /// The redraw thread, so shutdown can wait for it to stop *before* the
     /// window it draws into is destroyed.
     redraw: Mutex<Option<JoinHandle<()>>>,
+    /// Which visual the UI has asked for (Phase 3 M1).
+    ///
+    /// A *request* rather than the renderer's own state, because the renderer
+    /// lives on the redraw thread and nothing else may touch it: `set_visual`
+    /// leaves the choice here and that thread picks it up between two frames.
+    /// The truth about what is currently drawn is the renderer's; this is the
+    /// truth about what has been asked for, which is what the UI is drawing a
+    /// selected button from.
+    requested: Mutex<VisualKind>,
 }
 
-impl ScopeWindow {
+/// Managed so the UI can reach the selection. The rest of this type is still
+/// the shell's own business -- the window's lifecycle is not something the
+/// webview gets a handle on.
+type SharedVisualizer = Arc<VisualizerWindow>;
+
+impl VisualizerWindow {
     fn new() -> Self {
         Self {
             running: AtomicBool::new(true),
             redraw: Mutex::new(None),
+            requested: Mutex::new(VisualKind::DEFAULT),
         }
+    }
+
+    fn request(&self, kind: VisualKind) {
+        if let Ok(mut slot) = self.requested.lock() {
+            *slot = kind;
+        }
+    }
+
+    fn requested(&self) -> VisualKind {
+        self.requested
+            .lock()
+            .map(|slot| *slot)
+            .unwrap_or(VisualKind::DEFAULT)
     }
 
     /// Stops the redraw thread and waits for it, which drops the renderer and
@@ -496,43 +542,86 @@ fn set_eq(
     EqState::read(settings, eq_rate(state.inner()))
 }
 
-/// The scope window's geometry, as the UI sees it.
+/// The visualizer, as the UI sees it: where it is, whether it is up, whether it
+/// has the screen, and which visual it is drawing.
+///
+/// One struct rather than a command per field, for the reason `TransportState`
+/// is one struct: the size buttons, the show/hide toggle, the fullscreen button
+/// and the gallery are all drawn from a single poll, and four separate round
+/// trips would let them disagree about the same window mid-refresh.
 #[derive(serde::Serialize)]
 #[serde(rename_all = "camelCase")]
-struct ScopeState {
+struct VisualizerState {
     width: u32,
     height: u32,
     visible: bool,
+    fullscreen: bool,
+    /// `VisualKind::id` -- the stable name, never the display one.
+    visual: String,
+}
+
+/// One entry in the gallery. Filled from `player_render::VisualKind`, which is
+/// the only list of visuals in the project (decision 3): this shell does not
+/// keep its own, and neither does the UI.
+#[derive(serde::Serialize)]
+#[serde(rename_all = "camelCase")]
+struct VisualInfo {
+    id: String,
+    name: String,
+    description: String,
 }
 
 #[tauri::command]
-fn scope_state(app: tauri::AppHandle) -> ScopeState {
-    let window = app.get_window(SCOPE_LABEL);
+fn visual_catalog() -> Vec<VisualInfo> {
+    VisualKind::ALL
+        .iter()
+        .map(|kind| VisualInfo {
+            id: kind.id().to_string(),
+            name: kind.name().to_string(),
+            description: kind.description().to_string(),
+        })
+        .collect()
+}
+
+#[tauri::command]
+fn visualizer_state(
+    app: tauri::AppHandle,
+    visualizer: tauri::State<SharedVisualizer>,
+) -> VisualizerState {
+    let window = app.get_window(VISUALIZER_LABEL);
     let size = window
         .as_ref()
         .and_then(|w| w.inner_size().ok())
         .unwrap_or(tauri::PhysicalSize {
-            width: SCOPE_DEFAULT_SIZE as u32,
-            height: SCOPE_DEFAULT_SIZE as u32,
+            width: VISUALIZER_DEFAULT_SIZE as u32,
+            height: VISUALIZER_DEFAULT_SIZE as u32,
         });
-    ScopeState {
+    VisualizerState {
         width: size.width,
         height: size.height,
         // A window that failed to report is treated as hidden rather than
         // shown: the toggle then offers to bring it back, which is the useful
-        // direction to be wrong in.
-        visible: window.and_then(|w| w.is_visible().ok()).unwrap_or(false),
+        // direction to be wrong in. Fullscreen reads the same way -- and both
+        // are *asked of the window* rather than mirrored beside it, since
+        // several parties change them (the UI, the window's own close button,
+        // Esc, focus loss) and a mirror of all of those eventually disagrees.
+        visible: window
+            .as_ref()
+            .and_then(|w| w.is_visible().ok())
+            .unwrap_or(false),
+        fullscreen: window.and_then(|w| w.is_fullscreen().ok()).unwrap_or(false),
+        visual: visualizer.requested().id().to_string(),
     }
 }
 
-/// Resizes the scope window. The renderer notices on its own -- its redraw
-/// loop polls the window's size (see `setup` below) -- so this only has to
-/// move the window.
+/// Resizes the visualizer window. The renderer notices on its own -- its redraw
+/// loop polls the window's size (see `setup` below) -- so this only has to move
+/// the window.
 #[tauri::command]
-fn set_scope_size(width: u32, height: u32, app: tauri::AppHandle) -> Result<(), String> {
+fn set_visualizer_size(width: u32, height: u32, app: tauri::AppHandle) -> Result<(), String> {
     let window = app
-        .get_window(SCOPE_LABEL)
-        .ok_or_else(|| "the scope window is not open".to_string())?;
+        .get_window(VISUALIZER_LABEL)
+        .ok_or_else(|| "the visualizer window is not open".to_string())?;
     window
         .set_size(tauri::Size::Physical(tauri::PhysicalSize {
             width: width.max(160),
@@ -541,19 +630,107 @@ fn set_scope_size(width: u32, height: u32, app: tauri::AppHandle) -> Result<(), 
         .map_err(|e| e.to_string())
 }
 
-/// Shows or hides the scope window. Hiding rather than closing it: the renderer
-/// holds the surface built from this window's handle, and closing it would leave
-/// a renderer drawing into nothing (see `ScopeWindow`). Pressing the window's own
-/// close button ends up here too, by way of the handler in `setup`.
+/// Shows or hides the visualizer window. Hiding rather than closing it: the
+/// renderer holds the surface built from this window's handle, and closing it
+/// would leave a renderer drawing into nothing (see `VisualizerWindow`).
+/// Pressing the window's own close button ends up here too, by way of the
+/// handler in `setup`.
 #[tauri::command]
-fn set_scope_visible(visible: bool, app: tauri::AppHandle) -> Result<(), String> {
+fn set_visualizer_visible(visible: bool, app: tauri::AppHandle) -> Result<(), String> {
     let window = app
-        .get_window(SCOPE_LABEL)
-        .ok_or_else(|| "the scope window is not open".to_string())?;
+        .get_window(VISUALIZER_LABEL)
+        .ok_or_else(|| "the visualizer window is not open".to_string())?;
     if visible {
         window.show().map_err(|e| e.to_string())
     } else {
+        // Fullscreen *and* hidden is a state nothing can get out of by looking
+        // at it, and it would leave Esc registered over a window nobody can
+        // see. Putting the visualizer away therefore gives the screen back
+        // first.
+        leave_fullscreen(&app);
         window.hide().map_err(|e| e.to_string())
+    }
+}
+
+/// Takes the whole screen, or gives it back (Phase 3 M1, decision 4).
+///
+/// Borderless fullscreen of the window that already exists -- no second window,
+/// no surface rebuilt, and the redraw thread's existing size poll handles the
+/// new geometry with no new code. What this *does* have to arrange is the way
+/// back out: see [`fullscreen_exit_key`] for why Esc has to be a global
+/// shortcut here, and `setup` for the focus-loss half.
+#[tauri::command]
+fn set_visualizer_fullscreen(fullscreen: bool, app: tauri::AppHandle) -> Result<(), String> {
+    let window = app
+        .get_window(VISUALIZER_LABEL)
+        .ok_or_else(|| "the visualizer window is not open".to_string())?;
+    if fullscreen {
+        // Fullscreen of a hidden window is a screen of nothing, and the redraw
+        // thread parks while the window is hidden -- so showing it is part of
+        // what this command means rather than a courtesy.
+        window.show().map_err(|e| e.to_string())?;
+        window.set_fullscreen(true).map_err(|e| e.to_string())?;
+        // Focus is what makes the focus-loss exit work at all: a window that
+        // never had focus cannot lose it, and Esc would then be registered
+        // globally with nothing to unregister it.
+        let _ = window.set_focus();
+        register_fullscreen_exit(&app);
+    } else {
+        leave_fullscreen(&app);
+    }
+    Ok(())
+}
+
+/// Chooses the visual (decision 3's id, decision 5's swap).
+///
+/// This does not touch the renderer: the redraw thread owns it, and a scene
+/// built on this thread would be a second thread creating GPU objects for a
+/// device it does not drive. What lands here is the *request*, which that
+/// thread applies between two frames.
+#[tauri::command]
+fn set_visual(id: String, visualizer: tauri::State<SharedVisualizer>) -> Result<(), String> {
+    let kind = VisualKind::from_id(&id)
+        .ok_or_else(|| format!("this build has no visual called {id:?}"))?;
+    visualizer.request(kind);
+    Ok(())
+}
+
+/// Registers Esc for as long as the visualizer holds the screen.
+fn register_fullscreen_exit(app: &tauri::AppHandle) {
+    let handle = app.clone();
+    if let Err(e) =
+        app.global_shortcut()
+            .on_shortcut(fullscreen_exit_key(), move |_app, _shortcut, event| {
+                // Both the press and the release arrive; acting on the press alone
+                // keeps one keystroke from being two exits.
+                if event.state() == ShortcutState::Pressed {
+                    leave_fullscreen(&handle);
+                }
+            })
+    {
+        // Not fatal: fullscreen still works, and the UI's own toggle still comes
+        // back out of it. Worth logging loudly, because the *reason* anyone
+        // would find themselves stuck is exactly this line having failed.
+        log::warn!("could not register Esc to leave fullscreen: {e}");
+    }
+}
+
+/// Gives the screen back, and takes Esc back with it.
+///
+/// Idempotent on purpose: it is reached from the UI's toggle, from Esc itself,
+/// from the window losing focus and from hiding the visualizer, and any of
+/// those can arrive when the visualizer is already windowed.
+fn leave_fullscreen(app: &tauri::AppHandle) {
+    if let Some(window) = app.get_window(VISUALIZER_LABEL) {
+        if let Err(e) = window.set_fullscreen(false) {
+            log::warn!("leaving fullscreen failed: {e}");
+        }
+    }
+    // Unconditional rather than "if we believe it is registered": this is the
+    // one thing that must not be left behind, since a stray Esc handler is a
+    // key taken away from every other application on the machine.
+    if let Err(e) = app.global_shortcut().unregister(fullscreen_exit_key()) {
+        log::debug!("no Esc shortcut to unregister: {e}");
     }
 }
 
@@ -729,6 +906,10 @@ fn sniff_image_type(bytes: &[u8]) -> &'static str {
 pub fn run() {
     tauri::Builder::default()
         .plugin(tauri_plugin_dialog::init())
+        // Esc out of fullscreen, and nothing else (Phase 3 M1). The shortcut
+        // itself is registered and unregistered around fullscreen rather than
+        // held for the session -- see `fullscreen_exit_key`.
+        .plugin(tauri_plugin_global_shortcut::Builder::new().build())
         .manage(SharedPlayback::default())
         .manage(SharedEq::new(Mutex::new(EqSettings::flat())))
         .invoke_handler(tauri::generate_handler![
@@ -745,9 +926,12 @@ pub fn run() {
             spectrum_bands,
             meters,
             goniometer,
-            scope_state,
-            set_scope_size,
-            set_scope_visible,
+            visualizer_state,
+            set_visualizer_size,
+            set_visualizer_visible,
+            set_visualizer_fullscreen,
+            set_visual,
+            visual_catalog,
             scan_folder,
             library_tracks,
             library_folders,
@@ -838,51 +1022,69 @@ pub fn run() {
             std::thread::spawn(move || servers::reconnect_stored(&data_dir, &server));
 
             // Second, plain (no-webview) window hosting the wgpu-rendered
-            // scope. Built and configured here, on the main thread -- wgpu
+            // visualizer. Built and configured here, on the main thread -- wgpu
             // requires Metal surface creation to happen there, so doing it
             // unconditionally keeps this portable rather than only
             // "working by luck" on Linux/Windows. Only the redraw loop
             // below moves to a background thread.
-            let scope_window = tauri::window::WindowBuilder::new(app, SCOPE_LABEL)
-                .title("latentPlayer -- scope")
-                .inner_size(SCOPE_DEFAULT_SIZE, SCOPE_DEFAULT_SIZE)
+            let visualizer_window = tauri::window::WindowBuilder::new(app, VISUALIZER_LABEL)
+                .title("latentPlayer -- visualizer")
+                .inner_size(VISUALIZER_DEFAULT_SIZE, VISUALIZER_DEFAULT_SIZE)
                 // Resizable since M6: the UI sets the size through
-                // `set_scope_size`, and dragging the window's own edge has to
+                // `set_visualizer_size`, and dragging the window's own edge has to
                 // work for the same reason. Phase 0 pinned this shut because
                 // the renderer couldn't survive a resize; it can now, and the
                 // size-poll below is what tells it.
                 .resizable(true)
                 .build()?;
-            let size = scope_window.inner_size()?;
+            let size = visualizer_window.inner_size()?;
 
-            // Not managed state: nothing the webview can invoke touches this.
-            // The scope window's lifecycle is the shell's own business, and the
-            // UI's part in it is `set_scope_visible`, which speaks to the window
-            // rather than to this.
-            let scope = Arc::new(ScopeWindow::new());
+            // Managed since Phase 3 M1, and only for the selection: the window's
+            // *lifecycle* is still the shell's own business, and the UI's part
+            // in it is `set_visualizer_visible`, which speaks to the window
+            // rather than to this. What the UI does now own is which visual is
+            // drawn, and that request has to reach the redraw thread from a
+            // command (decision 1: selection is the host's).
+            let visualizer: SharedVisualizer = Arc::new(VisualizerWindow::new());
+            app.manage(Arc::clone(&visualizer));
 
             // The close button hides the window instead of destroying it, which
             // is the whole of the lifecycle decision written up on
-            // `ScopeWindow`: the renderer cannot survive its window going away,
+            // `VisualizerWindow`: the renderer cannot survive its window going away,
             // and every user pressing that button means "put it away", not
             // "tear down the visualiser for the rest of this session".
             {
                 let handle = app.handle().clone();
-                let scope = Arc::clone(&scope);
-                scope_window.on_window_event(move |event| match event {
+                let visualizer = Arc::clone(&visualizer);
+                visualizer_window.on_window_event(move |event| match event {
                     tauri::WindowEvent::CloseRequested { api, .. } => {
                         api.prevent_close();
-                        if let Some(window) = handle.get_window(SCOPE_LABEL) {
-                            if let Err(e) = window.hide() {
-                                log::warn!("hiding the scope window failed: {e}");
-                            }
+                        // Via the command rather than `window.hide()` directly,
+                        // so this button and the UI's toggle are one behaviour
+                        // with two entry points -- including giving the screen
+                        // back if the visualizer was fullscreen.
+                        if let Err(e) = set_visualizer_visible(false, handle.clone()) {
+                            log::warn!("hiding the visualizer window failed: {e}");
                         }
+                    }
+                    // Fullscreen's second way out (Phase 3 M1, decision 4).
+                    //
+                    // Two jobs in one line. It is the graceful answer to
+                    // alt-tabbing away from a fullscreen visualizer -- the
+                    // window gives the screen back rather than sitting on top of
+                    // whatever the user switched to. And it is what guarantees
+                    // the Esc shortcut, which is *global* while fullscreen is
+                    // active, is never registered while another application is
+                    // frontmost: losing focus is exactly the moment that would
+                    // start being true.
+                    tauri::WindowEvent::Focused(false) => {
+                        leave_fullscreen(&handle);
                     }
                     // Not reachable while the app is running, given the above --
                     // but if anything ever does destroy this window, the redraw
                     // thread has to hear about it before it draws again.
                     tauri::WindowEvent::Destroyed => {
-                        scope.running.store(false, Ordering::Release);
+                        visualizer.running.store(false, Ordering::Release);
                     }
                     _ => {}
                 });
@@ -892,21 +1094,21 @@ pub fn run() {
             // that leaves nothing drawing into a window that is going away: stop
             // the redraw thread first, exit second. Without this the app would
             // not even quit -- Tauri exits when its last window closes, and the
-            // scope window (which no longer closes) is a window, so the UI would
-            // disappear leaving the process and the scope behind it.
+            // visualizer window (which no longer closes) is a window, so the UI
+            // would disappear leaving the process and the visualizer behind it.
             //
-            // On a thread of its own because `ScopeWindow::stop` may not run on
+            // On a thread of its own because `VisualizerWindow::stop` may not run on
             // the main thread: see its own note.
             if let Some(main_window) = app.get_window("main") {
                 let handle = app.handle().clone();
-                let scope = Arc::clone(&scope);
+                let visualizer = Arc::clone(&visualizer);
                 main_window.on_window_event(move |event| {
                     if let tauri::WindowEvent::CloseRequested { api, .. } = event {
                         api.prevent_close();
                         let handle = handle.clone();
-                        let scope = Arc::clone(&scope);
+                        let visualizer = Arc::clone(&visualizer);
                         std::thread::spawn(move || {
-                            scope.stop();
+                            visualizer.stop();
                             handle.exit(0);
                         });
                     }
@@ -919,21 +1121,22 @@ pub fn run() {
             // own, so without this clone nothing can ever tell it the size
             // changed. Window<R> is Clone (tauri 2.11.5 `window/mod.rs`) and
             // the clone shares the same underlying window.
-            let size_probe = scope_window.clone();
+            let size_probe = visualizer_window.clone();
 
             let mut renderer = pollster::block_on(player_render::Renderer::new(
-                scope_window,
+                visualizer_window,
                 size.width,
                 size.height,
+                visualizer.requested(),
             ))
-            .map_err(|e| format!("scope renderer init failed: {e}"))?;
+            .map_err(|e| format!("visualizer renderer init failed: {e}"))?;
 
             let shared = app.state::<SharedPlayback>().inner().clone();
-            let redraw_scope = Arc::clone(&scope);
+            let redraw_visualizer = Arc::clone(&visualizer);
             let redraw = std::thread::spawn(move || {
                 let mut last_size = size;
-                while redraw_scope.running.load(Ordering::Acquire) {
-                    // A hidden scope is drawn for nobody, so this parks instead
+                while redraw_visualizer.running.load(Ordering::Acquire) {
+                    // A hidden visualizer is drawn for nobody, so this parks instead
                     // of spending a GPU frame every 16ms on something no one can
                     // see -- which is now a state the user can reach directly,
                     // since the window's own close button hides it.
@@ -952,7 +1155,7 @@ pub fn run() {
                     // Resizing the window invalidates the swapchain. The
                     // renderer can rebuild it at the old size on its own, but
                     // only the window knows the *new* size -- found live on
-                    // Windows (2026-08-15): resizing the scope window threw a
+                    // Windows (2026-08-15): resizing the window threw a
                     // continuous stream of "Outdated" frames. Polling here
                     // rather than subscribing to a resize event keeps this on
                     // the one thread that owns the renderer; at 60Hz the cost
@@ -969,41 +1172,53 @@ pub fn run() {
                         // trip to the main thread's event loop. Drawing the next
                         // frame would reconfigure a dead surface and panic
                         // inside wgpu, so stop instead. Nothing should be able
-                        // to get here (see `ScopeWindow`); this is what happens
+                        // to get here (see `VisualizerWindow`); this is what happens
                         // if something does.
                         Err(e) => {
-                            log::warn!(
-                                "the scope window stopped answering, so the scope stops: {e}"
-                            );
+                            log::warn!("the visualizer window stopped answering, so it stops: {e}");
                             return;
                         }
                     }
 
-                    // How much history to draw is a duration, not a sample
+                    // Selection, applied between two frames on the one thread
+                    // that owns the renderer (decision 5). The swap is a scene
+                    // rebuild and nothing more -- the window, the surface and
+                    // this loop are all untouched by it.
+                    let wanted_visual = redraw_visualizer.requested();
+                    if wanted_visual != renderer.visual() {
+                        renderer.set_visual(wanted_visual);
+                    }
+
+                    // The analysis feed (decision 2). Assembled here, off the
+                    // audio thread, out of what the tap and the meters already
+                    // hold -- no visual computes anything about the audio.
+                    //
+                    // How much history to hand over is a duration, not a sample
                     // count (M6 decision 1), so it depends on the rate the
                     // device opened at -- which is why this asks the engine
                     // rather than using a constant.
-                    let (samples, channels) = {
+                    let (samples, channels, rate) = {
                         let guard = shared.lock().unwrap();
                         match guard.as_ref() {
                             Some(p) => {
                                 let channels = p.output_channels();
-                                let wanted =
-                                    player_render::window_samples(p.output_sample_rate(), channels);
-                                (p.scope_window(wanted), channels)
+                                let rate = p.output_sample_rate();
+                                let wanted = player_render::window_samples(rate, channels);
+                                (p.scope_window(wanted), channels, rate)
                             }
-                            None => (Vec::new(), 2),
+                            None => (Vec::new(), 2, 48_000),
                         }
                     };
-                    if let Err(e) = renderer.draw_frame(&samples, channels) {
-                        log::warn!("scope draw_frame error: {e}");
+                    if let Err(e) = renderer.draw_frame(&VisualFrame::new(&samples, channels, rate))
+                    {
+                        log::warn!("visualizer draw_frame error: {e}");
                     }
                     std::thread::sleep(Duration::from_millis(16));
                 }
             });
             // Handed over so shutdown can wait for this thread rather than
-            // racing it (`ScopeWindow::stop`).
-            *scope.redraw.lock().unwrap() = Some(redraw);
+            // racing it (`VisualizerWindow::stop`).
+            *visualizer.redraw.lock().unwrap() = Some(redraw);
 
             Ok(())
         })

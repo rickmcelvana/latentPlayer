@@ -156,19 +156,49 @@ crates/
                      content-hashed cover cache in a directory it is handed,
                      and is idempotent under rescan (rows keyed by path), which
                      is what lets saved playlists reference rows by id.
-  player-render/    wgpu render engine. Takes any wgpu::SurfaceTarget
-                     (native window handle or web canvas) -- knows nothing
-                     about Tauri or the browser. Since M6 it is PLAN.md §4's
-                     3D vectorscope: trace.rs turns a window of played audio
-                     into points (x side, y mid -- the goniometer's axes --
-                     and z their age), camera.rs is the perspective/look-at
-                     math with wgpu's clip-space conventions pinned by tests,
-                     and scene.rs owns the pipeline, depth buffer and 4x MSAA.
-                     How much history it shows is a fixed *duration*
-                     (window_samples), so the figure means the same thing at
-                     any output rate. OffscreenRenderer renders that same
-                     scene into a texture, which is how the pipeline is
-                     checked (examples/scope_smoke.rs) rather than eyeballed.
+  player-render/    The visualizer host and its visuals (wgpu). Takes any
+                     wgpu::SurfaceTarget (native window handle or web canvas)
+                     -- knows nothing about Tauri or the browser.
+
+                     Since Phase 3 M1 the crate is split along one seam
+                     (visual.rs, tasks/phase-3.md decision 1): **the host owns
+                     the surface, the analysis feed, selection and fullscreen;
+                     a visual owns only its scene.** So `Renderer` holds a
+                     `BoxedVisual` rather than a concrete scene,
+                     `set_visual(VisualKind)` swaps it *between frames without
+                     touching the surface* (decision 5), and `draw_frame` takes
+                     a `VisualFrame` -- samples, their channel layout and their
+                     rate, assembled once per frame by the shell out of the tap
+                     and the meters. A visual computes no DSP (decision 2): a
+                     quantity that does not exist yet becomes a `player-core`
+                     meter first, cross-target, and then a field here.
+
+                     `VisualKind` is the one registry of visuals in the project
+                     (decision 3) -- id, name, description -- read by the
+                     gallery UI, the Tauri commands, the wasm bindings and both
+                     smokes, so no shell keeps a list of its own. Ids are
+                     stable, because a stored selection outlives a release.
+                     `BoxedVisual` is `Send` natively and not on wasm, which is
+                     the honest shape of the constraint: natively the renderer
+                     is moved onto its own redraw thread, and on wasm nothing in
+                     wgpu is `Send` at all.
+
+                     visuals/vectorscope.rs is the first citizen -- PLAN.md §4's
+                     3D vectorscope, moved behind the trait rather than
+                     rewritten. trace.rs turns a window of played audio into
+                     points (x side, y mid -- the goniometer's axes -- and z
+                     their age), camera.rs is the perspective/look-at math with
+                     wgpu's clip-space conventions pinned by tests, and
+                     attachments.rs owns the depth buffer and 4x MSAA, which are
+                     the host's business rather than each visual's: two visuals
+                     disagreeing about the sample count could not share a
+                     surface. How much history it shows is a fixed *duration*
+                     (window_samples), so the figure means the same thing at any
+                     output rate. OffscreenRenderer renders those same scenes
+                     into a texture, which is how the pipelines are checked
+                     (examples/visual_smoke.rs -- per kind, plus a switch
+                     asserted byte-identical to a freshly built renderer)
+                     rather than eyeballed.
   player-rt-wasm/   wasm-bindgen glue for player-core's decoder and
                      player-render's Renderer (wraps both -- neither of
                      those two crates knows wasm-bindgen exists). wasm-only;
@@ -176,6 +206,12 @@ crates/
                      WORKFLOW.md. No per-block wasm calls on the audio path
                      -- WasmDecoder is driven from a Worker, once per ring
                      refill; the AudioWorkletProcessor itself is plain TS.
+                     Since Phase 3 M1 it also carries the host's surface:
+                     `WasmRenderer.create` takes a visual's id, `setVisual`
+                     swaps the scene, `draw_frame` takes the feed's three
+                     parts, and `visualCatalog`/`defaultVisual` hand the
+                     registry to the web UI -- so the browser offers exactly
+                     the visuals the desktop shell does, named identically.
 
 src-tauri/           Tauri 2 desktop shell. Two windows: the React webview
                      (UI, transport controls) and a second, plain
@@ -184,14 +220,39 @@ src-tauri/           Tauri 2 desktop shell. Two windows: the React webview
                      window's raw handle (tauri::window::WindowBuilder,
                      requires the `unstable` tauri feature -- verified
                      against tauri 2.11.5's own source, see git history).
-                     Playback and the scope's sample feed are both pure
+                     Playback and the visualizer's feed are both pure
                      Rust; the webview only sends transport commands
                      (load_file/set_playing) and never touches audio data.
                      That second window is the app's rather than the window
                      manager's -- its close button hides it, its redraw thread
                      parks while it is hidden, and closing the main window stops
-                     that thread before ending the app. See "The scope window's
-                     lifecycle" below for why it cannot simply be closed.
+                     that thread before ending the app. See "The visualizer
+                     window's lifecycle" below for why it cannot simply be
+                     closed.
+
+                     Since Phase 3 M1 that one window is also the *gallery* and
+                     the fullscreen surface (`visualizer_state`,
+                     `set_visualizer_size/visible/fullscreen`, `set_visual`,
+                     `visual_catalog`). Selection reaches the renderer as a
+                     *request*: the redraw thread owns the renderer, so
+                     `set_visual` leaves a `VisualKind` where that thread picks
+                     it up between two frames, rather than a second thread
+                     building GPU objects for a device it does not drive.
+
+                     Fullscreen is `set_fullscreen` on the window that already
+                     exists -- no second window, no surface rebuilt, and the
+                     existing size poll handles the new geometry with no new
+                     code. What it does need is a way *back out*, and this is
+                     the one place the two shells genuinely differ (decision 4):
+                     a webview-less window is delivered no keyboard events at
+                     all -- its event stream is moves, resizes, focus and close
+                     -- so Esc is a **global shortcut**
+                     (tauri-plugin-global-shortcut), registered only while
+                     fullscreen is active and unregistered on every way out.
+                     `WindowEvent::Focused(false)` also leaves fullscreen, which
+                     does two jobs: alt-tabbing away gives the screen back, and
+                     the global Esc can never be registered while another
+                     application is frontmost.
 
                      Transport (play/pause/seek/volume/position) is exposed
                      as `#[tauri::command]`s returning one `TransportState`
@@ -317,16 +378,23 @@ app/                 React + TS + Vite. Same component tree renders in the
                      survives a failure is a lie. Scrobbling rides the transport
                      poll App.tsx already runs -- the one place that knows both
                      which track is playing and how much of it has gone by.
-                     playlist.ts, analysis.ts, scope.ts, library.ts, eq.ts and
-                     server.ts are the six adapter modules components call:
+                     playlist.ts, analysis.ts, visualizer.ts, library.ts, eq.ts
+                     and server.ts are the six adapter modules components call:
                      playlist.ts picks the shell for playback, analysis.ts for
-                     metering, scope.ts for the scope's size and visibility (a
-                     separate OS window natively, a canvas on the web -- one
-                     component, ScopeControls, drives both), library.ts for the
-                     library, eq.ts for the equaliser (which also owns
-                     remembering the setting between sessions, in localStorage
-                     -- ten numbers and a flag, unlike the library), and
-                     server.ts for the music server.
+                     metering, visualizer.ts for the visualizer *host* -- its
+                     size, its visibility, which visual it draws and whether it
+                     has the whole screen (a separate OS window natively, a
+                     canvas on the web -- one component, VisualizerControls,
+                     drives both) -- library.ts for the library, eq.ts for the
+                     equaliser (which also owns remembering the setting between
+                     sessions, in localStorage -- ten numbers and a flag, unlike
+                     the library), and server.ts for the music server.
+                     visualizer.ts remembers the chosen visual the same way, and
+                     for the same reason: one short id, and it has to be
+                     readable while the first frame is being set up. It stores
+                     the `VisualKind::id` rather than an index or a name, and an
+                     id this build does not have falls back to the registry's
+                     default instead of quietly becoming something else.
                      eqFilter.ts is the one piece of DSP in this app that
                      exists twice: the worklet's copy of player-core's biquad
                      difference equation, deliberately holding nothing but that
@@ -351,13 +419,14 @@ app/                 React + TS + Vite. Same component tree renders in the
                      nothing -- including the goniometer's 45-degree rotation,
                      which is two lines of arithmetic and still lives in Rust
                      so the two shells cannot draw different figures.
-                     gapless.html, spectrum.html, loudness.html, scope.html,
+                     gapless.html, spectrum.html, loudness.html,
+                     visualizer.html,
                      library.html, eq.html, subsonic.html, remote.html and
                      browse.html
                      (with their *Smoke.ts) are dev-only harnesses -- served at
                      those paths, never bundled -- running the same checks as
                      the native gapless_smoke, spectrum_smoke, loudness_smoke,
-                     scope_smoke, library_smoke, eq_smoke, subsonic_smoke,
+                     visual_smoke, library_smoke, eq_smoke, subsonic_smoke,
                      remote_smoke and browse_smoke examples. subsonic.html
                      additionally checks the two things only a browser can fail
                      at, CORS and mixed content; remote.html plays a real server
@@ -366,9 +435,20 @@ app/                 React + TS + Vite. Same component tree renders in the
                      origin decodes under this app's COEP header. All three take
                      their server from what the panel stored, so there is nowhere
                      to type a password in any of them.
-                     webScope.ts drives the web build's scope canvas
+                     webVisualizer.ts drives the web build's visualizer canvas
                      (WasmRenderer, via rAF) -- the web-side counterpart of
-                     src-tauri's native redraw thread.
+                     src-tauri's native redraw thread, and since Phase 3 M1 the
+                     web half of everything the host owns that a browser does
+                     differently: the scene swap, the Fullscreen API on the
+                     canvas's *wrapper* (a fullscreen canvas would be stretched
+                     by the browser; a wrapper lets the canvas be resized to the
+                     screen and centred in it), and the resize on
+                     `fullscreenchange` -- driven by the event rather than by the
+                     call, since a user can also leave by Esc or the browser's
+                     own control. Hiding the visualizer stops the loop drawing
+                     there too, which is what the native redraw thread has done
+                     since M6 and what the web's Hide button did not do before
+                     M1.
 ```
 
 ## Why native rendering works the way it does
@@ -384,9 +464,9 @@ creation must happen on the main thread, so this is done unconditionally
 rather than "working by luck" on Linux/Windows only); only the redraw loop
 itself moves to a background thread.
 
-## The scope window's lifecycle (decided 2026-08-17)
+## The visualizer window's lifecycle (decided 2026-08-17)
 
-**The scope window belongs to the app, not to the window manager.** It is built
+**The visualizer window belongs to the app, not to the window manager.** It is built
 once at startup, hidden and shown on request, and destroyed only when the app
 itself goes away -- so it always outlives the renderer drawing into it.
 
@@ -405,18 +485,24 @@ pressing that button means anyway.
 
 What the decision costs, in `src-tauri/src/lib.rs`:
 
-- The scope window's `CloseRequested` is intercepted (`api.prevent_close()`) and
-  turned into a `hide()` -- the same thing `set_scope_visible(false)` does, so
-  its close button and the UI's toggle are one behaviour with two entry points.
-  `ScopeControls` polls `scope_state` once a second because of this: the window
-  is no longer only the UI's to change, and a panel whose button says "Hide"
-  about a window the user just closed takes two presses to undo.
+- The window's `CloseRequested` is intercepted (`api.prevent_close()`) and
+  turned into a `hide()` -- since Phase 3 M1 by calling
+  `set_visualizer_visible(false)` itself, so its close button and the UI's
+  toggle are one behaviour with two entry points rather than two that happen to
+  agree. `VisualizerControls` polls `visualizer_state` once a second because of
+  this: the window is no longer only the UI's to change, and a panel whose
+  button says "Hide" about a window the user just closed takes two presses to
+  undo. M1 added a second reason to poll -- fullscreen can be left by Esc, by
+  the window losing focus, or by the browser's own control, none of which the
+  panel is involved in.
 - The redraw thread asks the window whether it is visible and parks while it is
   not, so a hidden scope costs nothing rather than a GPU frame every 16ms.
   Measured: 281ms of process CPU per 3s with the scope up, 0ms with it hidden.
   Visibility is *asked of the window* rather than tracked beside it -- several
   parties hide it, and a mirror of all of them is a mirror that will eventually
-  disagree.
+  disagree. Fullscreen is asked the same way, for the same reason. (The web
+  build's draw loop skips its frames on the same condition since M1; before that
+  its Hide button flipped its own label and nothing else.)
 - Closing the **main** window ends the app, stopping and joining the redraw
   thread first so the renderer is dropped while its window still exists. This
   half is not optional once the scope window stops closing: Tauri exits when its
@@ -808,12 +894,27 @@ at the correct rate, re-verified with the same probe.
   instead of retrying forever. Verified live on Windows 2026-08-15 by
   resizing the window five times (496x519 -> 300 -> 700 -> 480 -> 900 ->
   520) and capturing it: zero `Outdated` warnings, live trace still drawing
-  at the new size. What's still missing is any *layout* response -- the
+  at the new size. ~~What's still missing is any *layout* response -- the
   scope is drawn in normalised device coordinates, so it stretches with the
-  window rather than holding a square aspect.
-- **The scope pairs the first two channels and calls them X and Y**
-  (`player-render`'s `draw_frame` takes `chunks_exact(2)` of whatever it is
-  given). Since M3 the samples it gets are in the *output* layout -- device
+  window rather than holding a square aspect.~~ **That half was already stale
+  when it was written and is now checked** (Phase 3 M1): M6's camera puts the
+  aspect ratio in the projection, so a wider viewport shows more scene rather
+  than a stretched figure. Fullscreen made it worth pinning rather than
+  believing -- both smokes now assert it at 2:1 and again at 1280x720, where
+  the figure scales with the *height* (measured 2.26x native / 2.24x web,
+  against the 2.25x the height ratio predicts).
+- ~~**The scope pairs the first two channels and calls them X and Y**~~ The
+  concern was real when written and the code has since answered it; M1 added
+  the checks that say so rather than leaving the entry to rot. A **mono**
+  output is drawn as a mix with no width -- the centre line, which is the
+  truthful picture of it -- rather than as consecutive samples of one channel
+  read as XY pairs; and a **5.1** output contributes its front pair, which is
+  what a stereo field means on a surround device, drawn to the same figure the
+  same audio makes in stereo (asserted within 8px in both smokes). The original
+  entry, for the record (and note its first clause was already out of date: the
+  de-interleaving moved into `trace::build`, which takes the layout's real
+  width, when M6 replaced the flat scope):
+  Since M3 the samples it gets are in the *output* layout -- device
   rate, device channel count -- which is a real improvement over the source
   layout, because the output shape is fixed for the session while the source
   shape changes with every track in a queue. Two loose ends remain: a mono
@@ -821,6 +922,31 @@ at the correct rate, re-verified with the same probe.
   which draws a diagonal smear rather than an error, and a device with more
   than two channels contributes only channels 0 and 1. Neither is worth
   fixing before the vectorscope work replaces this renderer.
+- **Fullscreen cannot be checked by this project's automation, on either
+  shell** (Phase 3 M1). It is the first feature here whose whole behaviour is a
+  window manager's or a browser's, and neither is reachable from the tools that
+  check everything else. On the web, the in-app automation browser refuses
+  `requestFullscreen` outright with `TypeError: Permissions check failed` -- the
+  pane hosts the page without `allow="fullscreen"` -- so what is verified there
+  is that the call is reached and that a refusal is *reported* rather than
+  swallowed (the panel says which, in as many words); that it then fills a real
+  screen is a person's observation in a real browser. Natively the same is true
+  for a different reason: the webview's own buttons are out of reach of both the
+  automation browser and UI Automation, which is the identical limit the
+  2026-08-17 lifecycle work ran into. Esc, the focus-loss exit and the shortcut
+  being *unregistered* afterwards are therefore user-confirmed rather than
+  asserted. The shortcut's registration failing is at least logged loudly, since
+  it is the one thing that would leave someone stuck.
+- **A global Esc is a strong thing to hold, and it is held for as long as
+  fullscreen lasts** (Phase 3 M1). While the desktop visualizer is fullscreen,
+  Esc belongs to this app process-wide -- that is what a global shortcut means,
+  and there is no narrower mechanism for a window with no webview. It is
+  registered on the way in and unregistered on every way out (the toggle, Esc
+  itself, focus loss, hiding the visualizer), and the focus-loss exit is what
+  keeps it from surviving into another application being frontmost. What is not
+  defended against is this process being killed between the two, which leaves
+  the registration with the OS until the process is reaped -- the usual shape of
+  this trade, and the reason the window is never left fullscreen and hidden.
 - **No WebGL2 fallback on the web build.** `player-render` on wasm32 only
   targets wgpu's WebGPU backend; a browser/GPU without WebGPU gets a clear
   error (`webScope.ts` checks `navigator.gpu` up front) rather than a

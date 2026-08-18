@@ -34,6 +34,11 @@ pollster = "1"
 
 player-core = { path = "../crates/player-core" }
 player-render = { path = "../crates/player-render" }
+# Phase 3 M1: Esc leaves fullscreen. The visualizer window has no webview, so
+# it receives no keyboard events at all -- a global shortcut is the only way a
+# key reaches it. Registered *only while fullscreen is active* (and dropped on
+# focus loss), so this never swallows Esc for the rest of the desktop.
+tauri-plugin-global-shortcut = "2.3.2"
 
 # Phase 2 M1: the Subsonic secret goes to the OS credential store rather than
 # beside the library index, because the token scheme means this client has to

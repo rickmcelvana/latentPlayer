@@ -19,6 +19,7 @@ import type {
   PlaylistResult,
   ServerTrack,
 } from "./serverTypes";
+import type { VisualInfo, VisualizerState } from "./visualizer";
 
 const AUDIO_FILTERS = [
   { name: "Audio", extensions: ["mp3", "flac", "wav", "aac", "m4a", "ogg"] },
@@ -182,29 +183,44 @@ export async function setEq(settings: EqSettings): Promise<EqState> {
   );
 }
 
-/// Geometry of the scope's own window. Mirrors `ScopeState` in
-/// src-tauri/src/lib.rs; see scope.ts for why this is an adapter rather than
-/// something components call directly.
-export interface ScopeState {
-  width: number;
-  height: number;
-  visible: boolean;
+
+/// The visualizer host as this shell reports it (Phase 3 M1). The shapes are
+/// visualizer.ts's, since both shells answer with the same ones -- see there
+/// for why this is an adapter rather than something components call directly.
+export async function visualizerState(): Promise<VisualizerState> {
+  return invoke<VisualizerState>("visualizer_state");
 }
 
-export async function scopeState(): Promise<ScopeState> {
-  return invoke<ScopeState>("scope_state");
+/// The gallery, out of `player_render::VisualKind` (decision 3) -- this shell
+/// keeps no list of its own and neither does the UI.
+export async function visualCatalog(): Promise<VisualInfo[]> {
+  return invoke<VisualInfo[]>("visual_catalog");
 }
 
-/// Resizes the scope window. The renderer picks the new size up from its own
-/// size poll, so nothing here has to tell it.
-export async function setScopeSize(width: number, height: number): Promise<void> {
-  return invoke("set_scope_size", { width, height });
+/// Resizes the visualizer window. The renderer picks the new size up from its
+/// own size poll, so nothing here has to tell it.
+export async function setVisualizerSize(width: number, height: number): Promise<void> {
+  return invoke("set_visualizer_size", { width, height });
 }
 
-/// Shows or hides the scope window (hidden, not closed -- the renderer's
+/// Shows or hides the visualizer window (hidden, not closed -- the renderer's
 /// surface is built from its handle).
-export async function setScopeVisible(visible: boolean): Promise<void> {
-  return invoke("set_scope_visible", { visible });
+export async function setVisualizerVisible(visible: boolean): Promise<void> {
+  return invoke("set_visualizer_visible", { visible });
+}
+
+/// Borderless fullscreen of that same window. The desktop shell also arranges
+/// the ways back out -- Esc as a global shortcut for as long as fullscreen
+/// lasts, and an exit when the window loses focus -- because a webview-less
+/// window is delivered no key events of its own.
+export async function setVisualizerFullscreen(fullscreen: boolean): Promise<void> {
+  return invoke("set_visualizer_fullscreen", { fullscreen });
+}
+
+/// Chooses the visual. The redraw thread applies it between two frames; this
+/// only leaves the request where that thread will find it.
+export async function setVisual(id: string): Promise<void> {
+  return invoke("set_visual", { id });
 }
 
 /// The music server's state (Phase 2 M1). Mirrors `ServerState` in

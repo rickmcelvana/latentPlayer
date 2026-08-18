@@ -318,3 +318,94 @@ product's face, and "the pixels are correct" is the floor, not the bar.
 - [MDN Fullscreen API](https://developer.mozilla.org/en-US/docs/Web/API/Fullscreen_API)
   -- the web half: element fullscreen, `fullscreenchange`, Esc handled by the
   browser.
+
+## M1 -- The visualizer host: built, awaiting live confirmation
+
+The seam every other milestone in this phase plugs into, plus the phase's one
+hard requirement. What landed:
+
+**The seam, once, in `player-render`** (`visual.rs`). `Visual` is what `Scene`
+already was, named: `resize` and `draw(gpu, target, frame) -> CommandBuffer`,
+object-safe so the renderer can hold it boxed. `VisualKind` is the registry --
+id, name, description, `ALL`, `DEFAULT`, `from_id` -- and it is the only list of
+visuals in the project: the gallery UI, the Tauri commands, the wasm bindings
+and both smokes read it, so nothing can offer a visual another shell does not
+have. `VisualFrame` is the feed (samples, their channel layout, their rate),
+assembled by each shell once per frame out of the tap. `Renderer` now holds a
+`BoxedVisual` and gained `set_visual`/`visual`; `OffscreenRenderer` gained the
+same, which is what lets the check exercise a *switch* rather than only a fresh
+renderer. The vectorscope moved to `visuals/vectorscope.rs` behind the trait --
+moved, not rewritten; its camera, extrusion and shader are untouched, and
+`attachments.rs` now holds the depth/MSAA formats that are the host's business
+rather than each visual's.
+
+One thing the seam forced into the open: `BoxedVisual` is `Send` natively and
+plain on wasm. Natively the renderer is moved onto its own redraw thread, so the
+box must be `Send`; on wasm nothing in wgpu is `Send` and requiring it does not
+compile. Written as two `cfg`'d aliases with the reason beside them, rather than
+discovered by whoever adds the second visual.
+
+**Both shells wired to it, with their plumbing intact.** Natively: the same one
+window, the same redraw thread, the same hide-not-close lifecycle. Selection
+arrives as a *request* (`VisualizerWindow::requested`) that the redraw thread
+applies between two frames, because that thread owns the renderer and a command
+handler building GPU objects for a device it does not drive is a bug waiting for
+a driver to notice. The commands are `visualizer_state`,
+`set_visualizer_size/visible/fullscreen`, `set_visual` and `visual_catalog` --
+state as one struct, for the reason `TransportState` is one struct. On the web,
+`webVisualizer.ts` keeps its canvas and rAF loop and gained the scene swap, the
+Fullscreen API and the visibility skip; `visualizer.ts` is the adapter both
+shells meet in, and `VisualizerControls` is one component driving both.
+
+**Fullscreen, on both shells, exactly as decision 4 designed it.** Web: the
+Fullscreen API on the canvas's *wrapper* -- a bare canvas would be stretched by
+the browser, where a wrapper lets the canvas be resized to the screen and
+centred -- with the resize driven by `fullscreenchange` rather than by the call,
+since Esc and the browser's own control are three of the four ways out. Native:
+`set_fullscreen` on the existing window, Esc as a global shortcut registered
+only while fullscreen is active, and `Focused(false)` leaving fullscreen, which
+does two jobs at once (alt-tab gives the screen back, and the global Esc can
+never be registered while another app is frontmost). Hiding the visualizer gives
+the screen back first, so "fullscreen and hidden" is not a state anything can
+get into.
+
+**Two things found while building, fixed rather than noted.** The web build's
+Hide button flipped its own label and nothing else -- the canvas kept drawing at
+60Hz -- where the native redraw thread has parked on that condition since M6;
+visibility is one of the four things the host owns, so the web loop now skips
+its frames too. And a refused fullscreen was being swallowed by the same
+`.catch(() => {})` the other buttons use; a refusal is the one failure here a
+person can act on, so the panel says which.
+
+**Two of ARCHITECTURE.md's "Known gaps" turned out to be stale rather than
+open** -- the ones this milestone was planned to fix. M6's camera already put
+the aspect ratio in the projection, and `trace::build` already de-interleaves by
+the layout's real width. Both entries described the pre-M6 renderer. Fullscreen
+is what makes them worth *pinning* rather than believing, so instead of a fix
+they got checks: the figure at 1280x720 scales with the height (2.26x native,
+2.24x web, against the 2.25x predicted), a mono output draws up the centre line,
+and a 5.1 output draws its front pair to within 8px of the same audio in stereo.
+The entries are struck through with the evidence, not quietly deleted.
+
+**Verified: 14/14 natively** (`cargo run -p player-render --example
+visual_smoke`) **and 17/17 in a real browser** at `/visualizer.html` -- the same
+14 claims plus three the web half can make on its own (the registry is named and
+described, the default is one of its entries, and a switched renderer reports
+the visual it was switched to). The figures agree across the shells: 196px
+against 195px for the mono figure, 2.26x against 2.24x for the 16:9 scaling, and
+a switch byte-identical to a freshly built renderer on both (0 of 409,600 bytes
+differ). Also green: `cargo fmt --check`, `cargo clippy --workspace --all-targets
+-D warnings`, the full test suite (234 tests, including 5 new ones on the
+registry and the frame), `npm run wasm`, `npx tsc -b`, `npm run build`.
+
+**What is not verified, and why** (see ARCHITECTURE.md's "Known gaps" for the
+standing entries): fullscreen itself, on either shell. The in-app automation
+browser refuses `requestFullscreen` outright -- `TypeError: Permissions check
+failed`, because the pane hosts the page without `allow="fullscreen"` -- so what
+was checked there is that the call is reached and that the refusal is reported
+rather than swallowed. Natively the webview's own buttons are out of reach of
+both the automation browser and UI Automation, the identical limit the
+2026-08-17 lifecycle work ran into. So **fullscreen on both shells, Esc, the
+focus-loss exit and the gallery under real music are the live confirmation this
+milestone is waiting on**, and they are exactly what decision 4 said to check
+first.
