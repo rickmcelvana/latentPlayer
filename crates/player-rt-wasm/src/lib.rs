@@ -16,7 +16,7 @@ use player_core::{
     adapt_channels, read_tags, ChannelShape, InMemorySource, Meters, StreamingDecoder, TrackTags,
     GONIOMETER_POINTS,
 };
-use player_render::{VisualFrame, VisualKind};
+use player_render::{GainSetting, VisualFrame, VisualKind};
 use wasm_bindgen::prelude::*;
 use web_sys::HtmlCanvasElement;
 
@@ -536,22 +536,70 @@ impl WasmRenderer {
         self.inner.visual().id().to_string()
     }
 
+    /// Sets the display gain by id (`GainSetting::id`).
+    #[wasm_bindgen(js_name = setGain)]
+    pub fn set_gain(&mut self, gain: &str) -> Result<(), JsValue> {
+        let setting = GainSetting::from_id(gain)
+            .ok_or_else(|| JsValue::from_str(&format!("no gain setting called {gain:?}")))?;
+        self.inner.set_gain(setting);
+        Ok(())
+    }
+
+    /// The id of the display gain in effect.
+    #[wasm_bindgen(js_name = currentGain)]
+    pub fn current_gain(&self) -> String {
+        self.inner.gain().id().to_string()
+    }
+
     /// Draws one frame from the host's feed.
     ///
     /// `channels` is the interleaving width of `samples` -- the output's, since
     /// that is what the tap holds. Passing it rather than assuming stereo is
     /// M6's fix for a device that isn't; `sample_rate` is what makes the window
-    /// a duration rather than a count.
+    /// a duration rather than a count; `elapsed_seconds` is what anything that
+    /// moves over time is timed from, the automatic gain's release included.
     pub fn draw_frame(
         &mut self,
         samples: &[f32],
         channels: u16,
         sample_rate: u32,
+        elapsed_seconds: f32,
     ) -> Result<(), JsValue> {
         self.inner
-            .draw_frame(&VisualFrame::new(samples, channels, sample_rate))
+            .draw_frame(&VisualFrame::new(
+                samples,
+                channels,
+                sample_rate,
+                elapsed_seconds,
+            ))
             .map_err(|e| JsValue::from_str(&e.to_string()))
     }
+}
+
+/// The display-gain steps, as JSON: `[{id, label, isMeasurement}]`.
+///
+/// Out of `player_render::GainSetting`, for the reason the visual catalog comes
+/// out of `VisualKind`: one list, so the two shells cannot offer different
+/// gains or disagree about which of them is still a measurement.
+#[wasm_bindgen(js_name = gainCatalog)]
+pub fn gain_catalog() -> String {
+    let entries: Vec<serde_json::Value> = GainSetting::ALL
+        .iter()
+        .map(|setting| {
+            serde_json::json!({
+                "id": setting.id(),
+                "label": setting.label(),
+                "isMeasurement": setting.is_measurement(),
+            })
+        })
+        .collect();
+    serde_json::Value::Array(entries).to_string()
+}
+
+/// The id of the gain the visualizer opens at.
+#[wasm_bindgen(js_name = defaultGain)]
+pub fn default_gain() -> String {
+    GainSetting::DEFAULT.id().to_string()
 }
 
 /// The gallery, as JSON: `[{id, name, description}]`.

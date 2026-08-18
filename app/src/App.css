@@ -361,6 +361,7 @@ input[type="range"] {
   font-size: 11px;
 
   .gallery,
+  .gain,
   .host {
     display: flex;
     align-items: center;
@@ -393,8 +394,15 @@ input[type="range"] {
   /* The size currently in effect, which the visualizer window may also have
      been dragged to, and the visual currently selected. */
   button.size.current,
-  button.visual.current {
+  button.visual.current,
+  button.step.current {
     border-color: var(--accent);
+  }
+
+  /* Not a warning, a statement of fact -- so it reads as a label rather than
+     as something having gone wrong. */
+  .hint.scaled {
+    font-style: italic;
   }
 }
 

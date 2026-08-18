@@ -54,15 +54,47 @@ pub struct VisualFrame<'a> {
     /// duration, so a visual means the same thing on a 44.1kHz device and a
     /// 96kHz one.
     pub sample_rate: u32,
+    /// Seconds since the previous frame, as the shell measures it (its redraw
+    /// interval natively, the gap between animation callbacks on the web).
+    ///
+    /// Anything that moves over time needs this, and it has to come from the
+    /// shell: there is no clock in this crate that works on both targets
+    /// (`Instant::now` does not exist on wasm). Used by [`GainSetting::Auto`]'s
+    /// release below, and by every animated visual after M1.
+    pub elapsed_seconds: f32,
+    /// How much to magnify the signal for display, 1.0 being unity.
+    ///
+    /// **Not analysis, and the one field a shell does not fill in**: the host
+    /// resolves it per frame from the chosen [`GainSetting`] and overwrites
+    /// whatever was here. It is in the frame rather than beside it so one
+    /// control means the same thing to every visual -- amplitudes drawn this
+    /// much larger -- and so a visual never has to ask the host anything.
+    pub gain: f32,
 }
 
 impl<'a> VisualFrame<'a> {
-    pub fn new(samples: &'a [f32], channels: u16, sample_rate: u32) -> Self {
+    /// A frame at unity gain. The host replaces [`Self::gain`] before any visual
+    /// sees it, so a shell assembling one never sets it.
+    pub fn new(samples: &'a [f32], channels: u16, sample_rate: u32, elapsed_seconds: f32) -> Self {
         Self {
             samples,
             channels,
             sample_rate,
+            elapsed_seconds,
+            gain: 1.0,
         }
+    }
+
+    /// The loudest sample in the frame, as an amplitude.
+    ///
+    /// A summary of the data the frame already carries rather than a
+    /// measurement of its own -- which is why the *host* may compute it (for
+    /// auto gain) without breaking decision 2. It cannot disagree with the
+    /// meters, because it describes exactly the samples being drawn.
+    pub fn peak(&self) -> f32 {
+        self.samples
+            .iter()
+            .fold(0.0f32, |loudest, sample| loudest.max(sample.abs()))
     }
 
     /// How much audio this frame holds, in frames rather than in numbers --
@@ -175,6 +207,9 @@ impl VisualKind {
 mod tests {
     use super::*;
 
+    /// A 60Hz frame, which is what both shells aim for.
+    const FRAME: f32 = 1.0 / 60.0;
+
     #[test]
     fn every_kind_round_trips_through_its_id() {
         for kind in VisualKind::ALL {
@@ -215,13 +250,24 @@ mod tests {
     }
 
     #[test]
+    fn a_frame_starts_at_unity_gain_and_reports_its_own_peak() {
+        // Unity because the *host* fills gain in (see `Renderer::draw_frame`);
+        // a shell that set it would be a second opinion about a display setting.
+        let quiet = [0.1f32, -0.25, 0.05];
+        let frame = VisualFrame::new(&quiet, 1, 48_000, FRAME);
+        assert_eq!(frame.gain, 1.0);
+        assert_eq!(frame.peak(), 0.25);
+        assert_eq!(VisualFrame::new(&[], 2, 48_000, FRAME).peak(), 0.0);
+    }
+
+    #[test]
     fn a_frame_reads_its_length_in_time_rather_than_in_numbers() {
         let stereo = [0.0f32; 8];
-        assert_eq!(VisualFrame::new(&stereo, 2, 48_000).frames(), 4);
-        assert_eq!(VisualFrame::new(&stereo, 1, 48_000).frames(), 8);
+        assert_eq!(VisualFrame::new(&stereo, 2, 48_000, FRAME).frames(), 4);
+        assert_eq!(VisualFrame::new(&stereo, 1, 48_000, FRAME).frames(), 8);
         // A layout of zero channels is nonsense no caller should be able to
         // divide by.
-        assert_eq!(VisualFrame::new(&stereo, 0, 48_000).frames(), 8);
-        assert_eq!(VisualFrame::new(&[], 2, 48_000).frames(), 0);
+        assert_eq!(VisualFrame::new(&stereo, 0, 48_000, FRAME).frames(), 8);
+        assert_eq!(VisualFrame::new(&[], 2, 48_000, FRAME).frames(), 0);
     }
 }

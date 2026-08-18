@@ -475,3 +475,45 @@ never shrinks the figure, that the ribbon's length no longer varies, that the
 uniform carries the numbers the fit was computed from, and that a degenerate
 viewport still yields a finite camera). The Esc fix needs a live re-run to
 confirm, since nothing here can press a key at a webview-less window.
+
+### Display gain (user decision, 2026-08-18)
+
+The arithmetic above left a product decision rather than an implementation one,
+and it went to the user: **manual gain plus an opt-in automatic mode**. Both
+live in `player-render::gain`, not in either shell, because the automatic mode
+has state -- and two copies of a state machine is two shells whose scopes
+visibly disagree about the same music.
+
+- **x1, x2, x4, x8.** A multiplier rather than decibels, because what it
+  multiplies is a picture. Unity is the default: someone who wants the figure
+  larger can say so, where someone reading levels should never have to discover
+  that the display was scaled.
+- **Auto** follows a recent peak, aiming it at 90% of the frame, with **instant
+  attack and a two-second release**. The asymmetry is the part that matters: a
+  scope that eased *into* a loud passage would clip its own display for as long
+  as the easing took, so the figure would be wrong rather than merely late. The
+  release is timed in *seconds*, from a new `elapsed_seconds` on the frame, so a
+  60Hz redraw thread and a browser's animation callbacks recover identically --
+  checked directly, at 60Hz against 144Hz.
+- **The panel says when it stops being a measurement.** Only unity is one, which
+  is `GainSetting::is_measurement`'s whole job: which settings those are is
+  Rust's to say, not a component's. At anything else the row reads "display only
+  -- not a level reading".
+- **The frame stays pinned to unity full scale.** Gain magnifies the trace
+  inside it and is deliberately *not* part of the camera fit -- a camera that
+  refitted itself to the gained figure would leave the picture identical and the
+  control doing nothing.
+
+One thing worth recording about checking it: the figure's bounding box is not
+linear in gain, and the first version of the check asserted that it was. The
+ribbon is extruded through space and viewed from one side, so even a signal of
+no amplitude draws a slanted line; the box is `slant + amplitude * gain`,
+measured at 46px of slant and 18px of amplitude, which predicts 64, 82 and 118px
+at x1, x2 and x4 -- exactly what came back. So what is checked is the part gain
+controls: the *increment* over unity, which scales at 3.00x native and 2.91x web
+against the 3x it should.
+
+Verified: **20/20** natively and **24/24** in a real browser, 249 tests, clippy
+and fmt clean on both targets, and the whole loop driven live in the browser --
+the gain applies, persists to localStorage, and the "display only" note appears
+and disappears with the setting.

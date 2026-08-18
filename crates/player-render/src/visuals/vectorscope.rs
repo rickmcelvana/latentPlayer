@@ -57,10 +57,15 @@ const FILL: f32 = 0.9;
 #[derive(Copy, Clone, bytemuck::Pod, bytemuck::Zeroable)]
 struct CameraUniform {
     view_proj: [[f32; 4]; 4],
-    /// `[figure_scale, depth, 0, 0]`. The world transform lives in the shader
-    /// but its two numbers come from here, because the camera is *fitted* to
-    /// them -- a shader constant and a Rust constant drifting apart would be a
-    /// camera framing a scene of a different size than the one drawn.
+    /// `[figure_scale, depth, gain, 0]`. The world transform lives in the shader
+    /// but its numbers come from here, because the camera is *fitted* to the
+    /// first two -- a shader constant and a Rust constant drifting apart would be
+    /// a camera framing a scene of a different size than the one drawn.
+    ///
+    /// `gain` is deliberately *not* part of the fit. That is the whole point of
+    /// it: the frame stays pinned to unity full scale, and gain magnifies the
+    /// trace inside that frame. A camera that refitted itself to the gained
+    /// figure would leave the picture identical and the control useless.
     figure: [f32; 4],
 }
 
@@ -77,6 +82,10 @@ pub struct Vectorscope {
     vertices: Vec<Vertex>,
     width: u32,
     height: u32,
+    /// The gain the uniform currently holds, so an unchanged one is not
+    /// rewritten. `f32::NAN` would compare unequal forever; 1.0 is what the
+    /// buffer is built with.
+    gain: f32,
 }
 
 impl Vectorscope {
@@ -93,7 +102,7 @@ impl Vectorscope {
 
         let camera_buffer = device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
             label: Some("vectorscope-camera"),
-            contents: bytemuck::bytes_of(&camera_uniform(width, height)),
+            contents: bytemuck::bytes_of(&camera_uniform(width, height, 1.0)),
             usage: wgpu::BufferUsages::UNIFORM | wgpu::BufferUsages::COPY_DST,
         });
 
@@ -182,7 +191,7 @@ impl Vectorscope {
         });
 
         let (msaa_view, depth_view) = targets(device, format, width, height);
-        let scene = Self {
+        let mut scene = Self {
             pipeline,
             vertex_buffer,
             camera_buffer,
@@ -192,16 +201,27 @@ impl Vectorscope {
             vertices: Vec::with_capacity(TRACE_POINTS),
             width,
             height,
+            gain: 1.0,
         };
-        scene.write_camera(queue);
+        scene.write_camera(queue, 1.0);
         scene
     }
 
-    fn write_camera(&self, queue: &wgpu::Queue) {
+    /// Writes the camera and the world transform, if either changed.
+    ///
+    /// Gain can change every frame (the automatic mode follows the music), so
+    /// this is checked per frame rather than only on resize -- but it is eighty
+    /// bytes, and skipping the unchanged case keeps a 60Hz redraw loop from
+    /// queueing a write it does not need.
+    fn write_camera(&mut self, queue: &wgpu::Queue, gain: f32) {
+        if gain == self.gain {
+            return;
+        }
+        self.gain = gain;
         queue.write_buffer(
             &self.camera_buffer,
             0,
-            bytemuck::bytes_of(&camera_uniform(self.width, self.height)),
+            bytemuck::bytes_of(&camera_uniform(self.width, self.height, gain)),
         );
     }
 }
@@ -223,8 +243,12 @@ impl Visual for Vectorscope {
         self.msaa_view = msaa_view;
         self.depth_view = depth_view;
         // The aspect ratio is in the projection, so a resize that skipped this
-        // would stretch the figure instead of showing more of the scene.
-        self.write_camera(queue);
+        // would stretch the figure instead of showing more of the scene. Forced,
+        // since the gain has not changed and `write_camera` would otherwise
+        // decline to write the new projection.
+        let gain = self.gain;
+        self.gain = f32::NAN;
+        self.write_camera(queue, gain);
     }
 
     /// Draws one frame of the extruded figure into `target`.
@@ -239,6 +263,7 @@ impl Visual for Vectorscope {
         frame: &VisualFrame,
     ) -> wgpu::CommandBuffer {
         let Gpu { device, queue, .. } = *gpu;
+        self.write_camera(queue, frame.gain);
         trace::build(frame.samples, frame.channels, &mut self.vertices);
         if !self.vertices.is_empty() {
             queue.write_buffer(&self.vertex_buffer, 0, bytemuck::cast_slice(&self.vertices));
@@ -290,11 +315,11 @@ impl Visual for Vectorscope {
 
 /// The camera and the world transform for a viewport of this size -- written
 /// together because the first is fitted to the second.
-fn camera_uniform(width: u32, height: u32) -> CameraUniform {
+fn camera_uniform(width: u32, height: u32, gain: f32) -> CameraUniform {
     let aspect = width.max(1) as f32 / height.max(1) as f32;
     CameraUniform {
         view_proj: view_projection(width, height).as_array(),
-        figure: [FIGURE_SCALE, depth_for(aspect), 0.0, 0.0],
+        figure: [FIGURE_SCALE, depth_for(aspect), gain, 0.0],
     }
 }
 
@@ -511,9 +536,15 @@ mod tests {
         // is the whole reason they are not shader constants: a copy in the WGSL
         // that drifted from the Rust would frame a scene of a different size
         // than the one being drawn, and nothing would report it.
-        let uniform = camera_uniform(1280, 720);
+        let uniform = camera_uniform(1280, 720, 1.0);
         assert_eq!(uniform.figure[0], FIGURE_SCALE);
         assert_eq!(uniform.figure[1], depth_for(1280.0 / 720.0));
+        assert_eq!(uniform.figure[2], 1.0);
+        // And gain rides along without touching the projection, which is what
+        // keeps the frame pinned to unity while the trace inside it grows.
+        let gained = camera_uniform(1280, 720, 4.0);
+        assert_eq!(gained.figure[2], 4.0);
+        assert_eq!(gained.view_proj, uniform.view_proj);
     }
 
     #[test]

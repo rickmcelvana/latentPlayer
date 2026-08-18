@@ -9,12 +9,14 @@
 // only what a browser does differently.
 import init, {
   WasmRenderer,
+  defaultGain,
   defaultVisual,
+  gainCatalog,
   visualCatalog,
   visualWindowSamples,
 } from "./wasm/player_rt_wasm.js";
 import { outputChannels, outputSampleRate, scopeWindow } from "./playerEngine";
-import type { VisualInfo } from "./visualizer";
+import type { GainInfo, VisualInfo } from "./visualizer";
 
 let renderer: WasmRenderer | null = null;
 let rafHandle: number | null = null;
@@ -31,6 +33,13 @@ let sizeBeforeFullscreen: { width: number; height: number } | null = null;
 /// What the gallery last asked for. Held so the id survives a renderer that has
 /// not been created yet -- the panel can mount before WebGPU has answered.
 let selected = "";
+/// The display gain last asked for, held for the same reason as `selected`.
+let selectedGain = "";
+/// When the previous frame was drawn, for the frame's `elapsed_seconds`. The
+/// automatic gain's release is timed from this, so it must be real elapsed time
+/// and not an assumed 60Hz -- a browser throttles animation callbacks whenever
+/// it feels like it.
+let lastFrame = 0;
 /// Whether the visualizer is up. The rAF loop keeps ticking while this is
 /// false but draws nothing, which is the browser's version of the native
 /// redraw thread parking on a hidden window: cheap, and it resumes on the very
@@ -57,7 +66,10 @@ function drawLoop(): void {
     const channels = outputChannels();
     const rate = outputSampleRate();
     const wanted = visualWindowSamples(rate, channels);
-    renderer.draw_frame(scopeWindow(wanted), channels, rate);
+    const now = performance.now();
+    const elapsed = lastFrame === 0 ? 1 / 60 : (now - lastFrame) / 1000;
+    lastFrame = now;
+    renderer.draw_frame(scopeWindow(wanted), channels, rate, elapsed);
   } catch (e) {
     // Found live (2026-08-15): a single thrown frame (e.g. a transient
     // Outdated/Occluded surface -- see Renderer::draw_frame's own comment)
@@ -106,6 +118,7 @@ export async function startVisualizer(
   }
   // The wrapper, if the canvas has one -- see `fullscreenTarget` above. A
   // canvas with no wrapper is still fullscreen-able, just stretched.
+  if (selectedGain) renderer.setGain(selectedGain);
   fullscreenTarget = canvas.parentElement ?? canvas;
   document.addEventListener("fullscreenchange", onFullscreenChange);
   if (rafHandle === null) rafHandle = requestAnimationFrame(drawLoop);
@@ -113,6 +126,25 @@ export async function startVisualizer(
 
 export function resizeVisualizer(width: number, height: number): void {
   renderer?.resize(width, height);
+}
+
+/// The display-gain steps, out of the same Rust registry the desktop shell
+/// reads.
+export async function gainCatalogWeb(): Promise<GainInfo[]> {
+  wasmReady ??= init();
+  await wasmReady;
+  return JSON.parse(gainCatalog()) as GainInfo[];
+}
+
+/// Sets the display gain. A number in the next frame, not a rebuild.
+export function setGainWeb(id: string): void {
+  selectedGain = id;
+  renderer?.setGain(id);
+}
+
+/// The gain in effect (or the one asked for, if the renderer is still starting).
+export function currentGain(): string {
+  return renderer?.currentGain() ?? selectedGain ?? defaultGain();
 }
 
 /// Swaps the scene. The canvas, the surface and the rAF loop are untouched --

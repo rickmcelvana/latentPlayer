@@ -17,17 +17,29 @@
 
 import init, {
   WasmRenderer,
+  defaultGain,
   defaultVisual,
+  gainCatalog,
   visualCatalog,
   visualWindowSamples,
 } from "./wasm/player_rt_wasm.js";
 
 const RATE = 48_000;
 
+/// A 60Hz frame, matching the native example -- the frame's `elapsed_seconds`,
+/// which the automatic gain's release is timed from.
+const FRAME_SECONDS = 1 / 60;
+
 interface VisualInfo {
   id: string;
   name: string;
   description: string;
+}
+
+interface GainInfo {
+  id: string;
+  label: string;
+  isMeasurement: boolean;
 }
 
 const out = document.getElementById("out") as HTMLPreElement;
@@ -146,7 +158,7 @@ async function checkTheHostContract(entry: VisualInfo): Promise<void> {
   const renderer = await WasmRenderer.create(surface, surface.width, surface.height, entry.id);
 
   const empty = new Float32Array(0);
-  renderer.draw_frame(empty, 2, RATE);
+  renderer.draw_frame(empty, 2, RATE, FRAME_SECONDS);
   check(
     "an empty feed still renders a frame",
     pixels(surface).length === surface.width * surface.height * 4,
@@ -154,7 +166,7 @@ async function checkTheHostContract(entry: VisualInfo): Promise<void> {
   );
 
   const signal = tone(220, 0.3);
-  renderer.draw_frame(signal, 2, RATE);
+  renderer.draw_frame(signal, 2, RATE, FRAME_SECONDS);
   const lit = measure(surface);
   check("audio draws something", lit.lit > 100, `${lit.lit} lit pixels`);
   const fresh = pixels(surface);
@@ -167,7 +179,7 @@ async function checkTheHostContract(entry: VisualInfo): Promise<void> {
   const other = extraCanvas(320, 320);
   const switched = await WasmRenderer.create(other, other.width, other.height, defaultVisual());
   switched.setVisual(entry.id);
-  switched.draw_frame(signal, 2, RATE);
+  switched.draw_frame(signal, 2, RATE, FRAME_SECONDS);
   const after = pixels(other);
   let differing = 0;
   for (let i = 0; i < after.length; i++) if (after[i] !== fresh[i]) differing += 1;
@@ -185,7 +197,7 @@ async function checkTheHostContract(entry: VisualInfo): Promise<void> {
   // Resizing rebuilds whatever the visual keeps that depends on the viewport.
   surface.width = 640;
   renderer.resize(surface.width, surface.height);
-  renderer.draw_frame(signal, 2, RATE);
+  renderer.draw_frame(signal, 2, RATE, FRAME_SECONDS);
   check(
     "a different viewport renders rather than failing",
     measure(surface).lit > 100,
@@ -203,7 +215,7 @@ async function checkTheVectorscope(): Promise<void> {
   // Silence first: the scope has to draw *nothing* rather than a dot at the
   // origin, which is what a trace built from an empty window would look like
   // if it padded instead of stopping.
-  renderer.draw_frame(new Float32Array(0), 2, RATE);
+  renderer.draw_frame(new Float32Array(0), 2, RATE, FRAME_SECONDS);
   const idle = measure();
   check("nothing played draws nothing", idle.lit === 0, `${idle.lit} lit pixels`);
 
@@ -211,7 +223,7 @@ async function checkTheVectorscope(): Promise<void> {
   // the centre. Not perfectly vertical -- the camera is off to one side and
   // the extrusion recedes, which is the point of the third axis -- but clearly
   // taller than wide.
-  renderer.draw_frame(tone(220, 1), 2, RATE);
+  renderer.draw_frame(tone(220, 1), 2, RATE, FRAME_SECONDS);
   const figure = measure();
   const width = figure.maxX - figure.minX;
   const height = figure.maxY - figure.minY;
@@ -237,7 +249,7 @@ async function checkTheVectorscope(): Promise<void> {
   // An inverted pair has no mid component: the same audio, rotated onto the
   // other axis. This is what catches a scope wired to raw L/R rather than the
   // goniometer's axes -- that one draws the same figure for both signals.
-  renderer.draw_frame(tone(220, -1), 2, RATE);
+  renderer.draw_frame(tone(220, -1), 2, RATE, FRAME_SECONDS);
   const flat = measure();
   check(
     "an inverted channel lays the figure flat",
@@ -248,7 +260,7 @@ async function checkTheVectorscope(): Promise<void> {
   // A quiet passage draws a smaller figure than a loud one. Easy to lose: a
   // scope that normalises its input looks livelier and stops being a
   // measurement.
-  renderer.draw_frame(tone(220, 1, 0.08), 2, RATE);
+  renderer.draw_frame(tone(220, 1, 0.08), 2, RATE, FRAME_SECONDS);
   const quiet = measure();
   check(
     "level is not normalised away",
@@ -261,7 +273,7 @@ async function checkTheVectorscope(): Promise<void> {
   const stereo = tone(220, 1);
   const single = new Float32Array(stereo.length / 2);
   for (let i = 0; i < single.length; i++) single[i] = stereo[i * 2];
-  renderer.draw_frame(single, 1, RATE);
+  renderer.draw_frame(single, 1, RATE, FRAME_SECONDS);
   check("a one-channel output still draws", measure().lit > 500, `${measure().lit} lit pixels`);
 
   // A device with more than two channels contributes its front pair, which is
@@ -273,7 +285,7 @@ async function checkTheVectorscope(): Promise<void> {
     surround[n * 6] = stereo[n * 2];
     surround[n * 6 + 1] = stereo[n * 2 + 1];
   }
-  renderer.draw_frame(surround, 6, RATE);
+  renderer.draw_frame(surround, 6, RATE, FRAME_SECONDS);
   const six = measure();
   check(
     "a 5.1 output draws its front pair, not a smear",
@@ -289,7 +301,7 @@ async function checkTheVectorscope(): Promise<void> {
   // Windows in Phase 0.
   canvas.width = 640;
   renderer.resize(canvas.width, canvas.height);
-  renderer.draw_frame(tone(220, 1), 2, RATE);
+  renderer.draw_frame(tone(220, 1), 2, RATE, FRAME_SECONDS);
   const wide = measure();
   check(
     "a wider viewport shows more scene rather than a stretched figure",
@@ -303,7 +315,7 @@ async function checkTheVectorscope(): Promise<void> {
   canvas.width = 1280;
   canvas.height = 720;
   renderer.resize(canvas.width, canvas.height);
-  renderer.draw_frame(tone(220, 1), 2, RATE);
+  renderer.draw_frame(tone(220, 1), 2, RATE, FRAME_SECONDS);
   const full = measure();
   const fullHeight = full.maxY - full.minY;
   check(
@@ -316,7 +328,106 @@ async function checkTheVectorscope(): Promise<void> {
   canvas.width = 320;
   canvas.height = 320;
   renderer.resize(canvas.width, canvas.height);
-  renderer.draw_frame(tone(220, 1), 2, RATE);
+  renderer.draw_frame(tone(220, 1), 2, RATE, FRAME_SECONDS);
+}
+
+
+/// Display gain (added 2026-08-18, after the first live fullscreen run) -- the
+/// same claims the native example makes, in the same order.
+async function checkDisplayGain(): Promise<void> {
+  log("\nDisplay gain:");
+  const surface = extraCanvas(320, 320);
+  const renderer = await WasmRenderer.create(
+    surface,
+    surface.width,
+    surface.height,
+    "vectorscope",
+  );
+
+  const catalog = JSON.parse(gainCatalog()) as GainInfo[];
+  check(
+    "the gain steps are named, unique, and only unity is a measurement",
+    catalog.length > 0 &&
+      catalog.every((entry) => entry.id && entry.label) &&
+      new Set(catalog.map((entry) => entry.id)).size === catalog.length &&
+      catalog.filter((entry) => entry.isMeasurement).length === 1 &&
+      catalog.find((entry) => entry.isMeasurement)?.id === defaultGain(),
+    `${catalog.map((entry) => entry.label).join(", ")}; measurement: ${defaultGain()}`,
+  );
+
+  // A quiet passage: an eighth of full scale, roughly -18 dBFS, which is the
+  // case that started all this.
+  const quiet = tone(220, 1, 0.125);
+  renderer.draw_frame(quiet, 2, RATE, FRAME_SECONDS);
+  const unity = measure(surface);
+  const unityHeight = unity.maxY - unity.minY;
+
+  renderer.setGain("2");
+  renderer.draw_frame(quiet, 2, RATE, FRAME_SECONDS);
+  const doubled = measure(surface);
+  const doubledHeight = doubled.maxY - doubled.minY;
+
+  renderer.setGain("4");
+  renderer.draw_frame(quiet, 2, RATE, FRAME_SECONDS);
+  const quadrupled = measure(surface);
+  const quadrupledHeight = quadrupled.maxY - quadrupled.minY;
+
+  // The bounding box is `slant + amplitude * gain` -- the ribbon is extruded
+  // through space and viewed from one side, so even a signal of no amplitude
+  // draws a slanted line. What gain controls is the increment over unity, and
+  // that is what must scale. (The native example measures the same thing and
+  // explains the arithmetic at greater length.)
+  const overUnity = (height: number) => height - unityHeight;
+  check(
+    "gain magnifies the trace in proportion to itself",
+    Math.abs(overUnity(quadrupledHeight) / overUnity(doubledHeight) - 3) < 0.25,
+    `x2 adds ${overUnity(doubledHeight)}px over unity, x4 adds ${overUnity(quadrupledHeight)}px (${(overUnity(quadrupledHeight) / overUnity(doubledHeight)).toFixed(2)}x, wanted 3x)`,
+  );
+  check(
+    "a magnified figure is still inside the frame",
+    quadrupled.minY > 0 &&
+      quadrupled.maxY < surface.height - 1 &&
+      quadrupled.minX > 0 &&
+      quadrupled.maxX < surface.width - 1,
+    `x ${quadrupled.minX}..${quadrupled.maxX}, y ${quadrupled.minY}..${quadrupled.maxY} at x4`,
+  );
+  check(
+    "gain magnifies the trace rather than re-framing the scene",
+    doubledHeight > unityHeight && quadrupledHeight > doubledHeight,
+    `${unityHeight}px, ${doubledHeight}px, ${quadrupledHeight}px at x1, x2, x4`,
+  );
+
+  // Auto: the listening mode. A quiet passage ends up filling much of the
+  // frame, where unity left it small.
+  renderer.setGain("auto");
+  renderer.draw_frame(quiet, 2, RATE, FRAME_SECONDS);
+  const automatic = measure(surface);
+  const automaticHeight = automatic.maxY - automatic.minY;
+  check(
+    "auto lifts a quiet passage to fill the frame",
+    automaticHeight > surface.height * 0.6 &&
+      automatic.minY > 0 &&
+      automatic.maxY < surface.height - 1,
+    `${automaticHeight}px of ${surface.height} (${Math.round((100 * automaticHeight) / surface.height)}%), against ${unityHeight}px at unity`,
+  );
+
+  // ...and gives way to a loud one in a single frame rather than clipping the
+  // display while it eases off.
+  renderer.draw_frame(tone(220, 1), 2, RATE, FRAME_SECONDS);
+  const after = measure(surface);
+  check(
+    "auto gives way to a loud passage in one frame",
+    after.minY > 0 && after.maxY < surface.height - 1,
+    `y ${after.minY}..${after.maxY} of ${surface.height}`,
+  );
+
+  renderer.setGain("1");
+  renderer.draw_frame(quiet, 2, RATE, FRAME_SECONDS);
+  check(
+    "unity is unchanged by having visited the other settings",
+    measure(surface).maxY - measure(surface).minY === unityHeight,
+    `${measure(surface).maxY - measure(surface).minY}px against ${unityHeight}px`,
+  );
 }
 
 async function run(): Promise<void> {
@@ -356,6 +467,7 @@ async function run(): Promise<void> {
     await checkTheHostContract(entry);
   }
   await checkTheVectorscope();
+  await checkDisplayGain();
 
   log(
     failures === 0

@@ -19,7 +19,7 @@ import type {
   PlaylistResult,
   ServerTrack,
 } from "./serverTypes";
-import type { VisualInfo, VisualizerState } from "./visualizer";
+import type { GainInfo, VisualInfo, VisualizerState } from "./visualizer";
 
 const AUDIO_FILTERS = [
   { name: "Audio", extensions: ["mp3", "flac", "wav", "aac", "m4a", "ogg"] },
@@ -221,6 +221,16 @@ export async function setVisualizerFullscreen(fullscreen: boolean): Promise<void
 /// only leaves the request where that thread will find it.
 export async function setVisual(id: string): Promise<void> {
   return invoke("set_visual", { id });
+}
+
+/// The display-gain steps, out of `player_render::GainSetting`.
+export async function gainCatalog(): Promise<GainInfo[]> {
+  return invoke<GainInfo[]>("gain_catalog");
+}
+
+/// Sets the display gain -- again a request the redraw thread picks up.
+export async function setGain(id: string): Promise<void> {
+  return invoke("set_gain", { id });
 }
 
 /// The music server's state (Phase 2 M1). Mirrors `ServerState` in

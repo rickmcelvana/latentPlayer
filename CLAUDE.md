@@ -246,8 +246,24 @@ held while another application is frontmost. `scope.ts`/`webScope.ts`/
 `ScopeControls.tsx` are now `visualizer.ts`/`webVisualizer.ts`/
 `VisualizerControls.tsx`, and the selection persists in localStorage as a
 `VisualKind::id`.
-Verified: **14/14** `cargo run -p player-render --example visual_smoke` and
-**17/17** at `/visualizer.html` in a real browser, agreeing figure for figure (a
+Two bugs came out of the first live desktop run and are fixed. **Esc froze the
+app**: `tauri-plugin-global-shortcut` calls the handler while holding the mutex
+`unregister` needs, so the handler now spawns a thread and does nothing else.
+**The figure was small in a fullscreen window**: the camera's fixed 45-degree
+field of view is now *derived*, fitting the trace's own reachable extent (a
+diamond, since |side| + |mid| <= sqrt(2)) at 90% of the frame -- which lands
+within a few pixels of the old value where it applied, and provably cannot clip
+at any window shape. Two other levers were measured and rejected in the code:
+lengthening the ribbon on a wide viewport made the figure *smaller*, and pulling
+the camera back buys eight percentage points for the sense of depth. What
+remained was arithmetic -- the frame is sized for a full-scale signal and music
+is not full-scale -- so **display gain** landed on the user's decision: x1/x2/
+x4/x8 plus an opt-in Auto (instant attack, two-second release, timed in seconds
+so both shells recover identically), living in `player-render::gain` with the
+panel saying "display only" whenever the setting stops being a measurement.
+
+Verified: **20/20** `cargo run -p player-render --example visual_smoke` and
+**24/24** at `/visualizer.html` in a real browser, agreeing figure for figure (a
 switch is byte-identical to a freshly built renderer on both). Two of
 ARCHITECTURE.md's "Known gaps" -- the scope's aspect and its channel pairing --
 turned out to describe the pre-M6 renderer rather than the current one; they are

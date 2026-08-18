@@ -173,6 +173,19 @@ crates/
                      quantity that does not exist yet becomes a `player-core`
                      meter first, cross-target, and then a field here.
 
+                     gain.rs is display gain (added 2026-08-18, after the first
+                     live fullscreen run): the fixed steps, the automatic mode's
+                     state machine, and the fact that only unity is still a
+                     measurement. It is here rather than in either shell because
+                     the automatic mode *has* state -- a peak with instant attack
+                     and a two-second release, timed in seconds rather than in
+                     frames -- and two copies of that is two shells whose scopes
+                     visibly disagree about the same music. The frame stays
+                     pinned to unity full scale and the gain magnifies the trace
+                     inside it; a camera that refitted itself to the gained
+                     figure would leave the picture identical and the control
+                     doing nothing.
+
                      `VisualKind` is the one registry of visuals in the project
                      (decision 3) -- id, name, description -- read by the
                      gallery UI, the Tauri commands, the wasm bindings and both

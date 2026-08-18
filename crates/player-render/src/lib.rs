@@ -24,11 +24,13 @@
 mod attachments;
 mod camera;
 mod error;
+mod gain;
 pub mod trace;
 mod visual;
 mod visuals;
 
 pub use error::RenderError;
+pub use gain::GainSetting;
 pub use trace::{window_samples, TRACE_POINTS, TRACE_SECONDS};
 pub use visual::{BoxedVisual, Gpu, Visual, VisualFrame, VisualKind};
 
@@ -39,6 +41,9 @@ pub struct Renderer {
     config: wgpu::SurfaceConfiguration,
     visual: BoxedVisual,
     kind: VisualKind,
+    /// Display gain, and the automatic mode's memory (`gain.rs`). Host state
+    /// rather than a visual's: one control, one meaning, every visual.
+    gain: gain::Gain,
     /// Set when the surface told us its texture no longer matches it, so
     /// the *next* frame reconfigures before drawing. Deferred rather than
     /// done on the spot because the surface texture is still in hand at
@@ -100,6 +105,7 @@ impl Renderer {
             config,
             visual,
             kind,
+            gain: gain::Gain::new(GainSetting::DEFAULT),
             needs_reconfigure: false,
         })
     }
@@ -116,6 +122,17 @@ impl Renderer {
     /// Which visual is being drawn.
     pub fn visual(&self) -> VisualKind {
         self.kind
+    }
+
+    /// The display gain in effect.
+    pub fn gain(&self) -> GainSetting {
+        self.gain.setting()
+    }
+
+    /// Sets the display gain. Costs nothing and takes effect on the next frame:
+    /// it is a number in the frame the visual is handed, not a rebuild.
+    pub fn set_gain(&mut self, setting: GainSetting) {
+        self.gain.set(setting);
     }
 
     /// Selects a visual, building its scene at the current size.
@@ -163,6 +180,15 @@ impl Renderer {
     /// *duration* of history, so a visual means the same thing at every output
     /// rate (M6 decision 1, now the host's question rather than the scope's).
     pub fn draw_frame(&mut self, frame_data: &VisualFrame) -> Result<(), RenderError> {
+        // Gain is resolved here, not by the shell and not by the visual: the
+        // automatic mode is a state machine and there must be exactly one of it
+        // (`gain.rs`). The frame the visual sees carries the answer.
+        let frame_data = &VisualFrame {
+            gain: self
+                .gain
+                .resolve(frame_data.peak(), frame_data.elapsed_seconds),
+            ..*frame_data
+        };
         if self.needs_reconfigure {
             self.surface.configure(&self.device, &self.config);
             self.needs_reconfigure = false;
@@ -231,6 +257,7 @@ pub struct OffscreenRenderer {
     device: wgpu::Device,
     queue: wgpu::Queue,
     visual: BoxedVisual,
+    gain: gain::Gain,
     texture: wgpu::Texture,
     width: u32,
     height: u32,
@@ -281,6 +308,7 @@ impl OffscreenRenderer {
             device,
             queue,
             visual,
+            gain: gain::Gain::new(GainSetting::DEFAULT),
             texture,
             width,
             height,
@@ -302,8 +330,18 @@ impl OffscreenRenderer {
         );
     }
 
+    /// Sets the display gain, as the on-screen renderer does -- so the checks
+    /// measure the same path the app draws through.
+    pub fn set_gain(&mut self, setting: GainSetting) {
+        self.gain.set(setting);
+    }
+
     /// Draws one frame, then reads it back as RGBA8 rows, top row first.
     pub fn draw_to_pixels(&mut self, frame: &VisualFrame) -> Result<Vec<u8>, RenderError> {
+        let frame = &VisualFrame {
+            gain: self.gain.resolve(frame.peak(), frame.elapsed_seconds),
+            ..*frame
+        };
         let view = self
             .texture
             .create_view(&wgpu::TextureViewDescriptor::default());

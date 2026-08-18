@@ -9,13 +9,17 @@ import { useEffect, useState } from "react";
 import {
   DEFAULT_VISUALIZER_SIZE,
   VISUALIZER_SIZES,
+  gainCatalog,
+  setGain,
   setVisual,
   setVisualizerFullscreen,
   setVisualizerSize,
   setVisualizerVisible,
+  storedGain,
   storedVisual,
   visualCatalog,
   visualizerState,
+  type GainInfo,
   type VisualInfo,
 } from "./visualizer";
 
@@ -25,6 +29,9 @@ export function VisualizerControls() {
   const [size, setSize] = useState<number>(DEFAULT_VISUALIZER_SIZE);
   const [visible, setVisible] = useState(true);
   const [fullscreen, setFullscreen] = useState(false);
+  const [gains, setGains] = useState<GainInfo[]>([]);
+  const [gain, setGainId] = useState<string>("");
+  const [gainIsMeasurement, setGainIsMeasurement] = useState(true);
   /// Why fullscreen did not happen, when it did not. Cleared on the next try.
   const [refused, setRefused] = useState<string | null>(null);
 
@@ -46,6 +53,15 @@ export function VisualizerControls() {
         // A gallery we can't list is a visualizer with working size and
         // visibility buttons, which is still worth having on screen.
       });
+    gainCatalog()
+      .then((entries) => {
+        if (cancelled || entries.length === 0) return;
+        setGains(entries);
+        const chosen = storedGain(entries) ?? entries[0].id;
+        setGainId(chosen);
+        void setGain(chosen).catch(() => {});
+      })
+      .catch(() => {});
     return () => {
       cancelled = true;
     };
@@ -70,6 +86,8 @@ export function VisualizerControls() {
           setVisible(state.visible);
           setFullscreen(state.fullscreen);
           if (state.visual) setVisualId(state.visual);
+          if (state.gain) setGainId(state.gain);
+          setGainIsMeasurement(state.gainIsMeasurement);
         })
         .catch(() => {
           // A visualizer we can't ask about is still one with working buttons.
@@ -91,6 +109,11 @@ export function VisualizerControls() {
   const chooseVisual = (id: string) => {
     setVisualId(id);
     void setVisual(id).catch(() => {});
+  };
+
+  const chooseGain = (id: string) => {
+    setGainId(id);
+    void setGain(id).catch(() => {});
   };
 
   const toggle = () => {
@@ -135,6 +158,29 @@ export function VisualizerControls() {
               {entry.name}
             </button>
           ))}
+        </div>
+      )}
+      {gains.length > 0 && (
+        <div className="gain">
+          <span className="label">Gain</span>
+          {gains.map((entry) => (
+            <button
+              key={entry.id}
+              type="button"
+              className={entry.id === gain ? "step current" : "step"}
+              onClick={() => chooseGain(entry.id)}
+            >
+              {entry.label}
+            </button>
+          ))}
+          {/* Said out loud, because a scope that has been scaled without saying
+              so is worse than one that cannot scale at all. Unity is the only
+              setting where the figure's size still means the signal's level,
+              and which settings those are is Rust's to say, not this
+              component's. */}
+          {!gainIsMeasurement && (
+            <span className="hint scaled">display only -- not a level reading</span>
+          )}
         </div>
       )}
       <div className="host">

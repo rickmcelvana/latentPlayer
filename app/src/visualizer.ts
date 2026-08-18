@@ -12,6 +12,8 @@
 // module in the app that knows fullscreen means two different mechanisms.
 import { isTauri } from "./isTauri";
 import {
+  gainCatalog as gainCatalogNative,
+  setGain as setGainNative,
   setVisual as setVisualNative,
   setVisualizerFullscreen as setVisualizerFullscreenNative,
   setVisualizerSize as setVisualizerSizeNative,
@@ -20,11 +22,14 @@ import {
   visualizerState as visualizerStateNative,
 } from "./nativePlayer";
 import {
+  currentGain as currentGainWeb,
   currentVisual as currentVisualWeb,
+  gainCatalogWeb,
   isCanvasFullscreen,
   isVisualizerVisibleWeb,
   resizeVisualizer,
   setCanvasFullscreen,
+  setGainWeb,
   setVisualWeb,
   setVisualizerVisibleWeb,
   visualCatalogWeb,
@@ -51,6 +56,9 @@ export const DEFAULT_VISUALIZER_SIZE = 480;
 /// change what someone chose.
 const SELECTION_KEY = "latentplayer.visual";
 
+/// Where the display gain is remembered, on the same terms.
+const GAIN_KEY = "latentplayer.gain";
+
 /// One entry in the gallery. A transcription of `VisualInfo` in
 /// src-tauri/src/lib.rs and of `visualCatalog()`'s JSON in player-rt-wasm --
 /// both of which are filled from `player_render::VisualKind`, which is the one
@@ -59,6 +67,18 @@ export interface VisualInfo {
   id: string;
   name: string;
   description: string;
+}
+
+/// One step of display gain. A transcription of `GainInfo` in
+/// src-tauri/src/lib.rs and of `gainCatalog()`'s JSON in player-rt-wasm, both
+/// filled from `player_render::GainSetting`.
+export interface GainInfo {
+  id: string;
+  label: string;
+  /// True only at unity. The panel says when it stops being true, because a
+  /// scope that has been scaled without saying so is worse than one that
+  /// cannot scale at all.
+  isMeasurement: boolean;
 }
 
 /// Everything the host owns, in one read. One shape for both shells, so
@@ -70,6 +90,9 @@ export interface VisualizerState {
   fullscreen: boolean;
   /// A `VisualKind::id`.
   visual: string;
+  /// A `GainSetting::id`.
+  gain: string;
+  gainIsMeasurement: boolean;
 }
 
 /// The web build's canvas, handed over by the component that owns it so this
@@ -87,6 +110,39 @@ export function attachWebCanvas(canvas: HTMLCanvasElement | null): void {
 export async function visualCatalog(): Promise<VisualInfo[]> {
   if (isTauri()) return visualCatalogNative();
   return visualCatalogWeb();
+}
+
+/// The display-gain steps on offer. Asked of Rust for the same reason the
+/// gallery is.
+export async function gainCatalog(): Promise<GainInfo[]> {
+  if (isTauri()) return gainCatalogNative();
+  return gainCatalogWeb();
+}
+
+/// The gain chosen last session, if this build still offers it.
+export function storedGain(catalog: GainInfo[]): string | null {
+  try {
+    const stored = localStorage.getItem(GAIN_KEY);
+    return stored && catalog.some((entry) => entry.id === stored) ? stored : null;
+  } catch {
+    return null;
+  }
+}
+
+/// Sets the display gain, and remembers it.
+///
+/// A display decision, not a measurement one: it magnifies the drawn figure and
+/// changes nothing the meters read. The frame stays pinned to unity full scale,
+/// so what a gained figure means is "this signal, drawn n times larger" rather
+/// than "this signal, rescaled to fit".
+export async function setGain(id: string): Promise<void> {
+  try {
+    localStorage.setItem(GAIN_KEY, id);
+  } catch {
+    // Not remembering is a smaller problem than not applying.
+  }
+  if (isTauri()) return setGainNative(id);
+  setGainWeb(id);
 }
 
 /// The visual chosen last session, if this build still has it.
@@ -126,6 +182,8 @@ export async function visualizerState(): Promise<VisualizerState> {
     visible: isVisualizerVisibleWeb(),
     fullscreen: isCanvasFullscreen(),
     visual: currentVisualWeb(),
+    gain: currentGainWeb(),
+    gainIsMeasurement: currentGainWeb() === "1",
   };
 }
 

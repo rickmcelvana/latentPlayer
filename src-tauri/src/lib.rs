@@ -17,7 +17,7 @@ use servers::SharedServer;
 use player_core::eq::{self, EqSettings, BAND_FREQUENCIES, EQ_BANDS};
 use player_core::library::{Library, LibraryTrack, Playlist, ScanSummary};
 use player_core::{LocalFile, Playback};
-use player_render::{VisualFrame, VisualKind};
+use player_render::{GainSetting, VisualFrame, VisualKind};
 use tauri::Manager;
 use tauri_plugin_global_shortcut::{Code, GlobalShortcutExt, Shortcut, ShortcutState};
 
@@ -83,6 +83,9 @@ struct VisualizerWindow {
     /// truth about what has been asked for, which is what the UI is drawing a
     /// selected button from.
     requested: Mutex<VisualKind>,
+    /// The display gain the UI has asked for, reaching the renderer the same
+    /// way and for the same reason.
+    gain: Mutex<GainSetting>,
 }
 
 /// Managed so the UI can reach the selection. The rest of this type is still
@@ -96,6 +99,7 @@ impl VisualizerWindow {
             running: AtomicBool::new(true),
             redraw: Mutex::new(None),
             requested: Mutex::new(VisualKind::DEFAULT),
+            gain: Mutex::new(GainSetting::DEFAULT),
         }
     }
 
@@ -110,6 +114,19 @@ impl VisualizerWindow {
             .lock()
             .map(|slot| *slot)
             .unwrap_or(VisualKind::DEFAULT)
+    }
+
+    fn request_gain(&self, setting: GainSetting) {
+        if let Ok(mut slot) = self.gain.lock() {
+            *slot = setting;
+        }
+    }
+
+    fn requested_gain(&self) -> GainSetting {
+        self.gain
+            .lock()
+            .map(|slot| *slot)
+            .unwrap_or(GainSetting::DEFAULT)
     }
 
     /// Stops the redraw thread and waits for it, which drops the renderer and
@@ -558,6 +575,12 @@ struct VisualizerState {
     fullscreen: bool,
     /// `VisualKind::id` -- the stable name, never the display one.
     visual: String,
+    /// `GainSetting::id`.
+    gain: String,
+    /// Whether the figure's size still means the signal's level, which is only
+    /// true at unity. The panel says so, because a scope that has been scaled
+    /// without saying so is worse than one that cannot scale.
+    gain_is_measurement: bool,
 }
 
 /// One entry in the gallery. Filled from `player_render::VisualKind`, which is
@@ -569,6 +592,39 @@ struct VisualInfo {
     id: String,
     name: String,
     description: String,
+}
+
+/// One display-gain step, out of `player_render::GainSetting` -- the same shape
+/// and the same reason as `VisualInfo`.
+#[derive(serde::Serialize)]
+#[serde(rename_all = "camelCase")]
+struct GainInfo {
+    id: String,
+    label: String,
+    /// See `VisualizerState::gain_is_measurement`.
+    is_measurement: bool,
+}
+
+#[tauri::command]
+fn gain_catalog() -> Vec<GainInfo> {
+    GainSetting::ALL
+        .iter()
+        .map(|setting| GainInfo {
+            id: setting.id().to_string(),
+            label: setting.label().to_string(),
+            is_measurement: setting.is_measurement(),
+        })
+        .collect()
+}
+
+/// Sets the display gain (Phase 3 M1, added after the first live fullscreen
+/// run). Like `set_visual`, this leaves a request for the redraw thread.
+#[tauri::command]
+fn set_gain(id: String, visualizer: tauri::State<SharedVisualizer>) -> Result<(), String> {
+    let setting = GainSetting::from_id(&id)
+        .ok_or_else(|| format!("this build has no gain setting called {id:?}"))?;
+    visualizer.request_gain(setting);
+    Ok(())
 }
 
 #[tauri::command]
@@ -611,6 +667,8 @@ fn visualizer_state(
             .unwrap_or(false),
         fullscreen: window.and_then(|w| w.is_fullscreen().ok()).unwrap_or(false),
         visual: visualizer.requested().id().to_string(),
+        gain: visualizer.requested_gain().id().to_string(),
+        gain_is_measurement: visualizer.requested_gain().is_measurement(),
     }
 }
 
@@ -963,6 +1021,8 @@ pub fn run() {
             set_visualizer_fullscreen,
             set_visual,
             visual_catalog,
+            set_gain,
+            gain_catalog,
             scan_folder,
             library_tracks,
             library_folders,
@@ -1166,6 +1226,12 @@ pub fn run() {
             let redraw_visualizer = Arc::clone(&visualizer);
             let redraw = std::thread::spawn(move || {
                 let mut last_size = size;
+                // What the frame's `elapsed_seconds` reports. Measured rather
+                // than assumed to be the sleep below: a frame that took longer
+                // than 16ms has to say so, or anything timed off it (the
+                // automatic gain's release, and every animated visual after M1)
+                // runs slow in exactly the moments it matters.
+                let mut last_frame = std::time::Instant::now();
                 while redraw_visualizer.running.load(Ordering::Acquire) {
                     // A hidden visualizer is drawn for nobody, so this parks instead
                     // of spending a GPU frame every 16ms on something no one can
@@ -1219,6 +1285,13 @@ pub fn run() {
                     if wanted_visual != renderer.visual() {
                         renderer.set_visual(wanted_visual);
                     }
+                    // Display gain, the same way. Cheap enough to set every
+                    // frame, but only set when it changed so the automatic
+                    // mode's own state is never disturbed by a no-op.
+                    let wanted_gain = redraw_visualizer.requested_gain();
+                    if wanted_gain != renderer.gain() {
+                        renderer.set_gain(wanted_gain);
+                    }
 
                     // The analysis feed (decision 2). Assembled here, off the
                     // audio thread, out of what the tap and the meters already
@@ -1240,7 +1313,10 @@ pub fn run() {
                             None => (Vec::new(), 2, 48_000),
                         }
                     };
-                    if let Err(e) = renderer.draw_frame(&VisualFrame::new(&samples, channels, rate))
+                    let elapsed = last_frame.elapsed().as_secs_f32();
+                    last_frame = std::time::Instant::now();
+                    if let Err(e) =
+                        renderer.draw_frame(&VisualFrame::new(&samples, channels, rate, elapsed))
                     {
                         log::warn!("visualizer draw_frame error: {e}");
                     }

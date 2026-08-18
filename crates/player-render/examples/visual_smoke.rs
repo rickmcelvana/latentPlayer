@@ -27,7 +27,7 @@
 
 use std::sync::atomic::{AtomicUsize, Ordering};
 
-use player_render::{OffscreenRenderer, VisualFrame, VisualKind, TRACE_SECONDS};
+use player_render::{GainSetting, OffscreenRenderer, VisualFrame, VisualKind, TRACE_SECONDS};
 
 const WIDTH: u32 = 320;
 const HEIGHT: u32 = 320;
@@ -131,9 +131,12 @@ fn measure(pixels: &[u8]) -> Figure {
     measure_at(pixels, WIDTH, HEIGHT)
 }
 
+/// A 60Hz frame, which is the cadence the desktop redraw thread aims for.
+const FRAME_SECONDS: f32 = 1.0 / 60.0;
+
 /// A stereo frame at this example's rate.
 fn frame(samples: &[f32]) -> VisualFrame<'_> {
-    VisualFrame::new(samples, 2, RATE)
+    VisualFrame::new(samples, 2, RATE, FRAME_SECONDS)
 }
 
 /// The contract the *host* depends on, asked of every registered visual.
@@ -318,7 +321,7 @@ fn check_the_vectorscope() {
     let single: Vec<f32> = mono.iter().step_by(2).copied().collect();
     let centred = measure(
         &renderer
-            .draw_to_pixels(&VisualFrame::new(&single, 1, RATE))
+            .draw_to_pixels(&VisualFrame::new(&single, 1, RATE, FRAME_SECONDS))
             .expect("render mono output"),
     );
     check(
@@ -337,7 +340,7 @@ fn check_the_vectorscope() {
     }
     let six = measure(
         &renderer
-            .draw_to_pixels(&VisualFrame::new(&surround, 6, RATE))
+            .draw_to_pixels(&VisualFrame::new(&surround, 6, RATE, FRAME_SECONDS))
             .expect("render 5.1 output"),
     );
     check(
@@ -395,8 +398,133 @@ fn check_the_vectorscope() {
     );
 }
 
+/// Display gain (added 2026-08-18, after the first live fullscreen run).
+///
+/// The complaint it answers is arithmetic rather than framing: the frame is sized
+/// for a full-scale signal, so a master peaking at -12 dBFS draws at about a
+/// quarter of it. These checks are what stop the cure from being worse than the
+/// disease -- gain has to magnify the *trace* while leaving the frame, and
+/// therefore the meaning of the frame, exactly where it was.
+fn check_display_gain() {
+    println!(
+        "
+Display gain:"
+    );
+    let mut renderer = pollster::block_on(OffscreenRenderer::new(
+        WIDTH,
+        HEIGHT,
+        VisualKind::Vectorscope,
+    ))
+    .expect("offscreen renderer");
+
+    // A quiet passage: a tenth of full scale, which is roughly -20 dBFS and
+    // close to what a dynamic master actually sits at.
+    let quiet: Vec<f32> = tone(220.0, 1.0).iter().map(|s| s * 0.125).collect();
+    let unity = measure(&renderer.draw_to_pixels(&frame(&quiet)).expect("unity"));
+    let unity_height = unity.max_y - unity.min_y;
+
+    renderer.set_gain(GainSetting::Fixed(2.0));
+    let doubled = measure(&renderer.draw_to_pixels(&frame(&quiet)).expect("x2"));
+    let doubled_height = doubled.max_y - doubled.min_y;
+
+    renderer.set_gain(GainSetting::Fixed(4.0));
+    let quadrupled = measure(&renderer.draw_to_pixels(&frame(&quiet)).expect("x4"));
+    let quadrupled_height = quadrupled.max_y - quadrupled.min_y;
+
+    // Gain is linear in amplitude, but the *bounding box* is not linear in gain,
+    // and the difference is worth stating rather than fudging a tolerance
+    // around. The ribbon is extruded through space and viewed from off to one
+    // side, so even a signal of no amplitude at all draws a slanted line whose
+    // vertical extent is pure geometry -- call it the slant. The box is
+    // therefore `slant + amplitude * gain`: measured here as 46px of slant and
+    // 18px of amplitude, which predicts 64, 82 and 118px at x1, x2 and x4 and is
+    // exactly what came back. So what is checked is the part gain controls: the
+    // *increment* over unity, which must scale with the gain.
+    let over_unity = |height: u32| height as f32 - unity_height as f32;
+    check(
+        "gain magnifies the trace in proportion to itself",
+        (over_unity(quadrupled_height) / over_unity(doubled_height) - 3.0).abs() < 0.25,
+        format!(
+            "x2 adds {:.0}px over unity, x4 adds {:.0}px ({:.2}x, wanted 3x)",
+            over_unity(doubled_height),
+            over_unity(quadrupled_height),
+            over_unity(quadrupled_height) / over_unity(doubled_height)
+        ),
+    );
+    check(
+        "a magnified figure is still inside the frame",
+        quadrupled.min_y > 0
+            && quadrupled.max_y < HEIGHT - 1
+            && quadrupled.min_x > 0
+            && quadrupled.max_x < WIDTH - 1,
+        format!(
+            "x {}..{}, y {}..{} of {WIDTH}x{HEIGHT} at x4",
+            quadrupled.min_x, quadrupled.max_x, quadrupled.min_y, quadrupled.max_y
+        ),
+    );
+
+    // The claim that keeps this honest for the studio audience: gain is a
+    // magnifier, not a re-frame. If the camera refitted itself to the gained
+    // figure the picture would be identical at every setting -- which is both a
+    // useless control and a scope that silently normalises.
+    check(
+        "gain magnifies the trace rather than re-framing the scene",
+        doubled_height > unity_height && quadrupled_height > doubled_height,
+        format!("{unity_height}px, {doubled_height}px, {quadrupled_height}px at x1, x2, x4"),
+    );
+
+    // Auto: a quiet passage should end up filling much of the frame, where unity
+    // left it small. This is the listening mode, and it is opt-in precisely
+    // because the figure's size stops meaning level.
+    renderer.set_gain(GainSetting::Auto);
+    let automatic = measure(&renderer.draw_to_pixels(&frame(&quiet)).expect("auto"));
+    let automatic_height = automatic.max_y - automatic.min_y;
+    check(
+        "auto lifts a quiet passage to fill the frame",
+        automatic_height > (HEIGHT as f32 * 0.6) as u32
+            && automatic.min_y > 0
+            && automatic.max_y < HEIGHT - 1,
+        format!(
+            "{automatic_height}px of {HEIGHT} ({:.0}%), against {unity_height}px at unity",
+            100.0 * automatic_height as f32 / HEIGHT as f32
+        ),
+    );
+
+    // ...and gives way to a loud one at once rather than clipping the display
+    // while it eases off. One frame of full scale is all it gets.
+    let loud = tone(220.0, 1.0);
+    let after = measure(&renderer.draw_to_pixels(&frame(&loud)).expect("auto loud"));
+    check(
+        "auto gives way to a loud passage in one frame",
+        after.min_y > 0 && after.max_y < HEIGHT - 1,
+        format!("y {}..{} of {HEIGHT}", after.min_y, after.max_y),
+    );
+
+    // Unity is still unity afterwards: the setting is the setting, and nothing
+    // about the automatic mode leaks into a fixed one.
+    renderer.set_gain(GainSetting::Fixed(1.0));
+    let again = measure(
+        &renderer
+            .draw_to_pixels(&frame(&quiet))
+            .expect("unity again"),
+    );
+    check(
+        "unity is unchanged by having visited the other settings",
+        (again.max_y - again.min_y) == unity_height,
+        format!("{}px against {unity_height}px", again.max_y - again.min_y),
+    );
+}
+
 fn main() {
     println!("offscreen: {WIDTH}x{HEIGHT}, {TRACE_SECONDS}s of history at {RATE} Hz");
+    println!(
+        "gain: {}",
+        GainSetting::ALL
+            .iter()
+            .map(|g| g.label())
+            .collect::<Vec<_>>()
+            .join(", ")
+    );
     println!(
         "registry: {} visual(s) -- {}",
         VisualKind::ALL.len(),
@@ -411,6 +539,7 @@ fn main() {
         check_the_host_contract(*kind);
     }
     check_the_vectorscope();
+    check_display_gain();
 
     let checks = CHECKS.load(Ordering::Relaxed);
     let failures = FAILURES.load(Ordering::Relaxed);
