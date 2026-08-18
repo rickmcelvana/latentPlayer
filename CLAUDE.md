@@ -166,7 +166,7 @@ another origin decoding under this app's COEP header). M4 (server playlists,
 scrobbling, stars) is next, and is the first milestone here that writes to the
 server.
 
-**Phase 2 M4 is built and awaiting its live run on both shells** (2026-08-18):
+**Phase 2 M4 is done and user-confirmed on both shells** (2026-08-18):
 server playlists, scrobbling, stars and ratings -- the first milestone in this
 phase that *writes* to the server, which is why it is checked on what arrived
 rather than on what came back. `subsonic/playlists.rs` owns the five playlist
@@ -184,12 +184,16 @@ disagree about what a listener heard. The library panel grew a Playlists tab and
 every server row grew a star and a rating, drawn optimistically and put back if
 the server refuses.
 Verified: **10/10** `cargo test -p player-core --test subsonic_write`, 28 new
-unit tests (157 in `player-core`, up from 129), and **6/6 in a real browser**
-at `/write.html` -- the browser's tracker agreeing with the native one action
-for action. Still to run live: `cargo run -p player-core --example write_smoke`
-and `/write.html`'s server half against the real Navidrome. Both put the library
-back the way they found it, except a *play*, which is opt-in on both shells
-because it writes to a listening history nothing here can edit.
+unit tests (157 in `player-core`, up from 129), **6/6 in a real browser** at
+`/write.html` (the browser's tracker agreeing with the native one action for
+action), and both live runs against the real Navidrome -- `cargo run -p
+player-core --example write_smoke` and `/write.html`, **user-run 2026-08-18, all
+checks passed on both**, including the one only a real server can answer:
+**starring read back correct**, i.e. an album starred through `albumId` is a
+mark the server actually recorded where `id` would have been answered "ok" and
+changed nothing. Both smokes put the library back the way they found it, except
+a *play*, which is opt-in on each because it writes to a listening history
+nothing here can edit. M5 (failing well) is next and is the last of Phase 2.
 
 **Phase 2 is planned** (2026-08-17) -- see `tasks/phase-2.md` for
 the milestone plan (M1 connection, M2 remote playback, M3 browsing, M4

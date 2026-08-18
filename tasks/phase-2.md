@@ -656,3 +656,25 @@ star and rating is restored -- with one exception neither will make on its own:
 submitting a **play** writes to a listening history nothing here can edit, so it
 runs only behind `LATENTPLAYER_SUBSONIC_SCROBBLE=1` natively and a tick box on
 the web.
+
+### Closed (2026-08-18)
+
+**User-confirmed on both shells.** `write_smoke` and `/write.html` both pass
+every check against the real Navidrome, and the one the user called out is the
+one this milestone was most at risk of getting wrong: **starring read back
+correct**. That is decision 12 proven rather than argued -- an ID3-tagged album
+starred through `albumId` is a mark the server actually recorded, where the same
+request through `id` would have been answered "ok" and changed nothing. A fake
+server can say what arrived; only a real one can say what it did with it.
+
+So the phase's writing half is real: playlists on the server are made, added to,
+renamed, reordered by removal and deleted from this app; stars and ratings land
+on the listener's own library; and plays are counted by a rule both shells apply
+out of the same Rust. Nothing here touched the audio callback, the DSP path or
+the renderer, which is what the phase set out to be true of itself.
+
+M5 -- failing well -- is next, and is the last of Phase 2. It inherits two named
+gaps from M2 that are really its work: a network hiccup outlasting the request
+timeout ends the track (no retry, no backoff), and nothing anywhere says
+"buffering" -- both in ARCHITECTURE.md's "Known gaps", both waiting for exactly
+this milestone.

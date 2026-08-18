@@ -1,7 +1,7 @@
 # latentPlayer — Product & Architecture Plan
 
 Status: **living reference** for scoping and sequencing. Phases 0–1 are built, closed and
-user-confirmed on both shells; Phase 2 is underway (M1–M3 closed as of 2026-08-17). What actually
+user-confirmed on both shells; Phase 2 is underway (M1–M4 closed as of 2026-08-18). What actually
 exists lives in `ARCHITECTURE.md`; per-phase execution detail lives in `tasks/`. This document
 stays the product-level truth: audiences, feature set, phase ordering, and decisions.
 
@@ -164,7 +164,7 @@ player-completeness phase was added — §6's table stakes were listed but never
 
 - **Phase 0 — Spikes** *(closed 2026-08-15)*: validate `wgpu` rendering shared between Tauri native and wasm/browser; port latent-mixing's AudioWorklet+SharedArrayBuffer pattern (§5, §9) for the web audio path rather than designing one from scratch; minimal local playback + 2D scope as a walking skeleton.
 - **Phase 1 — MVP** *(closed 2026-08-17)*: local file player, streaming decode, queue + gapless, tagging/library, playlists, basic EQ, spectrum analyzer, phase correlation meter, LUFS/true-peak metering, 3D vectorscope v1; ships as both a Tauri desktop build and a web build. See `tasks/phase-1.md`.
-- **Phase 2 — Self-hosted playback** *(underway; M1–M3 closed 2026-08-17)*: Subsonic/OpenSubsonic support (Navidrome the reference server) — zero legal risk, immediately unlocks large existing libraries for self-hosting users. Remaining: M4 (server playlists, scrobbling to the server, stars/ratings), M5 (failing well). Planned in `tasks/phase-2.md`; Jellyfin is explicitly out of scope, see §8.6.
+- **Phase 2 — Self-hosted playback** *(underway; M1–M4 closed, M4 on 2026-08-18)*: Subsonic/OpenSubsonic support (Navidrome the reference server) — zero legal risk, immediately unlocks large existing libraries for self-hosting users. Remaining: M5 (failing well), the phase's last. Planned in `tasks/phase-2.md`; Jellyfin is explicitly out of scope, see §8.6.
 - **Phase 3 — Visualizer suite:** the gallery of §4, in order of what unlocks what. First the
   visualizer host — selection, the analysis feed, and **fullscreen on both shells** — with the
   existing vectorscope as its first citizen; then the new built-ins (spectrum bars, spectrogram
