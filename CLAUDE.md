@@ -226,8 +226,12 @@ visuals swaps the scene, never the window; MilkDrop goes the
 Butterchurn-guided route (MIT), never projectM (LGPL); AI-adaptive presets
 slip to Phase 6.
 
-**Phase 3 M1 is built and awaiting live confirmation** (2026-08-18): the
-visualizer host. `player-render` is now split along one seam (`visual.rs`) --
+**Phase 3 M1 is done and user-confirmed** (2026-08-18): the visualizer host.
+Confirmed live on the desktop shell -- fullscreen enters and leaves cleanly, Esc
+comes back out of it, and Auto gain "looks right on real music" -- and on the web
+shell for everything but its fullscreen, which no automation here can reach (the
+in-app browser pane refuses `requestFullscreen`) and which no one has yet had
+reason to try by hand. `player-render` is now split along one seam (`visual.rs`) --
 **the host owns the surface, the analysis feed, selection and fullscreen; a
 visual owns only its scene** -- so `Renderer` holds a `BoxedVisual`,
 `set_visual` swaps the scene without touching the surface, and `draw_frame`

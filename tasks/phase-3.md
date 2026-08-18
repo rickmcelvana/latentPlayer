@@ -319,7 +319,7 @@ product's face, and "the pixels are correct" is the floor, not the bar.
   -- the web half: element fullscreen, `fullscreenchange`, Esc handled by the
   browser.
 
-## M1 -- The visualizer host: built, awaiting live confirmation
+## M1 -- The visualizer host: done, user-confirmed 2026-08-18
 
 The seam every other milestone in this phase plugs into, plus the phase's one
 hard requirement. What landed:
@@ -409,6 +409,14 @@ both the automation browser and UI Automation, the identical limit the
 focus-loss exit and the gallery under real music are the live confirmation this
 milestone is waiting on**, and they are exactly what decision 4 said to check
 first.
+
+**That confirmation came the same day, and found three things** -- the two bugs
+below and the background difference after them. What is confirmed: fullscreen
+enters and leaves cleanly on the desktop, Esc comes back out of it (after the
+fix below), and Auto gain looks right on real music. What is still unconfirmed is
+**web fullscreen specifically**: the automation pane refuses `requestFullscreen`
+outright, and the desktop shell is where this gets used. Worth a minute in a real
+browser tab before M2 builds a second visual on top of the same host.
 
 ### Two bugs from the first live desktop run (2026-08-18)
 
