@@ -16,6 +16,7 @@
 // player's.
 
 import init, {
+  WasmAnalyzer,
   WasmRenderer,
   defaultGain,
   defaultVisual,
@@ -87,7 +88,11 @@ interface Figure {
 ///
 /// The threshold sits well clear of the background, which is a near-black
 /// (5, 5, 8) as displayed -- see `attachments::BACKGROUND`, and the 2026-08-18
-/// fix that made it the same number on both shells.
+/// fix that made it the same number on both shells. It was 80 until M2, when
+/// the shaders started converting their colours for the surface's colour space
+/// too (`visuals/shared.wgsl`): everything on an sRGB surface then showed the
+/// colour it was written as rather than a washed-out encoding of it, which is
+/// darker. 40 is still five times the brightest channel of the background.
 function pixels(target: HTMLCanvasElement): Uint8ClampedArray {
   const snapshot = document.createElement("canvas");
   snapshot.width = target.width;
@@ -118,7 +123,7 @@ function measure(target: HTMLCanvasElement = canvas): Figure {
   for (let y = 0; y < height; y++) {
     for (let x = 0; x < width; x++) {
       const i = (y * width + x) * 4;
-      if (px[i] <= 80 && px[i + 1] <= 80 && px[i + 2] <= 80) continue;
+      if (px[i] <= 40 && px[i + 1] <= 40 && px[i + 2] <= 40) continue;
       figure.lit += 1;
       figure.minX = Math.min(figure.minX, x);
       figure.maxX = Math.max(figure.maxX, x);
@@ -150,6 +155,228 @@ function extraCanvas(width: number, height: number): HTMLCanvasElement {
   return extra;
 }
 
+/// Nothing measured. The state the web build is genuinely in before its shared
+/// buffer exists, and what every vectorscope check passes: that visual reads
+/// samples and no spectrum at all.
+const NO_SPECTRUM = new Float32Array(0);
+
+/// The metering spectrum of some audio, measured by the same Rust the worker
+/// runs (`WasmAnalyzer` wraps `player_core::Meters`). The native check builds
+/// this from `Meters` directly, so the two halves are handing their bars the
+/// same numbers -- which is what makes "figure for figure" mean anything here.
+function spectrumOf(samples: Float32Array, channels: number): SpectrumFeed {
+  const analyzer = WasmAnalyzer.create(RATE, channels);
+  analyzer.ingest(samples, false);
+  const levels = analyzer.update(FRAME_SECONDS);
+  const centres = analyzer.bandCentres();
+  analyzer.free();
+  return { levels, centres };
+}
+
+/// A row held at one level across every band -- for the checks that are about
+/// the display rather than about the analysis.
+function flatSpectrum(levelDb: number): SpectrumFeed {
+  const analyzer = WasmAnalyzer.create(RATE, 2);
+  const centres = analyzer.bandCentres();
+  analyzer.free();
+  return { levels: new Float32Array(centres.length).fill(levelDb), centres };
+}
+
+interface SpectrumFeed {
+  levels: Float32Array;
+  centres: Float32Array;
+}
+
+/// How tall each column of the image is drawn, as the topmost lit row in it --
+/// `null` for a column with nothing in it.
+///
+/// The measurement the bars are checked through, for the reason the native
+/// check gives at greater length: a brightness threshold cannot separate a dim
+/// bar from an octave mark, where height separates them completely.
+function columnTops(target: HTMLCanvasElement): (number | null)[] {
+  const px = pixels(target);
+  const tops: (number | null)[] = new Array(target.width).fill(null);
+  for (let y = 0; y < target.height; y++) {
+    for (let x = 0; x < target.width; x++) {
+      const i = (y * target.width + x) * 4;
+      if (tops[x] !== null) continue;
+      if (px[i] > 40 || px[i + 1] > 40 || px[i + 2] > 40) tops[x] = y;
+    }
+  }
+  return tops;
+}
+
+/// The x of the tallest column and how high it reaches, or null for an empty
+/// image.
+function tallestColumn(target: HTMLCanvasElement): { x: number; y: number } | null {
+  let best: { x: number; y: number } | null = null;
+  columnTops(target).forEach((top, x) => {
+    if (top === null) return;
+    if (best === null || top < best.y) best = { x, y: top };
+  });
+  return best;
+}
+
+/// The highest row anything reaches. Smaller is taller: row 0 is the top.
+function topRow(target: HTMLCanvasElement): number | null {
+  return tallestColumn(target)?.y ?? null;
+}
+
+/// Wider than tall, because a row of bars is -- the native check's own shape,
+/// so the two report comparable pixel figures.
+const BARS_WIDTH = 640;
+const BARS_HEIGHT = 360;
+
+/// A bars renderer with no history, on a canvas of its own.
+///
+/// Most of these checks need one: the peak caps survive between frames on
+/// purpose (decision 11), so a shot drawn on a renderer that has already seen a
+/// loud frame measures the leftover cap rather than the bar under it. The
+/// native check found that the hard way.
+async function barsRenderer(): Promise<{ renderer: WasmRenderer; surface: HTMLCanvasElement }> {
+  const surface = extraCanvas(BARS_WIDTH, BARS_HEIGHT);
+  const renderer = await WasmRenderer.create(
+    surface,
+    surface.width,
+    surface.height,
+    "spectrum-bars",
+  );
+  return { renderer, surface };
+}
+
+/// What only the spectrum bars claim (Phase 3 M2) -- the same claims the native
+/// example makes, in the same order.
+async function checkTheSpectrumBars(): Promise<void> {
+  log("\nSpectrum bars -- its own claims:");
+
+  // Decision 10: a frame with audio but no measurement is not silence, it is
+  // "nothing has been measured yet" -- which is exactly this shell's first
+  // moments of a session, before the worker has published anything. Sixty-four
+  // bars resting on the floor would be a picture of the wrong thing.
+  {
+    const { renderer, surface } = await barsRenderer();
+    renderer.draw_frame(tone(1000, 1), 2, RATE, FRAME_SECONDS, NO_SPECTRUM, NO_SPECTRUM);
+    check(
+      "audio with nothing measured yet draws nothing at all",
+      measure(surface).lit === 0,
+      `${measure(surface).lit} lit pixels`,
+    );
+  }
+
+  // The axis, and the check that catches a display drawn backwards. Both tones
+  // go through the real analyser, so what is checked is the whole path: audio,
+  // player-core's bands, the frame, the instances, the pixels.
+  const low = tone(80, 1);
+  const lowSpectrum = spectrumOf(low, 2);
+  const lowShot = await barsRenderer();
+  lowShot.renderer.draw_frame(
+    low,
+    2,
+    RATE,
+    FRAME_SECONDS,
+    lowSpectrum.levels,
+    lowSpectrum.centres,
+  );
+  const lowBar = tallestColumn(lowShot.surface);
+
+  const high = tone(6000, 1);
+  const highSpectrum = spectrumOf(high, 2);
+  const highShot = await barsRenderer();
+  highShot.renderer.draw_frame(
+    high,
+    2,
+    RATE,
+    FRAME_SECONDS,
+    highSpectrum.levels,
+    highSpectrum.centres,
+  );
+  const highBar = tallestColumn(highShot.surface);
+  check(
+    "a tone lights a bar on the side of the display its frequency belongs to",
+    lowBar !== null &&
+      highBar !== null &&
+      lowBar.x < BARS_WIDTH / 2 &&
+      highBar.x > BARS_WIDTH / 2 &&
+      lowBar.x < highBar.x,
+    `80Hz at x=${lowBar?.x}, 6kHz at x=${highBar?.x}, of ${BARS_WIDTH}`,
+  );
+
+  // Level, which is the other half of what a spectrum display says. Three
+  // amplitudes twenty dB apart, through the real analyser.
+  const heights: number[] = [];
+  for (const amplitude of [0.8, 0.08, 0.008]) {
+    const samples = tone(1000, 1, amplitude);
+    const spectrum = spectrumOf(samples, 2);
+    const shot = await barsRenderer();
+    shot.renderer.draw_frame(
+      samples,
+      2,
+      RATE,
+      FRAME_SECONDS,
+      spectrum.levels,
+      spectrum.centres,
+    );
+    heights.push(topRow(shot.surface) ?? BARS_HEIGHT);
+  }
+  check(
+    "a louder tone draws a taller bar",
+    heights[0] < heights[1] && heights[1] < heights[2],
+    `tops at row ${heights[0]}, ${heights[1]}, ${heights[2]} for full scale, -20dB and -40dB`,
+  );
+
+  // Decision 13: the display's floor is -72dBFS, not the meter's -120, so a row
+  // at the meter's floor has no bars in it -- only the octave marks, which lie
+  // on the floor of the scene.
+  const floor = flatSpectrum(-120);
+  {
+    const { renderer, surface } = await barsRenderer();
+    renderer.draw_frame(NO_SPECTRUM, 2, RATE, FRAME_SECONDS, floor.levels, floor.centres);
+    const floorTop = topRow(surface);
+    check(
+      "a row at the meter's floor draws no bars, only the octave marks",
+      floorTop === null || floorTop > BARS_HEIGHT / 2,
+      `tallest column reaches row ${floorTop} of ${BARS_HEIGHT}`,
+    );
+  }
+
+  // Full scale reaches near the top of the frame without touching it -- the
+  // frame is pinned to a full-scale display, exactly as the vectorscope's is.
+  const loud = flatSpectrum(0);
+  const falling = await barsRenderer();
+  falling.renderer.draw_frame(NO_SPECTRUM, 2, RATE, FRAME_SECONDS, loud.levels, loud.centres);
+  const fullTop = topRow(falling.surface) ?? BARS_HEIGHT;
+  check(
+    "a full-scale row reaches near the top of the frame without clipping",
+    fullTop > 0 && fullTop < BARS_HEIGHT / 4,
+    `top at row ${fullTop} of ${BARS_HEIGHT}`,
+  );
+
+  // Decision 11: the caps are display state, and they fall in *seconds* -- the
+  // property that makes this shell's animation callbacks and the desktop's
+  // 60Hz redraw thread draw the same thing. Checked the way the automatic
+  // gain's release was: one long frame against many short ones.
+  falling.renderer.draw_frame(NO_SPECTRUM, 2, RATE, 1.0, floor.levels, floor.centres);
+  const afterOne = topRow(falling.surface) ?? BARS_HEIGHT;
+  check(
+    "a peak cap outlives the bar under it and falls from where it reached",
+    afterOne > fullTop,
+    `cap at row ${afterOne}, having peaked at row ${fullTop}`,
+  );
+
+  const stepwise = await barsRenderer();
+  stepwise.renderer.draw_frame(NO_SPECTRUM, 2, RATE, FRAME_SECONDS, loud.levels, loud.centres);
+  for (let n = 0; n < 60; n++) {
+    stepwise.renderer.draw_frame(NO_SPECTRUM, 2, RATE, 1 / 60, floor.levels, floor.centres);
+  }
+  stepwise.renderer.draw_frame(NO_SPECTRUM, 2, RATE, 0, floor.levels, floor.centres);
+  const stepwiseTop = topRow(stepwise.surface) ?? BARS_HEIGHT;
+  check(
+    "the caps fall at the same rate whatever the frame rate",
+    Math.abs(afterOne - stepwiseTop) <= 2,
+    `row ${afterOne} after one long frame against ${stepwiseTop} after sixty short ones`,
+  );
+}
+
 /// The contract the *host* depends on, asked of every visual in the registry --
 /// the same four claims the native check makes, in the same order.
 async function checkTheHostContract(entry: VisualInfo): Promise<void> {
@@ -158,7 +385,7 @@ async function checkTheHostContract(entry: VisualInfo): Promise<void> {
   const renderer = await WasmRenderer.create(surface, surface.width, surface.height, entry.id);
 
   const empty = new Float32Array(0);
-  renderer.draw_frame(empty, 2, RATE, FRAME_SECONDS);
+  renderer.draw_frame(empty, 2, RATE, FRAME_SECONDS, NO_SPECTRUM, NO_SPECTRUM);
   const blank = pixels(surface);
   check(
     "an empty feed still renders a frame",
@@ -178,8 +405,15 @@ async function checkTheHostContract(entry: VisualInfo): Promise<void> {
     `rgb(${blank[0]}, ${blank[1]}, ${blank[2]}) against rgb(5, 5, 8)`,
   );
 
+  // A whole feed, because the host assembles a whole one: the vectorscope
+  // reads the samples and the bars read the spectrum, and a contract check
+  // handing over only half of it would be asking half the gallery to draw
+  // nothing.
   const signal = tone(220, 0.3);
-  renderer.draw_frame(signal, 2, RATE, FRAME_SECONDS);
+  const spectrum = spectrumOf(signal, 2);
+  const drawSignal = (into: WasmRenderer) =>
+    into.draw_frame(signal, 2, RATE, FRAME_SECONDS, spectrum.levels, spectrum.centres);
+  drawSignal(renderer);
   const lit = measure(surface);
   check("audio draws something", lit.lit > 100, `${lit.lit} lit pixels`);
   const fresh = pixels(surface);
@@ -192,7 +426,7 @@ async function checkTheHostContract(entry: VisualInfo): Promise<void> {
   const other = extraCanvas(320, 320);
   const switched = await WasmRenderer.create(other, other.width, other.height, defaultVisual());
   switched.setVisual(entry.id);
-  switched.draw_frame(signal, 2, RATE, FRAME_SECONDS);
+  drawSignal(switched);
   const after = pixels(other);
   let differing = 0;
   for (let i = 0; i < after.length; i++) if (after[i] !== fresh[i]) differing += 1;
@@ -210,7 +444,7 @@ async function checkTheHostContract(entry: VisualInfo): Promise<void> {
   // Resizing rebuilds whatever the visual keeps that depends on the viewport.
   surface.width = 640;
   renderer.resize(surface.width, surface.height);
-  renderer.draw_frame(signal, 2, RATE, FRAME_SECONDS);
+  drawSignal(renderer);
   check(
     "a different viewport renders rather than failing",
     measure(surface).lit > 100,
@@ -228,7 +462,7 @@ async function checkTheVectorscope(): Promise<void> {
   // Silence first: the scope has to draw *nothing* rather than a dot at the
   // origin, which is what a trace built from an empty window would look like
   // if it padded instead of stopping.
-  renderer.draw_frame(new Float32Array(0), 2, RATE, FRAME_SECONDS);
+  renderer.draw_frame(new Float32Array(0), 2, RATE, FRAME_SECONDS, NO_SPECTRUM, NO_SPECTRUM);
   const idle = measure();
   check("nothing played draws nothing", idle.lit === 0, `${idle.lit} lit pixels`);
 
@@ -236,7 +470,7 @@ async function checkTheVectorscope(): Promise<void> {
   // the centre. Not perfectly vertical -- the camera is off to one side and
   // the extrusion recedes, which is the point of the third axis -- but clearly
   // taller than wide.
-  renderer.draw_frame(tone(220, 1), 2, RATE, FRAME_SECONDS);
+  renderer.draw_frame(tone(220, 1), 2, RATE, FRAME_SECONDS, NO_SPECTRUM, NO_SPECTRUM);
   const figure = measure();
   const width = figure.maxX - figure.minX;
   const height = figure.maxY - figure.minY;
@@ -262,7 +496,7 @@ async function checkTheVectorscope(): Promise<void> {
   // An inverted pair has no mid component: the same audio, rotated onto the
   // other axis. This is what catches a scope wired to raw L/R rather than the
   // goniometer's axes -- that one draws the same figure for both signals.
-  renderer.draw_frame(tone(220, -1), 2, RATE, FRAME_SECONDS);
+  renderer.draw_frame(tone(220, -1), 2, RATE, FRAME_SECONDS, NO_SPECTRUM, NO_SPECTRUM);
   const flat = measure();
   check(
     "an inverted channel lays the figure flat",
@@ -273,7 +507,7 @@ async function checkTheVectorscope(): Promise<void> {
   // A quiet passage draws a smaller figure than a loud one. Easy to lose: a
   // scope that normalises its input looks livelier and stops being a
   // measurement.
-  renderer.draw_frame(tone(220, 1, 0.08), 2, RATE, FRAME_SECONDS);
+  renderer.draw_frame(tone(220, 1, 0.08), 2, RATE, FRAME_SECONDS, NO_SPECTRUM, NO_SPECTRUM);
   const quiet = measure();
   check(
     "level is not normalised away",
@@ -286,7 +520,7 @@ async function checkTheVectorscope(): Promise<void> {
   const stereo = tone(220, 1);
   const single = new Float32Array(stereo.length / 2);
   for (let i = 0; i < single.length; i++) single[i] = stereo[i * 2];
-  renderer.draw_frame(single, 1, RATE, FRAME_SECONDS);
+  renderer.draw_frame(single, 1, RATE, FRAME_SECONDS, NO_SPECTRUM, NO_SPECTRUM);
   check("a one-channel output still draws", measure().lit > 500, `${measure().lit} lit pixels`);
 
   // A device with more than two channels contributes its front pair, which is
@@ -298,7 +532,7 @@ async function checkTheVectorscope(): Promise<void> {
     surround[n * 6] = stereo[n * 2];
     surround[n * 6 + 1] = stereo[n * 2 + 1];
   }
-  renderer.draw_frame(surround, 6, RATE, FRAME_SECONDS);
+  renderer.draw_frame(surround, 6, RATE, FRAME_SECONDS, NO_SPECTRUM, NO_SPECTRUM);
   const six = measure();
   check(
     "a 5.1 output draws its front pair, not a smear",
@@ -314,7 +548,7 @@ async function checkTheVectorscope(): Promise<void> {
   // Windows in Phase 0.
   canvas.width = 640;
   renderer.resize(canvas.width, canvas.height);
-  renderer.draw_frame(tone(220, 1), 2, RATE, FRAME_SECONDS);
+  renderer.draw_frame(tone(220, 1), 2, RATE, FRAME_SECONDS, NO_SPECTRUM, NO_SPECTRUM);
   const wide = measure();
   check(
     "a wider viewport shows more scene rather than a stretched figure",
@@ -328,7 +562,7 @@ async function checkTheVectorscope(): Promise<void> {
   canvas.width = 1280;
   canvas.height = 720;
   renderer.resize(canvas.width, canvas.height);
-  renderer.draw_frame(tone(220, 1), 2, RATE, FRAME_SECONDS);
+  renderer.draw_frame(tone(220, 1), 2, RATE, FRAME_SECONDS, NO_SPECTRUM, NO_SPECTRUM);
   const full = measure();
   const fullHeight = full.maxY - full.minY;
   check(
@@ -341,7 +575,7 @@ async function checkTheVectorscope(): Promise<void> {
   canvas.width = 320;
   canvas.height = 320;
   renderer.resize(canvas.width, canvas.height);
-  renderer.draw_frame(tone(220, 1), 2, RATE, FRAME_SECONDS);
+  renderer.draw_frame(tone(220, 1), 2, RATE, FRAME_SECONDS, NO_SPECTRUM, NO_SPECTRUM);
 }
 
 
@@ -371,17 +605,17 @@ async function checkDisplayGain(): Promise<void> {
   // A quiet passage: an eighth of full scale, roughly -18 dBFS, which is the
   // case that started all this.
   const quiet = tone(220, 1, 0.125);
-  renderer.draw_frame(quiet, 2, RATE, FRAME_SECONDS);
+  renderer.draw_frame(quiet, 2, RATE, FRAME_SECONDS, NO_SPECTRUM, NO_SPECTRUM);
   const unity = measure(surface);
   const unityHeight = unity.maxY - unity.minY;
 
   renderer.setGain("2");
-  renderer.draw_frame(quiet, 2, RATE, FRAME_SECONDS);
+  renderer.draw_frame(quiet, 2, RATE, FRAME_SECONDS, NO_SPECTRUM, NO_SPECTRUM);
   const doubled = measure(surface);
   const doubledHeight = doubled.maxY - doubled.minY;
 
   renderer.setGain("4");
-  renderer.draw_frame(quiet, 2, RATE, FRAME_SECONDS);
+  renderer.draw_frame(quiet, 2, RATE, FRAME_SECONDS, NO_SPECTRUM, NO_SPECTRUM);
   const quadrupled = measure(surface);
   const quadrupledHeight = quadrupled.maxY - quadrupled.minY;
 
@@ -413,7 +647,7 @@ async function checkDisplayGain(): Promise<void> {
   // Auto: the listening mode. A quiet passage ends up filling much of the
   // frame, where unity left it small.
   renderer.setGain("auto");
-  renderer.draw_frame(quiet, 2, RATE, FRAME_SECONDS);
+  renderer.draw_frame(quiet, 2, RATE, FRAME_SECONDS, NO_SPECTRUM, NO_SPECTRUM);
   const automatic = measure(surface);
   const automaticHeight = automatic.maxY - automatic.minY;
   check(
@@ -426,7 +660,7 @@ async function checkDisplayGain(): Promise<void> {
 
   // ...and gives way to a loud one in a single frame rather than clipping the
   // display while it eases off.
-  renderer.draw_frame(tone(220, 1), 2, RATE, FRAME_SECONDS);
+  renderer.draw_frame(tone(220, 1), 2, RATE, FRAME_SECONDS, NO_SPECTRUM, NO_SPECTRUM);
   const after = measure(surface);
   check(
     "auto gives way to a loud passage in one frame",
@@ -435,7 +669,7 @@ async function checkDisplayGain(): Promise<void> {
   );
 
   renderer.setGain("1");
-  renderer.draw_frame(quiet, 2, RATE, FRAME_SECONDS);
+  renderer.draw_frame(quiet, 2, RATE, FRAME_SECONDS, NO_SPECTRUM, NO_SPECTRUM);
   check(
     "unity is unchanged by having visited the other settings",
     measure(surface).maxY - measure(surface).minY === unityHeight,
@@ -480,6 +714,7 @@ async function run(): Promise<void> {
     await checkTheHostContract(entry);
   }
   await checkTheVectorscope();
+  await checkTheSpectrumBars();
   await checkDisplayGain();
 
   log(

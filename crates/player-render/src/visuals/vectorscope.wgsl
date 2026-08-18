@@ -4,7 +4,7 @@
 
 struct Camera {
     view_proj: mat4x4<f32>,
-    // [figure_scale, depth, gain, 0] -- see vectorscope.rs. How large to draw a
+    // [figure_scale, depth, gain, srgb_target] -- see vectorscope.rs. How large to draw a
     // given amplitude, how long to draw the fixed 120ms, and how much the
     // display magnifies the signal are all display decisions; they arrive from
     // Rust because the camera there is *fitted* to the first two, and a copy
@@ -21,6 +21,9 @@ struct VertexOutput {
     @builtin(position) clip_position: vec4<f32>,
     @location(0) age: f32,
 };
+
+// `shared.wgsl` is prepended to this file by `attachments::shader_source`, so
+// `to_target` below is defined before anything here runs.
 
 @vertex
 fn vs_main(@location(0) position: vec3<f32>) -> VertexOutput {
@@ -49,5 +52,9 @@ fn fs_main(in: VertexOutput) -> @location(0) vec4<f32> {
     let past = vec3<f32>(0.55, 0.30, 0.95);
     let colour = mix(now, past, in.age);
     let brightness = 0.22 + 0.78 * (1.0 - in.age);
-    return vec4<f32>(colour * brightness, 1.0);
+    // These are the colours a *screen* should show, so they go through the
+    // surface's own conversion -- without which the same trace is visibly
+    // darker on the web's non-sRGB canvas than on the desktop's sRGB surface
+    // (the fragment-shader half of the background bug, see shared.wgsl).
+    return vec4<f32>(to_target(colour * brightness, camera.figure.w), 1.0);
 }

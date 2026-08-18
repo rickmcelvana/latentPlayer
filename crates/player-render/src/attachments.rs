@@ -55,6 +55,30 @@ pub fn background(format: wgpu::TextureFormat) -> wgpu::Color {
     }
 }
 
+/// Whether this surface encodes on a shader's behalf, as the number a uniform
+/// carries: 1.0 for an sRGB surface, 0.0 for one that writes through.
+///
+/// The fragment-shader half of what [`background`] does for the clear colour --
+/// see `visuals/shared.wgsl`, which is where the conversion itself lives, and
+/// which every visual's shader is given by [`shader_source`].
+pub fn target_is_srgb(format: wgpu::TextureFormat) -> f32 {
+    if format.is_srgb() {
+        1.0
+    } else {
+        0.0
+    }
+}
+
+/// A visual's shader, with the shared preamble in front of it.
+///
+/// One copy of the colour conversion rather than one per visual: it is six
+/// lines, and six lines duplicated per visual is where the fifth visual quietly
+/// gets it wrong. WGSL has no include of its own, so this is the concatenation
+/// that stands in for one.
+pub fn shader_source(body: &str) -> std::borrow::Cow<'static, str> {
+    format!("{}\n{}", include_str!("visuals/shared.wgsl"), body).into()
+}
+
 /// The sRGB transfer function, inverted. The piecewise form rather than a plain
 /// 2.2 power: the linear segment near black is exactly where this background
 /// sits, and the approximation is wrong by a whole byte there.

@@ -558,3 +558,278 @@ for every surface format the shells can be handed.
 
 Verified after the fix: **21/21** natively, **25/25** in the browser, 252 tests,
 clippy and fmt clean on both targets.
+
+## M2 -- Spectrum bars: built, awaiting the live look on both shells (2026-08-18)
+
+The first *second* citizen, and therefore the milestone that tests M1 rather
+than extends it. The vectorscope was moved behind the `Visual` trait; nothing
+was ever built against it. Bars are, and they are deliberately the least like
+the vectorscope of the three built-ins: where the scope draws **raw samples**
+geometrically, bars draw **analysis** -- the spectrum meter's own bands, the
+same numbers the studio Spectrum panel shows, at the same instant. That is
+PLAN.md section 4's promise ("the visualizers are the listener-facing face of
+exactly the analysis data the metering suite shows engineers") stated as a
+picture for the first time.
+
+The milestone's own assertion, from the list above: **if building this requires
+touching anything but `player-render` and the gallery list, the host was
+designed wrong.** One exception is pre-authorised and is not a failure of that
+assertion -- the *feed*. `VisualFrame` was written as a struct precisely so that
+"M2's spectrum bars need the metering spectrum's own bands" would be a field
+rather than a signature change (`visual.rs`'s own note says so). So the honest
+form of the assertion is: the feed grows by two borrowed slices and the registry
+by one entry, and **nothing else outside `player-render` changes** -- no new
+command, no new UI control, no new persisted setting, no new meter.
+
+### Decisions
+
+**10. The spectrum's bands ride in `VisualFrame`, and no new analysis is
+written.** The frame gains `levels: &[f32]` (dBFS per band, as published) and
+`band_centres: &[f32]` (the frequency axis those levels are against). Both
+already exist on both shells and are already published off the audio thread:
+`Playback::spectrum()` / `spectrum_band_centres()` natively, the SAB's spectrum
+region via `spectrum()` / `spectrumBands()` on the web -- both filled by the
+same `player-core::spectrum` analyser. So decision 2 is satisfied in its strong
+form: this milestone adds a *field*, not a meter, and the bars cannot disagree
+with the Spectrum panel because they are drawing the same array.
+
+Two consequences to build to rather than discover:
+
+- **The visual reads `levels.len()`, never `BAND_COUNT`.** The web's centres are
+  empty until a track has loaded (the analyser is built with the output's rate)
+  and its levels are empty before the shared buffer exists, where the native
+  side always answers with a full row at the floor. A visual that assumed 64
+  would draw garbage on the web for the first second of a session.
+- **An empty `levels` draws nothing**, exactly as an empty `samples` does for
+  the vectorscope -- not sixty-four bars sitting at the floor, which is a
+  picture of silence rather than a picture of "nothing has played".
+
+**11. Peak-fall is display state inside the visual.** The falling caps are an
+animation over levels *already measured*, timed off `elapsed_seconds` -- the
+same category as the automatic gain's release, which lives in the host as
+display state for exactly this reason, and firmly not decision 2's category of
+"a quantity that doesn't exist yet". The spectrum meter's own 30 dB/s release
+stays what it is and is not touched; the caps sit on top of it and fall slower,
+because their job is to mark where a transient reached after the bar itself has
+gone.
+
+This narrows M3's claim, and the correction is worth recording now rather than
+being contradicted later: the milestone list calls the waterfall "the first
+visual with internal state". Peak-fall is internal state, so M2 gets there first
+-- in the small. What M3 still owns alone is *GPU-resident* history, a ring of
+band rows written once and scrolled, which is a different thing from a handful
+of floats on the CPU. Finding the `Visual` contract wanting over sixty-four
+floats is cheaper than finding it wanting over a texture.
+
+**12. Display gain means a decibel offset here.** `frame.gain` is an amplitude
+multiplier because the vectorscope draws amplitudes; a bar display is
+logarithmic, so the same setting is applied as `20*log10(gain)` dB -- x2 is
++6dB, x8 is +18dB. The alternative, ignoring gain in this visual, would make one
+control do something in one visual and nothing in the next, which is worse for a
+person than either behaviour is on its own. `Auto` needs no special case: it
+resolves from the frame's own sample peak, which is present whichever visual is
+drawing. And the panel's existing "display only -- not a level reading" note is
+exactly as true of a shifted dB axis as of a magnified figure.
+
+**13. The bars' dB window is the visual's own, and it is not `FLOOR_DB`.** The
+meter reports down to -120 dBFS because that is where a *measurement* should
+stop. A bar drawn on a -120..0 axis spends more than half its height on material
+below the noise floor of any real source, so every bar looks tall and nothing
+reads. The bars draw **-72 dBFS to 0**: full scale reaches the top of the frame,
+which is the same convention the vectorscope's frame already uses (full scale
+fills it, gain magnifies inside it), and -72 leaves room under a quiet master
+rather than clipping it off at the usual -60.
+
+**14. "Note-frequency mode" is a marked axis, not a second set of bands.** The
+existing bands are already log-spaced -- 64 across 20Hz-20kHz, about six per
+octave -- so evenly spaced bars *are* the log/note axis; the mode PLAN.md
+section 4 asks for is the reference the eye needs to read it, which is octave
+marks. The bars therefore draw octave gridlines at the C's (32.7, 65.4, 130.8,
+261.6, 523.3, 1046.5, 2093, 4186 Hz) as geometry in the scene, placed from
+`band_centres` rather than from an assumed layout.
+
+The other reading -- respacing the bars onto a chromatic grid, one bar per
+semitone -- is **deliberately not** this milestone's, and not because it is
+hard: it is a *band layout* change, which under decision 2 belongs in
+`player-core::spectrum` as a meter option, cross-target, with the Spectrum panel
+following it. Doing it inside the visual would be a second opinion about which
+frequencies a band covers. Named here so it is a deferred feature rather than an
+oversight.
+
+There are no glyphs in this crate and this milestone does not add a text
+renderer, so the octave marks are lines and ticks, unlabelled. Labelling them is
+a host feature (every visual would want it) and lands as one if it is ever
+wanted.
+
+**15. The surface does not change shape with the selection.** `VISUALIZER_SIZES`
+is square "because the vectorscope's figure is", and bars are wider than they
+are tall -- but a size list that changed with the selection is the surface
+following the visual, which decision 1 forbids and decision 5's one-window rule
+reinforces. Bars are fitted to whatever viewport they are given, the way the
+vectorscope now is: correct in a 480x480 panel and in a 21:9 fullscreen alike.
+If a wider *panel* turns out to be wanted after the live look, it is a host
+feature -- a size list with shapes in it -- and it lands as one, for every
+visual, not as a bars special case.
+
+### Shape of the work
+
+- **`visual.rs`** -- `VisualFrame` gains `levels` and `band_centres`.
+  `VisualFrame::new` keeps its signature and a chained `with_spectrum(levels,
+  centres)` adds them, so the vectorscope's callers and every existing check
+  read unchanged and only the callers that have a spectrum say so.
+- **`visuals/bars.rs` + `bars.wgsl`** -- one instanced box per band (instance
+  data: the band's normalised height and its peak cap), depth and 4x MSAA out of
+  `attachments`, cleared to `attachments::background(format)`. The camera is
+  *derived* the way M1 derived the vectorscope's: the projection opens exactly
+  wide enough to hold the bars' own reachable extent at `FILL` of the frame, so
+  there is no fixed field of view to be wrong at some window shape. A full-scale
+  row of bars is the extent that gets fitted.
+- **`VisualKind::SpectrumBars`** -- one arm each in `ALL`, `id`
+  (`"spectrum-bars"`), `name`, `description` and `create`. Both shells' gallery,
+  commands, bindings and smokes pick it up with no edit, which is the assertion.
+- **The feed, at both ends.** Natively the redraw thread reads the levels and
+  the centres inside the `shared.lock()` it already takes for `scope_window`, so
+  a frame still costs one guard. On the web `webVisualizer.ts` passes
+  `spectrum()` and `spectrumBands()`, and `player-rt-wasm`'s `draw_frame` grows
+  the two slices to match. Nothing else in either shell is touched.
+
+### What "verified" has to mean here
+
+The five host-contract checks apply to bars the moment the kind is registered
+(`check_the_host_contract` already runs per kind) -- an empty feed, the
+background, a live feed, a mid-run switch, a resize. Then the bars' own claims,
+in the `scope_smoke` style, natively and mirrored at `/visualizer.html`:
+
+- a tone lights the bar whose band holds its frequency, and not the far side of
+  the spectrum -- the check that the axis is the right way round, which is the
+  bar-chart version of the M6 check that caught the scope drawn mirrored;
+- a louder tone draws a taller bar, monotonically, across three levels;
+- an empty feed draws no bars at all (decision 10), and a floor-level row draws
+  none either;
+- after a level drops, the peak cap is above the bar and descends over a known
+  elapsed time (decision 11) -- checked at two frame rates, as the gain's
+  release was, so the fall is timed in seconds on both shells;
+- the figure fills the frame and cannot clip at the same spread of window shapes
+  the vectorscope's fit is pinned at.
+
+And the half no readback reaches: **a person watching it move with real music on
+both shells**, per the phase's rule. The phase already budgets a revision pass
+after that first look, and bars are the visual most likely to need one -- "the
+pixels are correct" is a low bar for a spectrum analyser, which is the most
+familiar visual in the app and therefore the easiest to draw generically.
+
+### What this milestone will not do
+
+- **No chromatic/semitone bands** (decision 14) -- a `player-core` band-layout
+  change, deferred and named.
+- **No text** -- octave marks are geometry; labelling is a host feature.
+- **No history** -- the waterfall is M3's, and the bars keep no rows.
+- **No per-visual sizes, settings or persisted state** (decision 15). The host
+  has no per-visual settings mechanism, and inventing one for a mode toggle
+  would be designing M8's parameter system in a corner of M2.
+- **No change to the metering panel's Spectrum display.** It and the bars are
+  two presentations of one array, which is the point; the panel is already
+  right.
+
+### What landed
+
+**The feed grew by two slices, and nothing else outside `player-render`
+changed.** `VisualFrame` gained `levels` and `band_centres` through a chained
+`with_spectrum`, plus `band_position(hz)` -- where a frequency falls along the
+bands, interpolated in log frequency, which lives on the frame because the
+waterfall will want exactly it too. Natively the redraw thread reads
+`spectrum()` and `spectrum_band_centres()` inside the guard it already takes for
+`scope_window`, so a frame still costs one lock; on the web `webVisualizer.ts`
+passes `spectrum()` and `spectrumBands()` from the same shared buffer the
+Spectrum panel reads. No new command, no new UI control, no new persisted
+setting, no new meter -- and the gallery picked the visual up with **no UI edit
+at all**, which is the assertion this milestone existed to make.
+
+**`visuals/bars.rs` + `bars.wgsl`.** One instanced box per band and a second per
+peak cap, drawn with the host's depth buffer and 4x MSAA, over octave marks drawn
+as lines on the floor of the scene. The camera is *derived* rather than chosen,
+which is now shared code: M1's fit moved out of the vectorscope into
+[`camera::fit`] -- eye, target, a convex hull's corners, an aspect and a fill,
+returning the narrowest projection that holds all of them. The vectorscope's six
+fit tests pass unchanged against it, which is what makes the extraction an
+extraction rather than a rewrite. The bars' own scene is a plain box, because a
+bar never leaves its slot ([`BAR_FILL`]), so the fit depends on the aspect ratio
+and on nothing else -- not on the band count, and not on the music.
+
+**Colour by height, on the vectorscope's own two colours**: violet at the base
+running to green at the top, so a bar's colour reads as its level rather than as
+decoration, with per-face shading that is what makes the boxes read as solids.
+Caps near-white.
+
+### Three things found while building
+
+**The host contract was only handing over half the feed.** The per-kind checks
+passed a frame with samples and no spectrum, so the bars -- correctly, by
+decision 10 -- drew nothing, and two checks failed the moment the kind was
+registered. The check was wrong, not the visual: the host assembles a *whole*
+feed, so the contract has to be asked with one. Fixed, and taken further --
+`visual_smoke` now runs the **real analyser** (`player-core` as a dev-dependency
+of `player-render`, which is a cycle-free direction) so a tone that lights a bar
+is measured by the same code the meters use. A hand-written levels array would
+only have been checking itself.
+
+**The peak caps hid the level check.** "A louder tone draws a taller bar"
+reported three identical heights, because each shot reused a renderer whose caps
+were still up from the loud frame before it. The caps were working exactly as
+designed and the check was measuring them instead of the bars. Each independent
+shot now gets a renderer with no history, and the reason is written next to
+`bars_renderer` so the next visual with state does not rediscover it.
+
+**The two shells drew different colours, everywhere -- the other half of
+2026-08-18's background bug.** That day's fix defined the background as the
+colour a screen should show and converted it per surface format. But a *fragment
+shader* writes linear light with exactly the same consequence: an sRGB surface
+encodes it on the way out and the web's `bgra8unorm` canvas does not, so every
+colour in every visual came out washed-out on the desktop and saturated on the
+web. It went unreported because a trace is bright either way; M2 is where it
+stops being subtle, since a dim octave mark that reads on one shell is nearly
+invisible on the other.
+
+So the conversion is now `visuals/shared.wgsl`, prepended to every visual's
+shader by `attachments::shader_source`, with `attachments::target_is_srgb`
+supplying the flag through a uniform slot each visual already had. A visual
+writes the colour a screen should show and calls `to_target` on the way out.
+
+The evidence that this was a real difference rather than a theoretical one is in
+the numbers: M1 reported the vectorscope's mono figure as **196px natively
+against 195px on the web**, and its 16:9 scaling as **2.26x against 2.24x**. The
+two shells now report **189px and 189px**, **2.35x and 2.35x** -- identical, not
+merely close. (The figures moved because the same fix made the ribbon's far end
+darker than the smoke's old lit-pixel threshold of 80; that threshold is now 40,
+which is still five times the brightest channel of the background, and the reason
+is written at both ends.)
+
+### Verified
+
+**33/33** natively (`cargo run -p player-render --example visual_smoke`) and
+**38/38** in a real browser at `/visualizer.html` -- the same claims plus the
+five the web half can make on its own. The bars' figures agree **exactly**
+across the shells, every one of them:
+
+| claim | native | web |
+| --- | --- | --- |
+| 80Hz lights a bar at x= | 154 | 154 |
+| 6kHz lights a bar at x= | 445 | 445 |
+| tops at full scale / -20dB / -40dB | 61, 123, 182 | 61, 123, 182 |
+| a full-scale row reaches row | 53 | 53 |
+| a cap after one second, from row 53 | 86 | 86 |
+| the same cap at 60Hz for a second | 86 | 86 |
+
+Also green: `cargo fmt --check`, `cargo clippy --workspace --all-targets -D
+warnings`, the full suite (**258 tests**, up from 252 -- six new ones on the
+bars' fit, axis direction, slot arithmetic, display floor and decibel gain),
+`npm run wasm`, `npx tsc -b`, `npm run build`. And the gallery lists both visuals
+on both shells with no UI change, which was the milestone's real assertion.
+
+**What is not verified, and why**: how it *looks* with real music, on both
+shells. The pixel checks say the axis runs the right way, that taller means
+louder, that the caps fall in seconds and that nothing clips at any window shape
+-- none of which is the same as it being good to watch. A spectrum analyser is
+the most familiar visual in the app and therefore the easiest to draw
+generically, so this is the milestone most likely to want the revision pass the
+phase already budgets. The live look is what M2 is waiting on.

@@ -62,6 +62,25 @@ pub struct VisualFrame<'a> {
     /// (`Instant::now` does not exist on wasm). Used by [`GainSetting::Auto`]'s
     /// release below, and by every animated visual after M1.
     pub elapsed_seconds: f32,
+    /// The spectrum meter's own levels, dBFS per display band, low frequency
+    /// first -- **the same array the studio Spectrum panel draws**, published
+    /// off the audio thread by `player-core::spectrum` on both shells.
+    ///
+    /// Empty when nothing has measured yet, which a visual draws as *nothing*
+    /// rather than as sixty-four bars resting on the floor: the two are
+    /// different pictures, and only one of them is true before a track loads.
+    /// Its length is the band count and is not a constant a visual may assume
+    /// (M2 decision 10) -- the web's rows are empty until the shared buffer
+    /// exists, where the native side always answers with a full row.
+    pub levels: &'a [f32],
+    /// Centre frequency of each entry in [`Self::levels`], in Hz. The axis
+    /// those levels are against, so a visual can place a landmark -- an octave,
+    /// a crossover -- at the frequency it actually belongs to rather than at a
+    /// band index that would move if the band count ever did.
+    ///
+    /// Fixed for a given output rate, and empty on the same terms as
+    /// `levels`.
+    pub band_centres: &'a [f32],
     /// How much to magnify the signal for display, 1.0 being unity.
     ///
     /// **Not analysis, and the one field a shell does not fill in**: the host
@@ -81,8 +100,58 @@ impl<'a> VisualFrame<'a> {
             channels,
             sample_rate,
             elapsed_seconds,
+            levels: &[],
+            band_centres: &[],
             gain: 1.0,
         }
+    }
+
+    /// Adds the metering spectrum to the frame.
+    ///
+    /// Chained rather than folded into [`Self::new`] so that a caller with no
+    /// spectrum to offer says nothing instead of passing two empty slices, and
+    /// so that adding the *next* analysis field in M5 is again an addition
+    /// rather than an edit to every construction site in the project.
+    pub fn with_spectrum(mut self, levels: &'a [f32], band_centres: &'a [f32]) -> Self {
+        self.levels = levels;
+        self.band_centres = band_centres;
+        self
+    }
+
+    /// Where `hz` falls along [`Self::levels`], as a fractional band index.
+    ///
+    /// `None` when there is no axis, or when the frequency is outside the one
+    /// there is -- a landmark off the end of the display is not drawn at the
+    /// end of it.
+    ///
+    /// Interpolated in **log** frequency, because the bands are log-spaced and
+    /// a linear interpolation between two centres an octave apart would put the
+    /// midpoint a long way from where a person reading the display expects it.
+    /// Lives here rather than in a visual because every visual that draws a
+    /// frequency landmark needs exactly this, and two of them are already
+    /// planned (the bars' octaves, the waterfall's).
+    pub fn band_position(&self, hz: f32) -> Option<f32> {
+        let centres = self.band_centres;
+        if centres.len() < 2 || !hz.is_finite() || hz <= 0.0 {
+            return None;
+        }
+        let (first, last) = (centres[0], centres[centres.len() - 1]);
+        if hz < first || hz > last {
+            return None;
+        }
+        let target = hz.ln();
+        let upper = centres.iter().position(|c| *c >= hz)?;
+        if upper == 0 {
+            return Some(0.0);
+        }
+        let (lo, hi) = (centres[upper - 1].ln(), centres[upper].ln());
+        let span = hi - lo;
+        let fraction = if span.abs() < f32::EPSILON {
+            0.0
+        } else {
+            (target - lo) / span
+        };
+        Some(upper as f32 - 1.0 + fraction)
     }
 
     /// The loudest sample in the frame, as an amplitude.
@@ -156,11 +225,14 @@ pub enum VisualKind {
     /// PLAN.md section 4's hero, shipped in Phase 1 M6 and this host's first
     /// citizen.
     Vectorscope,
+    /// PLAN.md section 4's second built-in (Phase 3 M2): the metering
+    /// spectrum's own bands as instanced 3D bars.
+    SpectrumBars,
 }
 
 impl VisualKind {
     /// Every visual, in the order the gallery offers them.
-    pub const ALL: &'static [VisualKind] = &[VisualKind::Vectorscope];
+    pub const ALL: &'static [VisualKind] = &[VisualKind::Vectorscope, VisualKind::SpectrumBars];
 
     /// What the gallery opens at for anyone who has never chosen.
     pub const DEFAULT: VisualKind = VisualKind::Vectorscope;
@@ -168,12 +240,14 @@ impl VisualKind {
     pub fn id(self) -> &'static str {
         match self {
             VisualKind::Vectorscope => "vectorscope",
+            VisualKind::SpectrumBars => "spectrum-bars",
         }
     }
 
     pub fn name(self) -> &'static str {
         match self {
             VisualKind::Vectorscope => "3D vectorscope",
+            VisualKind::SpectrumBars => "Spectrum bars",
         }
     }
 
@@ -181,6 +255,9 @@ impl VisualKind {
         match self {
             VisualKind::Vectorscope => {
                 "The stereo field extruded along time, on the goniometer's own axes."
+            }
+            VisualKind::SpectrumBars => {
+                "The analyser's own bands as 3D bars, with peaks that fall and the octaves marked."
             }
         }
     }
@@ -198,6 +275,9 @@ impl VisualKind {
         match self {
             VisualKind::Vectorscope => {
                 Box::new(crate::visuals::Vectorscope::new(gpu, width, height))
+            }
+            VisualKind::SpectrumBars => {
+                Box::new(crate::visuals::SpectrumBars::new(gpu, width, height))
             }
         }
     }

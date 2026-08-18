@@ -16,3 +16,9 @@ thiserror = "1"
 # Only the offscreen smoke check needs to block on the async device request --
 # the library itself stays async precisely so the web build never has to.
 pollster = "0.4"
+# The smoke check only. M2's bars draw the metering spectrum's own bands, so
+# the check that a tone lights the right bar has to run the *real* analyser
+# over that tone -- a hand-written levels array would only be checking itself.
+# A dev-dependency, deliberately: the library still knows nothing about
+# player-core, which is what keeps a visual from computing DSP (decision 2).
+player-core = { path = "../player-core" }

@@ -1301,23 +1301,35 @@ pub fn run() {
                     // count (M6 decision 1), so it depends on the rate the
                     // device opened at -- which is why this asks the engine
                     // rather than using a constant.
-                    let (samples, channels, rate) = {
+                    //
+                    // M2 added the spectrum to the feed, for the bars: the
+                    // meters' own levels and the axis they are against, read
+                    // inside the same guard as the samples so a frame still
+                    // costs one lock rather than two.
+                    let (samples, channels, rate, levels, centres) = {
                         let guard = shared.lock().unwrap();
                         match guard.as_ref() {
                             Some(p) => {
                                 let channels = p.output_channels();
                                 let rate = p.output_sample_rate();
                                 let wanted = player_render::window_samples(rate, channels);
-                                (p.scope_window(wanted), channels, rate)
+                                (
+                                    p.scope_window(wanted),
+                                    channels,
+                                    rate,
+                                    p.spectrum(),
+                                    p.spectrum_band_centres().to_vec(),
+                                )
                             }
-                            None => (Vec::new(), 2, 48_000),
+                            None => (Vec::new(), 2, 48_000, Vec::new(), Vec::new()),
                         }
                     };
                     let elapsed = last_frame.elapsed().as_secs_f32();
                     last_frame = std::time::Instant::now();
-                    if let Err(e) =
-                        renderer.draw_frame(&VisualFrame::new(&samples, channels, rate, elapsed))
-                    {
+                    if let Err(e) = renderer.draw_frame(
+                        &VisualFrame::new(&samples, channels, rate, elapsed)
+                            .with_spectrum(&levels, &centres),
+                    ) {
                         log::warn!("visualizer draw_frame error: {e}");
                     }
                     std::thread::sleep(Duration::from_millis(16));

@@ -23,10 +23,17 @@
 //!   state as building it fresh. Adding a visual to the registry adds it to
 //!   this loop with no edit here, which is decision 6 in practice.
 //! - **Per visual, for what only that visual claims** -- the vectorscope's
-//!   axes, fade, level and layout, carried over from M6 unchanged.
+//!   axes, fade, level and layout, carried over from M6 unchanged; and from M2,
+//!   the bars' axis direction, height scale, empty case and falling peaks.
+//!
+//! M2 also made this check run the *real* analyser: the bars draw
+//! `player-core`'s spectrum bands, so the tone that lights a bar is measured by
+//! the same code the meters use rather than by a levels array written here,
+//! which would only be checking itself.
 
 use std::sync::atomic::{AtomicUsize, Ordering};
 
+use player_core::analysis::{band_centres, Meters};
 use player_render::{GainSetting, OffscreenRenderer, VisualFrame, VisualKind, TRACE_SECONDS};
 
 const WIDTH: u32 = 320;
@@ -62,13 +69,18 @@ fn tone(hz: f32, right_gain: f32) -> Vec<f32> {
 /// A pixel that is part of the drawing rather than the background.
 ///
 /// The threshold sits well clear of both: the background is a near-black (5, 5,
-/// 8) as displayed (`attachments::BACKGROUND`), and the dimmest thing the
-/// vectorscope's shader actually draws is the far end of the ribbon, whose blue
-/// channel is around 125. It used to have to clear a background of roughly
-/// (40, 40, 48) -- the sRGB-encoded grey that turned out to be the bug fixed on
-/// 2026-08-18, where a linear clear value was handed to an sRGB surface.
+/// 8) as displayed (`attachments::BACKGROUND`), and the dimmest thing any
+/// shader here draws is the far end of the vectorscope's ribbon, at roughly
+/// (31, 17, 53).
+///
+/// It was 80 until M2, when the shaders started converting their colours for
+/// the surface's colour space (`visuals/shared.wgsl`) -- the fragment half of
+/// the background bug fixed on 2026-08-18. That made everything on an sRGB
+/// surface show the colour it was written as rather than a washed-out encoding
+/// of it, which is darker, and left the ribbon's far end below the old
+/// threshold. 40 is still five times the brightest channel of the background.
 fn is_trace(pixel: &[u8]) -> bool {
-    pixel[..3].iter().any(|&channel| channel > 80)
+    pixel[..3].iter().any(|&channel| channel > 40)
 }
 
 struct Figure {
@@ -134,9 +146,253 @@ fn measure(pixels: &[u8]) -> Figure {
 /// A 60Hz frame, which is the cadence the desktop redraw thread aims for.
 const FRAME_SECONDS: f32 = 1.0 / 60.0;
 
-/// A stereo frame at this example's rate.
+/// A stereo frame at this example's rate, carrying samples and nothing else --
+/// what the vectorscope reads.
 fn frame(samples: &[f32]) -> VisualFrame<'_> {
     VisualFrame::new(samples, 2, RATE, FRAME_SECONDS)
+}
+
+/// The whole feed the host assembles: samples *and* the spectrum measured from
+/// them. What a visual is actually handed at runtime, and therefore what the
+/// host contract has to be asked with -- a frame carrying only samples is a
+/// frame the bars correctly draw nothing from (M2 decision 10).
+fn full_frame<'a>(samples: &'a [f32], spectrum: &'a Spectrum) -> VisualFrame<'a> {
+    frame(samples).with_spectrum(&spectrum.levels, &spectrum.centres)
+}
+
+/// A frame that advances the clock by `seconds` over a spectrum that is not
+/// moving -- for watching the peak caps come down.
+fn falling_frame<'a>(spectrum: &'a Spectrum, seconds: f32) -> VisualFrame<'a> {
+    let mut frame = full_frame(&[], spectrum);
+    frame.elapsed_seconds = seconds;
+    frame
+}
+
+/// The metering spectrum of some audio, measured by `player-core` itself.
+struct Spectrum {
+    levels: Vec<f32>,
+    centres: Vec<f32>,
+}
+
+impl Spectrum {
+    /// Runs the real analyser over `samples`, exactly as the analysis thread
+    /// does -- so what the bars are handed here is what they are handed by the
+    /// app.
+    fn of(samples: &[f32], channels: u16) -> Self {
+        let mut meters = Meters::new(RATE, channels);
+        meters.ingest(samples, false);
+        let levels = meters.update(FRAME_SECONDS).to_vec();
+        Self {
+            levels,
+            centres: band_centres(RATE),
+        }
+    }
+
+    /// A row held at one level across every band. For the checks that are about
+    /// the *display* -- how tall full scale draws, how a peak falls -- where a
+    /// measured row would only make the arithmetic harder to state.
+    fn flat(level_db: f32) -> Self {
+        let centres = band_centres(RATE);
+        Self {
+            levels: vec![level_db; centres.len()],
+            centres,
+        }
+    }
+}
+
+/// How tall each column of the image is drawn, as the topmost lit row in it --
+/// `None` for a column with nothing in it.
+///
+/// The measurement the bars are checked through, and it exists because a
+/// brightness threshold cannot separate a dim bar from an octave mark: the
+/// marks are drawn a violet-grey whose blue channel sits between a quiet bar's
+/// and a loud one's. Height separates them completely, because the marks lie on
+/// the floor and a bar stands up from it -- and "which bar is tallest" is the
+/// question a spectrum display exists to answer anyway.
+fn column_tops(pixels: &[u8], width: u32, height: u32) -> Vec<Option<u32>> {
+    let mut tops = vec![None; width as usize];
+    for y in 0..height {
+        for x in 0..width {
+            let i = ((y * width + x) * 4) as usize;
+            if is_trace(&pixels[i..i + 4]) && tops[x as usize].is_none() {
+                tops[x as usize] = Some(y);
+            }
+        }
+    }
+    tops
+}
+
+/// The x of the tallest column, and how high it reaches.
+fn tallest_column(pixels: &[u8], width: u32, height: u32) -> Option<(u32, u32)> {
+    column_tops(pixels, width, height)
+        .into_iter()
+        .enumerate()
+        .filter_map(|(x, top)| top.map(|y| (x as u32, y)))
+        .min_by_key(|(_, y)| *y)
+}
+
+/// The highest row anything reaches. Smaller is taller: row 0 is the top of the
+/// image.
+fn top_row(pixels: &[u8], width: u32, height: u32) -> Option<u32> {
+    tallest_column(pixels, width, height).map(|(_, y)| y)
+}
+
+/// Wider than tall, because a row of bars is: this is the shape the visual is
+/// actually looked at in, and 64 bands across 320px would be three pixels each.
+const BARS_WIDTH: u32 = 640;
+const BARS_HEIGHT: u32 = 360;
+
+/// A bars renderer with no history, which is what most of these checks need:
+/// the peak caps survive between frames on purpose (decision 11), so a shot
+/// drawn on a renderer that has already seen a loud frame is measuring the
+/// leftover cap rather than the bar underneath it. Found by the "louder is
+/// taller" check below, which reported three identical heights until each shot
+/// got its own renderer.
+fn bars_renderer() -> OffscreenRenderer {
+    pollster::block_on(OffscreenRenderer::new(
+        BARS_WIDTH,
+        BARS_HEIGHT,
+        VisualKind::SpectrumBars,
+    ))
+    .expect("offscreen renderer for the bars")
+}
+
+/// What only the spectrum bars claim (Phase 3 M2).
+fn check_the_spectrum_bars() {
+    println!("\n{} -- its own claims:", VisualKind::SpectrumBars.name());
+
+    // Decision 10: a frame with audio but no measurement is not silence, it is
+    // "nothing has been measured yet" -- which is the web shell's first moments
+    // of a session, before its shared buffer exists. Sixty-four bars resting on
+    // the floor would be a picture of the wrong thing.
+    let unmeasured = bars_renderer()
+        .draw_to_pixels(&frame(&tone(1000.0, 1.0)))
+        .expect("render audio with no spectrum");
+    check(
+        "audio with nothing measured yet draws nothing at all",
+        measure_at(&unmeasured, BARS_WIDTH, BARS_HEIGHT).count == 0,
+        format!(
+            "{} lit pixels",
+            measure_at(&unmeasured, BARS_WIDTH, BARS_HEIGHT).count
+        ),
+    );
+
+    // The axis, and the check that catches a display drawn backwards -- the
+    // bar-chart form of the mistake M6's camera check caught in the
+    // vectorscope. Both tones go through the real analyser, so what is checked
+    // is the whole path: audio, `player-core`'s bands, the frame, the
+    // instances, the pixels.
+    let low = tone(80.0, 1.0);
+    let low_spectrum = Spectrum::of(&low, 2);
+    let low_pixels = bars_renderer()
+        .draw_to_pixels(&full_frame(&low, &low_spectrum))
+        .expect("render a low tone");
+    let high = tone(6000.0, 1.0);
+    let high_spectrum = Spectrum::of(&high, 2);
+    let high_pixels = bars_renderer()
+        .draw_to_pixels(&full_frame(&high, &high_spectrum))
+        .expect("render a high tone");
+    let low_bar = tallest_column(&low_pixels, BARS_WIDTH, BARS_HEIGHT).expect("a low tone draws");
+    let high_bar =
+        tallest_column(&high_pixels, BARS_WIDTH, BARS_HEIGHT).expect("a high tone draws");
+    check(
+        "a tone lights a bar on the side of the display its frequency belongs to",
+        low_bar.0 < BARS_WIDTH / 2 && high_bar.0 > BARS_WIDTH / 2 && low_bar.0 < high_bar.0,
+        format!(
+            "80Hz at x={}, 6kHz at x={}, of {BARS_WIDTH}",
+            low_bar.0, high_bar.0
+        ),
+    );
+
+    // Level, which is the other half of what a spectrum display says. Three
+    // amplitudes twenty dB apart, through the real analyser: taller has to mean
+    // louder every time, or the display is decorative.
+    let heights: Vec<u32> = [1.0f32, 0.1, 0.01]
+        .iter()
+        .map(|amplitude| {
+            let samples: Vec<f32> = tone(1000.0, 1.0).iter().map(|s| s * amplitude).collect();
+            let spectrum = Spectrum::of(&samples, 2);
+            let pixels = bars_renderer()
+                .draw_to_pixels(&full_frame(&samples, &spectrum))
+                .expect("render a tone at some level");
+            top_row(&pixels, BARS_WIDTH, BARS_HEIGHT).unwrap_or(BARS_HEIGHT)
+        })
+        .collect();
+    check(
+        "a louder tone draws a taller bar",
+        heights[0] < heights[1] && heights[1] < heights[2],
+        format!(
+            "tops at row {}, {}, {} for full scale, -20dB and -40dB",
+            heights[0], heights[1], heights[2]
+        ),
+    );
+
+    // Decision 13: the display's floor is -72dBFS, not the meter's -120, so a
+    // row at the meter's floor has no bars in it at all -- only the octave
+    // marks, which lie on the floor of the scene.
+    let floor = Spectrum::flat(-120.0);
+    let at_floor = bars_renderer()
+        .draw_to_pixels(&full_frame(&[], &floor))
+        .expect("render a floor-level row");
+    let floor_top = top_row(&at_floor, BARS_WIDTH, BARS_HEIGHT);
+    check(
+        "a row at the meter's floor draws no bars, only the octave marks",
+        floor_top.is_none_or(|top| top > BARS_HEIGHT / 2),
+        format!("tallest column reaches row {floor_top:?} of {BARS_HEIGHT}"),
+    );
+
+    // And full scale reaches near the top of the frame without touching it --
+    // the frame is pinned to a full-scale display, exactly as the vectorscope's
+    // is.
+    let loud = Spectrum::flat(0.0);
+    let mut falling = bars_renderer();
+    let full_scale = falling
+        .draw_to_pixels(&full_frame(&[], &loud))
+        .expect("render a full-scale row");
+    let full_top = top_row(&full_scale, BARS_WIDTH, BARS_HEIGHT).expect("full scale draws bars");
+    check(
+        "a full-scale row reaches near the top of the frame without clipping",
+        full_top > 0 && full_top < BARS_HEIGHT / 4,
+        format!("top at row {full_top} of {BARS_HEIGHT}"),
+    );
+
+    // Decision 11: the caps are display state, and they fall in *seconds* --
+    // the property that makes a 60Hz redraw thread and a browser's animation
+    // callbacks draw the same thing. Checked the way the automatic gain's
+    // release was: one long frame against many short ones. `falling` carries
+    // the full-scale frame above, which is what put the caps up there.
+    let quiet = Spectrum::flat(-120.0);
+    let one_second = falling
+        .draw_to_pixels(&falling_frame(&quiet, 1.0))
+        .expect("render a second of falling");
+    let after_one = top_row(&one_second, BARS_WIDTH, BARS_HEIGHT).expect("a cap is still up");
+    check(
+        "a peak cap outlives the bar under it and falls from where it reached",
+        after_one > full_top,
+        format!("cap at row {after_one}, having peaked at row {full_top}"),
+    );
+
+    let mut stepwise = bars_renderer();
+    stepwise
+        .draw_to_pixels(&full_frame(&[], &loud))
+        .expect("raise the caps");
+    for _ in 0..60 {
+        stepwise
+            .draw_to_pixels(&falling_frame(&quiet, 1.0 / 60.0))
+            .expect("a 60Hz frame of falling");
+    }
+    let stepwise_pixels = stepwise
+        .draw_to_pixels(&falling_frame(&quiet, 0.0))
+        .expect("read the caps back");
+    let stepwise_top =
+        top_row(&stepwise_pixels, BARS_WIDTH, BARS_HEIGHT).expect("a cap is still up at 60Hz");
+    check(
+        "the caps fall at the same rate whatever the frame rate",
+        after_one.abs_diff(stepwise_top) <= 2,
+        format!(
+            "row {after_one} after one long frame against {stepwise_top} after sixty short ones"
+        ),
+    );
 }
 
 /// The contract the *host* depends on, asked of every registered visual.
@@ -149,9 +405,10 @@ fn check_the_host_contract(kind: VisualKind) {
     let mut renderer = pollster::block_on(OffscreenRenderer::new(WIDTH, HEIGHT, kind))
         .expect("offscreen renderer for this visual");
 
-    // Before anything has played there is no audio, and every visual has to
-    // survive being asked to draw that. The vectorscope additionally draws
-    // *nothing at all*, which is its own claim, checked below.
+    // Before anything has played there is no audio and nothing has been
+    // measured, and every visual has to survive being asked to draw that. Each
+    // additionally draws *nothing at all* from it, which is its own claim,
+    // checked below.
     let empty = renderer
         .draw_to_pixels(&frame(&[]))
         .expect("render an empty feed");
@@ -180,10 +437,15 @@ fn check_the_host_contract(kind: VisualKind) {
         ),
     );
 
+    // A whole feed, because the host assembles a whole one: the vectorscope
+    // reads the samples and the bars read the spectrum, and a contract check
+    // that handed over only half of it would be asking half the gallery to draw
+    // nothing.
     let signal = tone(220.0, 0.3);
+    let spectrum = Spectrum::of(&signal, 2);
     let lit = measure(
         &renderer
-            .draw_to_pixels(&frame(&signal))
+            .draw_to_pixels(&full_frame(&signal, &spectrum))
             .expect("render audio"),
     );
     check(
@@ -202,10 +464,10 @@ fn check_the_host_contract(kind: VisualKind) {
             .expect("offscreen renderer to switch");
     switched.set_visual(kind);
     let after = switched
-        .draw_to_pixels(&frame(&signal))
+        .draw_to_pixels(&full_frame(&signal, &spectrum))
         .expect("render after a switch");
     let fresh = renderer
-        .draw_to_pixels(&frame(&signal))
+        .draw_to_pixels(&full_frame(&signal, &spectrum))
         .expect("render without a switch");
     check(
         "switching into this visual draws what building it fresh does",
@@ -222,7 +484,9 @@ fn check_the_host_contract(kind: VisualKind) {
     // error -- but it is exactly what the Phase 0 scope got wrong on Windows.
     let mut wide = pollster::block_on(OffscreenRenderer::new(WIDTH * 2, HEIGHT, kind))
         .expect("offscreen at a different size");
-    let stretched = wide.draw_to_pixels(&frame(&signal)).expect("render at 2:1");
+    let stretched = wide
+        .draw_to_pixels(&full_frame(&signal, &spectrum))
+        .expect("render at 2:1");
     let widened = measure_at(&stretched, WIDTH * 2, HEIGHT);
     check(
         "a different viewport renders rather than failing",
@@ -558,6 +822,7 @@ fn main() {
         check_the_host_contract(*kind);
     }
     check_the_vectorscope();
+    check_the_spectrum_bars();
     check_display_gain();
 
     let checks = CHECKS.load(Ordering::Relaxed);

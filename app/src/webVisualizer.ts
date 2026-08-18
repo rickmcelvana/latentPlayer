@@ -15,7 +15,13 @@ import init, {
   visualCatalog,
   visualWindowSamples,
 } from "./wasm/player_rt_wasm.js";
-import { outputChannels, outputSampleRate, scopeWindow } from "./playerEngine";
+import {
+  outputChannels,
+  outputSampleRate,
+  scopeWindow,
+  spectrum,
+  spectrumBands,
+} from "./playerEngine";
 import type { GainInfo, VisualInfo } from "./visualizer";
 
 let renderer: WasmRenderer | null = null;
@@ -69,7 +75,18 @@ function drawLoop(): void {
     const now = performance.now();
     const elapsed = lastFrame === 0 ? 1 / 60 : (now - lastFrame) / 1000;
     lastFrame = now;
-    renderer.draw_frame(scopeWindow(wanted), channels, rate, elapsed);
+    // The spectrum joined the feed in M2, for the bars. Read from the same
+    // shared buffer the Spectrum panel reads, so the two are drawing one
+    // measurement rather than two -- and empty until the worker has published
+    // any, which is a state a visual draws as nothing.
+    renderer.draw_frame(
+      scopeWindow(wanted),
+      channels,
+      rate,
+      elapsed,
+      spectrum(),
+      spectrumBands(),
+    );
   } catch (e) {
     // Found live (2026-08-15): a single thrown frame (e.g. a transient
     // Outdated/Occluded surface -- see Renderer::draw_frame's own comment)

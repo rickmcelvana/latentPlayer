@@ -7,6 +7,8 @@
 //! seam (see `crate::visual`), and the reason a new visual is a file here plus
 //! one line of registry rather than a change to either shell.
 
+mod bars;
 mod vectorscope;
 
+pub use bars::SpectrumBars;
 pub use vectorscope::Vectorscope;

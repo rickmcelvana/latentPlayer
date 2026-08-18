@@ -558,20 +558,26 @@ impl WasmRenderer {
     /// M6's fix for a device that isn't; `sample_rate` is what makes the window
     /// a duration rather than a count; `elapsed_seconds` is what anything that
     /// moves over time is timed from, the automatic gain's release included.
+    ///
+    /// `levels` and `band_centres` are the metering spectrum and its axis (M2):
+    /// what the bars draw, and the same arrays the Spectrum panel is drawn
+    /// from. Empty is a real answer -- before a track loads there is no
+    /// analyser and nothing has been measured -- and a visual draws nothing
+    /// from it rather than a row of floors.
     pub fn draw_frame(
         &mut self,
         samples: &[f32],
         channels: u16,
         sample_rate: u32,
         elapsed_seconds: f32,
+        levels: &[f32],
+        band_centres: &[f32],
     ) -> Result<(), JsValue> {
         self.inner
-            .draw_frame(&VisualFrame::new(
-                samples,
-                channels,
-                sample_rate,
-                elapsed_seconds,
-            ))
+            .draw_frame(
+                &VisualFrame::new(samples, channels, sample_rate, elapsed_seconds)
+                    .with_spectrum(levels, band_centres),
+            )
             .map_err(|e| JsValue::from_str(&e.to_string()))
     }
 }

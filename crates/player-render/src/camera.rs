@@ -104,6 +104,79 @@ pub fn look_at(eye: [f32; 3], target: [f32; 3], up: [f32; 3]) -> Mat4 {
     ])
 }
 
+/// A view-projection **fitted to a scene** rather than opened to a chosen
+/// angle: the smallest field of view that still holds every one of `corners`
+/// inside `fill` of the frame, in whichever axis binds first.
+///
+/// This is the answer Phase 3 M1 arrived at after the first live fullscreen run
+/// (the figure held its share of the *height* and left a widescreen mostly
+/// empty, because a fixed field of view frames a fixed angle whatever the
+/// viewport is). It lives here rather than in the vectorscope because every 3D
+/// visual has the same problem and the wrong answer looks the same in all of
+/// them -- M2's bars are the second caller, and the alternative was the same
+/// forty lines twice with the chance to get one of them subtly wrong.
+///
+/// `corners` are world-space points that must stay in frame. Passing a convex
+/// hull's vertices is enough to fit everything inside it, because a perspective
+/// projection maps the extremes of a convex set to the extremes of its
+/// projection -- which is what lets a caller hand over eight points instead of
+/// a whole scene.
+///
+/// The arithmetic: for a point in view space, `ndc_y = (y / -z) / tan(fov/2)`
+/// and `ndc_x = (x / -z) / (tan(fov/2) * aspect)`, so the smallest `tan(fov/2)`
+/// keeping every corner within `fill` is
+/// `max(max|y/-z|, max|x/-z| / aspect) / fill`.
+#[allow(clippy::too_many_arguments)]
+pub fn fit(
+    eye: [f32; 3],
+    target: [f32; 3],
+    up: [f32; 3],
+    corners: &[[f32; 3]],
+    aspect: f32,
+    fill: f32,
+    near: f32,
+    far: f32,
+) -> Mat4 {
+    let aspect = if aspect.is_finite() && aspect > 0.0 {
+        aspect
+    } else {
+        1.0
+    };
+    let fill = if fill.is_finite() && fill > 0.0 {
+        fill
+    } else {
+        1.0
+    };
+    let view = look_at(eye, target, up);
+    let (mut ratio_x, mut ratio_y) = (0.0f32, 0.0f32);
+    for corner in corners {
+        let eye_space = view.project(*corner);
+        // Behind or on the camera plane: no finite projection to fit. Cannot
+        // happen for a camera outside its scene, and skipping is the harmless
+        // answer if an eye is ever placed inside one.
+        let distance = -eye_space[2];
+        if distance <= near {
+            continue;
+        }
+        ratio_x = ratio_x.max((eye_space[0] / distance).abs());
+        ratio_y = ratio_y.max((eye_space[1] / distance).abs());
+    }
+
+    // The horizontal term is not redundant with the vertical one: a window
+    // taller than it is wide has no spare width, and there it is the horizontal
+    // that must not clip.
+    let half = (ratio_y / fill).max(ratio_x / (fill * aspect));
+    // A scene that projected to nothing would divide by zero downstream; 45
+    // degrees is the sane fallback, and was this project's fixed value before
+    // the fit existed.
+    let fov_y = if half > f32::EPSILON {
+        2.0 * half.atan()
+    } else {
+        std::f32::consts::FRAC_PI_4
+    };
+    perspective(fov_y, aspect, near, far).mul(&view)
+}
+
 fn sub(a: [f32; 3], b: [f32; 3]) -> [f32; 3] {
     [a[0] - b[0], a[1] - b[1], a[2] - b[2]]
 }

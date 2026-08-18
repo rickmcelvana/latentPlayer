@@ -290,6 +290,42 @@ shell (2026-08-18)**: fullscreen and Esc work, and Auto gain "looks right on rea
 music". `cargo run -p player-render --example visual_smoke` checks every visual
 in the registry; `/visualizer.html` is its web half.
 
+**Phase 3 M2 is built and awaiting the live look** (2026-08-18): spectrum bars,
+the gallery's second citizen and the milestone that tests the host rather than
+extending it. Where the vectorscope draws raw samples geometrically, the bars
+draw **analysis** -- `player-core`'s own spectrum bands, the same array the
+studio Spectrum panel shows, at the same instant. That is PLAN.md §4's promise
+stated as a picture for the first time. `VisualFrame` grew `levels` and
+`band_centres` (its designed growth -- `visual.rs` named M2 as the reason it is a
+struct) plus `band_position`, and **nothing else outside `player-render`
+changed**: no new command, no new UI control, no new persisted setting, no new
+meter, and the gallery listed the new visual with no UI edit at all.
+`visuals/bars.rs` is instanced boxes with peak caps that fall in *seconds* (12
+dB/s, display state inside the visual -- the caps are an animation over levels
+already measured, not a meter), a display window of -72..0 dBFS that is the
+visual's own rather than the meter's -120, display gain applied as a **decibel
+offset** since a bar display is logarithmic, and octave marks placed by frequency
+through the frame's own band centres. M1's camera fit moved to `camera::fit` and
+is now shared; the vectorscope's six fit tests pass unchanged against it.
+
+That milestone also closed the other half of 2026-08-18's background bug. That
+day's fix defined the *clear colour* as what a screen should show and converted
+it per surface format -- but a fragment shader writes linear light with exactly
+the same consequence, so every colour in every visual was washed out on the
+desktop's sRGB surface and saturated on the web's `bgra8unorm` canvas. The
+conversion now lives once in `visuals/shared.wgsl`, prepended to every visual's
+shader by `attachments::shader_source`. The evidence it was real: M1 reported the
+vectorscope's mono figure as 196px natively against 195px on the web and its 16:9
+scaling as 2.26x against 2.24x; both shells now report **189px and 2.35x** --
+identical, not merely close.
+Verified: **33/33** `cargo run -p player-render --example visual_smoke` (which
+now runs the real `player-core` analyser, so a tone that lights a bar is measured
+by the same code the meters use) and **38/38** at `/visualizer.html`, agreeing
+exactly on every bars figure; 258 tests, clippy and fmt clean on both targets.
+**What it waits on is a person watching it with real music on both shells** --
+the pixels being right is the floor, not the bar, and a spectrum analyser is the
+easiest visual in the app to draw generically.
+
 The certificate answer changed a finding into a fix: ureq defaults to
 webpki-roots, a bundle compiled into the binary, under which installing a
 self-hosted server's CA in the OS store does nothing -- so the obvious advice

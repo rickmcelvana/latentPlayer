@@ -12,8 +12,10 @@
 
 use wgpu::util::DeviceExt;
 
-use crate::attachments::{background, targets, DEPTH_FORMAT, SAMPLE_COUNT};
-use crate::camera::{look_at, perspective, Mat4};
+use crate::attachments::{
+    background, shader_source, target_is_srgb, targets, DEPTH_FORMAT, SAMPLE_COUNT,
+};
+use crate::camera::{self, Mat4};
 use crate::trace::{self, Vertex, TRACE_POINTS};
 use crate::visual::{Gpu, Visual, VisualFrame};
 
@@ -57,7 +59,7 @@ const FILL: f32 = 0.9;
 #[derive(Copy, Clone, bytemuck::Pod, bytemuck::Zeroable)]
 struct CameraUniform {
     view_proj: [[f32; 4]; 4],
-    /// `[figure_scale, depth, gain, 0]`. The world transform lives in the shader
+    /// `[figure_scale, depth, gain, srgb_target]`. The world transform lives in the shader
     /// but its numbers come from here, because the camera is *fitted* to the
     /// first two -- a shader constant and a Rust constant drifting apart would be
     /// a camera framing a scene of a different size than the one drawn.
@@ -66,6 +68,10 @@ struct CameraUniform {
     /// it: the frame stays pinned to unity full scale, and gain magnifies the
     /// trace inside that frame. A camera that refitted itself to the gained
     /// figure would leave the picture identical and the control useless.
+    ///
+    /// `srgb_target` is the surface's colour space, which the *fragment* stage
+    /// needs for the same reason the clear colour does -- see
+    /// `attachments::target_is_srgb` and `visuals/shared.wgsl`.
     figure: [f32; 4],
 }
 
@@ -86,6 +92,9 @@ pub struct Vectorscope {
     /// rewritten. `f32::NAN` would compare unequal forever; 1.0 is what the
     /// buffer is built with.
     gain: f32,
+    /// The surface's colour space, as the shader's flag. Fixed for this
+    /// visual's life: swapping visuals never swaps the surface (decision 5).
+    srgb: f32,
 }
 
 impl Vectorscope {
@@ -97,12 +106,17 @@ impl Vectorscope {
         } = *gpu;
         let shader = device.create_shader_module(wgpu::ShaderModuleDescriptor {
             label: Some("vectorscope-shader"),
-            source: wgpu::ShaderSource::Wgsl(include_str!("vectorscope.wgsl").into()),
+            source: wgpu::ShaderSource::Wgsl(shader_source(include_str!("vectorscope.wgsl"))),
         });
 
         let camera_buffer = device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
             label: Some("vectorscope-camera"),
-            contents: bytemuck::bytes_of(&camera_uniform(width, height, 1.0)),
+            contents: bytemuck::bytes_of(&camera_uniform(
+                width,
+                height,
+                1.0,
+                target_is_srgb(format),
+            )),
             usage: wgpu::BufferUsages::UNIFORM | wgpu::BufferUsages::COPY_DST,
         });
 
@@ -110,7 +124,9 @@ impl Vectorscope {
             label: Some("vectorscope-camera-layout"),
             entries: &[wgpu::BindGroupLayoutEntry {
                 binding: 0,
-                visibility: wgpu::ShaderStages::VERTEX,
+                // The fragment stage reads the surface's colour space out of
+                // the same uniform (`figure.w`).
+                visibility: wgpu::ShaderStages::VERTEX_FRAGMENT,
                 ty: wgpu::BindingType::Buffer {
                     ty: wgpu::BufferBindingType::Uniform,
                     has_dynamic_offset: false,
@@ -202,6 +218,7 @@ impl Vectorscope {
             width,
             height,
             gain: 1.0,
+            srgb: target_is_srgb(format),
         };
         scene.write_camera(queue, 1.0);
         scene
@@ -221,7 +238,7 @@ impl Vectorscope {
         queue.write_buffer(
             &self.camera_buffer,
             0,
-            bytemuck::bytes_of(&camera_uniform(self.width, self.height, gain)),
+            bytemuck::bytes_of(&camera_uniform(self.width, self.height, gain, self.srgb)),
         );
     }
 }
@@ -318,11 +335,11 @@ impl Visual for Vectorscope {
 
 /// The camera and the world transform for a viewport of this size -- written
 /// together because the first is fitted to the second.
-fn camera_uniform(width: u32, height: u32, gain: f32) -> CameraUniform {
+fn camera_uniform(width: u32, height: u32, gain: f32, srgb: f32) -> CameraUniform {
     let aspect = width.max(1) as f32 / height.max(1) as f32;
     CameraUniform {
         view_proj: view_projection(width, height).as_array(),
-        figure: [FIGURE_SCALE, depth_for(aspect), gain, 0.0],
+        figure: [FIGURE_SCALE, depth_for(aspect), gain, srgb],
     }
 }
 
@@ -344,26 +361,6 @@ fn camera_uniform(width: u32, height: u32, gain: f32) -> CameraUniform {
 /// real lever, which is amplitude: see [`FILL`].
 fn depth_for(_aspect: f32) -> f32 {
     DEPTH
-}
-
-/// The scene's extremes as angles from the camera: `max|x / -z|` and
-/// `max|y / -z|` in view space, which is what a field of view has to cover.
-fn scene_ratios(depth: f32) -> (f32, f32) {
-    let view = look_at(EYE, [0.0, 0.0, 0.0], [0.0, 1.0, 0.0]);
-    let (mut ratio_x, mut ratio_y) = (0.0f32, 0.0f32);
-    for corner in scene_corners(depth) {
-        let eye_space = view.project(corner);
-        // Behind or on the camera plane: no finite projection to fit. Cannot
-        // happen for a camera outside the scene, and skipping is the harmless
-        // answer if the eye is ever moved inside it.
-        let distance = -eye_space[2];
-        if distance <= NEAR {
-            continue;
-        }
-        ratio_x = ratio_x.max((eye_space[0] / distance).abs());
-        ratio_y = ratio_y.max((eye_space[1] / distance).abs());
-    }
-    (ratio_x, ratio_y)
 }
 
 /// The furthest the trace can reach in world space -- the corners of the scene
@@ -405,28 +402,22 @@ fn scene_corners(depth: f32) -> [[f32; 3]; 8] {
 /// held its share of the *height* and left a widescreen mostly empty -- and why
 /// a taller-than-wide window used to clip nothing but showed the figure small.
 ///
-/// The arithmetic: for a point in view space, `ndc_y = (y / -z) / tan(fov/2)`
-/// and `ndc_x = (x / -z) / (tan(fov/2) * aspect)`. So the smallest `tan(fov/2)`
-/// that keeps every corner inside `FILL` is
-/// `max(max|y/-z|, max|x/-z| / aspect) / FILL`.
+/// The arithmetic is [`camera::fit`]'s, which is where it moved when M2's bars
+/// became its second caller. What stays here is the part that is the
+/// vectorscope's own: where the eye sits, and which eight points a signal can
+/// actually reach.
 fn view_projection(width: u32, height: u32) -> Mat4 {
     let aspect = width.max(1) as f32 / height.max(1) as f32;
-    let view = look_at(EYE, [0.0, 0.0, 0.0], [0.0, 1.0, 0.0]);
-    let (ratio_x, ratio_y) = scene_ratios(depth_for(aspect));
-
-    // The vertical term is the one that normally binds, by `depth_for`'s
-    // construction. The horizontal term is not redundant: a window taller than
-    // it is wide has no spare width to lengthen the ribbon into, and there the
-    // horizontal is what must not clip.
-    let half = (ratio_y / FILL).max(ratio_x / (FILL * aspect));
-    // A scene that projected to nothing would divide by zero downstream; the
-    // old fixed 45 degrees is the sane fallback.
-    let fov_y = if half > f32::EPSILON {
-        2.0 * half.atan()
-    } else {
-        std::f32::consts::FRAC_PI_4
-    };
-    perspective(fov_y, aspect, NEAR, FAR).mul(&view)
+    camera::fit(
+        EYE,
+        [0.0, 0.0, 0.0],
+        [0.0, 1.0, 0.0],
+        &scene_corners(depth_for(aspect)),
+        aspect,
+        FILL,
+        NEAR,
+        FAR,
+    )
 }
 
 #[cfg(test)]
@@ -539,13 +530,13 @@ mod tests {
         // is the whole reason they are not shader constants: a copy in the WGSL
         // that drifted from the Rust would frame a scene of a different size
         // than the one being drawn, and nothing would report it.
-        let uniform = camera_uniform(1280, 720, 1.0);
+        let uniform = camera_uniform(1280, 720, 1.0, 0.0);
         assert_eq!(uniform.figure[0], FIGURE_SCALE);
         assert_eq!(uniform.figure[1], depth_for(1280.0 / 720.0));
         assert_eq!(uniform.figure[2], 1.0);
         // And gain rides along without touching the projection, which is what
         // keeps the frame pinned to unity while the trace inside it grows.
-        let gained = camera_uniform(1280, 720, 4.0);
+        let gained = camera_uniform(1280, 720, 4.0, 0.0);
         assert_eq!(gained.figure[2], 4.0);
         assert_eq!(gained.view_proj, uniform.view_proj);
     }

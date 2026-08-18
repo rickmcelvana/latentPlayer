@@ -168,10 +168,15 @@ crates/
                      `set_visual(VisualKind)` swaps it *between frames without
                      touching the surface* (decision 5), and `draw_frame` takes
                      a `VisualFrame` -- samples, their channel layout and their
-                     rate, assembled once per frame by the shell out of the tap
-                     and the meters. A visual computes no DSP (decision 2): a
-                     quantity that does not exist yet becomes a `player-core`
-                     meter first, cross-target, and then a field here.
+                     rate, the elapsed time, and (since M2) the metering
+                     spectrum's levels and their frequency axis, assembled once
+                     per frame by the shell out of the tap and the meters. A
+                     visual computes no DSP (decision 2): a quantity that does
+                     not exist yet becomes a `player-core` meter first,
+                     cross-target, and then a field here. The frame grows by
+                     addition -- `with_spectrum` chains onto `new`, so a caller
+                     with nothing to add says nothing and M5's analysis will be
+                     another field rather than another signature.
 
                      gain.rs is display gain (added 2026-08-18, after the first
                      live fullscreen run): the fixed steps, the automatic mode's
@@ -198,10 +203,23 @@ crates/
 
                      visuals/vectorscope.rs is the first citizen -- PLAN.md §4's
                      3D vectorscope, moved behind the trait rather than
-                     rewritten. trace.rs turns a window of played audio into
+                     rewritten. visuals/bars.rs is the second (Phase 3 M2):
+                     PLAN.md §4's spectrum bars, and the first visual whose input
+                     is *analysis* rather than samples -- instanced boxes over
+                     the metering spectrum's own bands, peak caps that fall at 12
+                     dB/s timed in seconds, a -72..0 dBFS display window that is
+                     the visual's own rather than the meter's -120, and octave
+                     marks placed by frequency through `VisualFrame`'s
+                     `band_position`. Display gain reaches it as a decibel
+                     offset, because a bar display is logarithmic where the
+                     scope's is linear; one control, one meaning, two arithmetics.
+                     trace.rs turns a window of played audio into
                      points (x side, y mid -- the goniometer's axes -- and z
                      their age), camera.rs is the perspective/look-at math with
-                     wgpu's clip-space conventions pinned by tests, and
+                     wgpu's clip-space conventions pinned by tests -- including
+                     `fit`, the camera *derived from a scene* rather than opened
+                     to a chosen angle, which M1 wrote for the vectorscope and M2
+                     moved here when the bars became its second caller -- and
                      attachments.rs owns the depth buffer, the 4x MSAA and the
                      background, which are the host's business rather than each
                      visual's: two visuals disagreeing about the sample count
@@ -212,7 +230,17 @@ crates/
                      and a non-sRGB one does not. One constant therefore drew
                      near-black on the web (`bgra8unorm`) and grey on the desktop
                      (sRGB) until 2026-08-18; both smokes now read back
-                     rgb(5,5,8), which is the two colour spaces agreeing. How much history it shows is a fixed *duration*
+                     rgb(5,5,8), which is the two colour spaces agreeing. M2
+                     closed the other half of that: a *fragment shader* writes
+                     linear light with the same consequence, so every colour in
+                     every visual differed between the shells until
+                     visuals/shared.wgsl -- prepended to each visual's shader by
+                     `attachments::shader_source`, with the surface's colour
+                     space arriving as a uniform flag from
+                     `attachments::target_is_srgb`. A visual now writes the
+                     colour a screen should show and calls `to_target` on the way
+                     out. Both shells' smokes report identical pixel figures
+                     since, where they used to differ by one. How much history it shows is a fixed *duration*
                      (window_samples), so the figure means the same thing at any
                      output rate. OffscreenRenderer renders those same scenes
                      into a texture, which is how the pipelines are checked
@@ -228,8 +256,9 @@ crates/
                      refill; the AudioWorkletProcessor itself is plain TS.
                      Since Phase 3 M1 it also carries the host's surface:
                      `WasmRenderer.create` takes a visual's id, `setVisual`
-                     swaps the scene, `draw_frame` takes the feed's three
-                     parts, and `visualCatalog`/`defaultVisual` hand the
+                     swaps the scene, `draw_frame` takes the feed's parts
+                     (samples, layout, rate, elapsed time, and since M2 the
+                     spectrum and its axis), and `visualCatalog`/`defaultVisual` hand the
                      registry to the web UI -- so the browser offers exactly
                      the visuals the desktop shell does, named identically.
 
