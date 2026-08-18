@@ -262,8 +262,16 @@ x4/x8 plus an opt-in Auto (instant attack, two-second release, timed in seconds
 so both shells recover identically), living in `player-render::gain` with the
 panel saying "display only" whenever the setting stops being a measurement.
 
-Verified: **20/20** `cargo run -p player-render --example visual_smoke` and
-**24/24** at `/visualizer.html` in a real browser, agreeing figure for figure (a
+One more difference showed up in that live run and is fixed: the two shells drew
+different backgrounds (near-black on the web, grey on the desktop) because a
+clear value is *linear light* and only one of the two surfaces is sRGB -- the
+web's canvas is `bgra8unorm`, the desktop window's surface is not. The
+background is now defined as the colour a screen should show (rgb(5,5,8), in
+`attachments::BACKGROUND`) and converted per surface format, and both smokes read
+that value back.
+
+Verified: **21/21** `cargo run -p player-render --example visual_smoke` and
+**25/25** at `/visualizer.html` in a real browser, agreeing figure for figure (a
 switch is byte-identical to a freshly built renderer on both). Two of
 ARCHITECTURE.md's "Known gaps" -- the scope's aspect and its channel pairing --
 turned out to describe the pre-M6 renderer rather than the current one; they are
@@ -272,8 +280,10 @@ fullscreen itself**, on both shells: the automation browser refuses
 `requestFullscreen` outright (the pane hosts the page without
 `allow="fullscreen"`) and the desktop webview's buttons are out of reach of the
 automation, so Esc, the focus-loss exit and how it all looks under real music
-are a person's observation. `cargo run -p player-render --example visual_smoke`
-checks every visual in the registry; `/visualizer.html` is its web half.
+are a person's observation. **All of that is now user-confirmed on the desktop
+shell (2026-08-18)**: fullscreen and Esc work, and Auto gain "looks right on real
+music". `cargo run -p player-render --example visual_smoke` checks every visual
+in the registry; `/visualizer.html` is its web half.
 
 The certificate answer changed a finding into a fix: ureq defaults to
 webpki-roots, a bundle compiled into the binary, under which installing a

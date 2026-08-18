@@ -12,7 +12,7 @@
 
 use wgpu::util::DeviceExt;
 
-use crate::attachments::{targets, DEPTH_FORMAT, SAMPLE_COUNT};
+use crate::attachments::{background, targets, DEPTH_FORMAT, SAMPLE_COUNT};
 use crate::camera::{look_at, perspective, Mat4};
 use crate::trace::{self, Vertex, TRACE_POINTS};
 use crate::visual::{Gpu, Visual, VisualFrame};
@@ -262,7 +262,11 @@ impl Visual for Vectorscope {
         target: &wgpu::TextureView,
         frame: &VisualFrame,
     ) -> wgpu::CommandBuffer {
-        let Gpu { device, queue, .. } = *gpu;
+        let Gpu {
+            device,
+            queue,
+            format,
+        } = *gpu;
         self.write_camera(queue, frame.gain);
         trace::build(frame.samples, frame.channels, &mut self.vertices);
         if !self.vertices.is_empty() {
@@ -282,12 +286,11 @@ impl Visual for Vectorscope {
                     // pass was multisampled at all.
                     resolve_target: Some(target),
                     ops: wgpu::Operations {
-                        load: wgpu::LoadOp::Clear(wgpu::Color {
-                            r: 0.02,
-                            g: 0.02,
-                            b: 0.03,
-                            a: 1.0,
-                        }),
+                        // Asked of the surface's own colour space rather than
+                        // written as a number: the same constant drew near-black
+                        // on one shell and grey on the other until this did
+                        // (see `attachments::background`).
+                        load: wgpu::LoadOp::Clear(background(format)),
                         store: wgpu::StoreOp::Store,
                     },
                     depth_slice: None,

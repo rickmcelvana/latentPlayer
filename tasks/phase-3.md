@@ -517,3 +517,37 @@ Verified: **20/20** natively and **24/24** in a real browser, 249 tests, clippy
 and fmt clean on both targets, and the whole loop driven live in the browser --
 the gain applies, persists to localStorage, and the "display only" note appears
 and disappears with the setting.
+
+**User-confirmed on the desktop shell the same day**: fullscreen enters and
+leaves cleanly, Esc no longer freezes the app, and Auto "looks right on real
+music".
+
+### The two shells drew different backgrounds (2026-08-18)
+
+The one difference left after that confirmation: the field behind the scope was
+near-black on the web and grey on the desktop. One constant, two colours, and
+neither shell was wrong about the number.
+
+A clear value is **linear light**, always. On a non-sRGB surface it is written
+through as-is, so the old `0.02` landed as byte 5 -- near-black. On an **sRGB**
+surface the GPU encodes it on the way out, and the same `0.02` becomes byte ~40
+-- the grey. The web's canvas is `bgra8unorm` (checked directly:
+`navigator.gpu.getPreferredCanvasFormat()`) and the desktop window's surface is
+sRGB, so one number produced two pictures.
+
+The fix is to stop writing a number and start writing a *colour*:
+`attachments::BACKGROUND` is what a screen should show -- rgb(5,5,8), near-black
+rather than true black, so the fading end of a trace stays distinguishable from
+the field it is on -- and `attachments::background(format)` converts it to
+whatever the surface in hand needs. Every future visual gets that for free, which
+matters because this is the kind of difference that would otherwise be
+rediscovered once per visual.
+
+Checked on both paths rather than reasoned about: the native smoke renders to an
+sRGB texture and the web smoke to the non-sRGB canvas, and **both now read back
+rgb(5, 5, 8)** where the native one used to read (40, 40, 48). Four unit tests
+pin the conversion by round-tripping it through the display transfer function
+for every surface format the shells can be handed.
+
+Verified after the fix: **21/21** natively, **25/25** in the browser, 252 tests,
+clippy and fmt clean on both targets.

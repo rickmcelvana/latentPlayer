@@ -202,10 +202,17 @@ crates/
                      points (x side, y mid -- the goniometer's axes -- and z
                      their age), camera.rs is the perspective/look-at math with
                      wgpu's clip-space conventions pinned by tests, and
-                     attachments.rs owns the depth buffer and 4x MSAA, which are
-                     the host's business rather than each visual's: two visuals
-                     disagreeing about the sample count could not share a
-                     surface. How much history it shows is a fixed *duration*
+                     attachments.rs owns the depth buffer, the 4x MSAA and the
+                     background, which are the host's business rather than each
+                     visual's: two visuals disagreeing about the sample count
+                     could not share a surface. The background is defined as the
+                     colour a *screen should show* (rgb(5,5,8)) and converted to
+                     whatever the surface in hand needs -- a clear value is
+                     linear light, so an sRGB surface encodes it on the way out
+                     and a non-sRGB one does not. One constant therefore drew
+                     near-black on the web (`bgra8unorm`) and grey on the desktop
+                     (sRGB) until 2026-08-18; both smokes now read back
+                     rgb(5,5,8), which is the two colour spaces agreeing. How much history it shows is a fixed *duration*
                      (window_samples), so the figure means the same thing at any
                      output rate. OffscreenRenderer renders those same scenes
                      into a texture, which is how the pipelines are checked

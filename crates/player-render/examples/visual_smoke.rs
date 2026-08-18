@@ -61,12 +61,12 @@ fn tone(hz: f32, right_gain: f32) -> Vec<f32> {
 
 /// A pixel that is part of the drawing rather than the background.
 ///
-/// The threshold is against an sRGB-encoded image, not a linear one: the pass
-/// clears to a linear (0.02, 0.02, 0.03), which lands at roughly (40, 40, 48)
-/// once encoded -- bright enough that a naive "is it darker than mid-grey" test
-/// calls the entire background a trace, which is exactly what the first run of
-/// this check reported. The dimmest thing the vectorscope's shader actually
-/// draws is the far end of the ribbon, whose blue channel is around 125.
+/// The threshold sits well clear of both: the background is a near-black (5, 5,
+/// 8) as displayed (`attachments::BACKGROUND`), and the dimmest thing the
+/// vectorscope's shader actually draws is the far end of the ribbon, whose blue
+/// channel is around 125. It used to have to clear a background of roughly
+/// (40, 40, 48) -- the sRGB-encoded grey that turned out to be the bug fixed on
+/// 2026-08-18, where a linear clear value was handed to an sRGB surface.
 fn is_trace(pixel: &[u8]) -> bool {
     pixel[..3].iter().any(|&channel| channel > 80)
 }
@@ -159,6 +159,25 @@ fn check_the_host_contract(kind: VisualKind) {
         "an empty feed still renders a frame",
         empty.len() == (WIDTH * HEIGHT * 4) as usize,
         format!("{} bytes back", empty.len()),
+    );
+
+    // What a screen shows behind the visual, which has to be the same on both
+    // shells -- reported live 2026-08-18 as near-black on the web and grey on
+    // the desktop, from one constant handed to two surfaces of different colour
+    // spaces. This texture is sRGB (`OffscreenRenderer::FORMAT`) where the web's
+    // canvas is not, so the two halves of this check are exercising precisely
+    // the two paths that disagreed.
+    let corner = &empty[..3];
+    check(
+        "the background is the same near-black a screen should show",
+        corner
+            .iter()
+            .zip([5u8, 5, 8])
+            .all(|(got, want)| got.abs_diff(want) <= 1),
+        format!(
+            "rgb({}, {}, {}) against rgb(5, 5, 8)",
+            corner[0], corner[1], corner[2]
+        ),
     );
 
     let signal = tone(220.0, 0.3);

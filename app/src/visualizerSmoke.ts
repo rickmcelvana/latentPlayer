@@ -85,9 +85,9 @@ interface Figure {
 /// to get at a WebGPU canvas's pixels from script, and the reason this check
 /// draws into a canvas at all rather than a texture.
 ///
-/// The threshold is against sRGB-encoded pixels: the pass clears to a linear
-/// (0.02, 0.02, 0.03), which lands near (40, 40, 48) once encoded, so "darker
-/// than mid-grey" would call the whole background a trace.
+/// The threshold sits well clear of the background, which is a near-black
+/// (5, 5, 8) as displayed -- see `attachments::BACKGROUND`, and the 2026-08-18
+/// fix that made it the same number on both shells.
 function pixels(target: HTMLCanvasElement): Uint8ClampedArray {
   const snapshot = document.createElement("canvas");
   snapshot.width = target.width;
@@ -159,10 +159,23 @@ async function checkTheHostContract(entry: VisualInfo): Promise<void> {
 
   const empty = new Float32Array(0);
   renderer.draw_frame(empty, 2, RATE, FRAME_SECONDS);
+  const blank = pixels(surface);
   check(
     "an empty feed still renders a frame",
-    pixels(surface).length === surface.width * surface.height * 4,
+    blank.length === surface.width * surface.height * 4,
     `${surface.width}x${surface.height} read back`,
+  );
+
+  // What a screen shows behind the visual, which has to be the same on both
+  // shells -- reported live 2026-08-18 as near-black here and grey on the
+  // desktop, from one constant handed to two surfaces of different colour
+  // spaces. This canvas is `bgra8unorm` where the native window's surface is
+  // sRGB, so this half and the native one exercise exactly the two paths that
+  // disagreed, and must now agree figure for figure.
+  check(
+    "the background is the same near-black a screen should show",
+    [5, 5, 8].every((want, i) => Math.abs(blank[i] - want) <= 1),
+    `rgb(${blank[0]}, ${blank[1]}, ${blank[2]}) against rgb(5, 5, 8)`,
   );
 
   const signal = tone(220, 0.3);
