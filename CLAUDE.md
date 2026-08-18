@@ -211,6 +211,19 @@ message text, a proxy's 401 counts as a credentials problem, and a credentials
 refusal *mid-session* drops the connection and says why instead of failing one
 request quietly.
 
+**Phase 3 is planned** (2026-08-18) -- see `tasks/phase-3.md` for the milestone
+plan (M1 visualizer host + fullscreen, M2-M4 the built-in visuals, M5 musical
+intelligence, M6 particle/raymarched scenes, M7 MilkDrop, M8 the native preset
+format) and its nine decisions. The short version: the host owns the surface,
+the analysis feed, selection and fullscreen while a visual owns only its scene
+(`Visual` trait in `player-render`); visuals draw the metering's own analysis
+and compute no DSP; fullscreen lands in M1 on both shells (Fullscreen API on
+the web, `set_fullscreen` + a fullscreen-scoped global shortcut natively,
+because the webview-less scope window receives no input events); switching
+visuals swaps the scene, never the window; MilkDrop goes the
+Butterchurn-guided route (MIT), never projectM (LGPL); AI-adaptive presets
+slip to Phase 6.
+
 The certificate answer changed a finding into a fix: ureq defaults to
 webpki-roots, a bundle compiled into the binary, under which installing a
 self-hosted server's CA in the OS store does nothing -- so the obvious advice

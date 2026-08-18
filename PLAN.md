@@ -1,8 +1,8 @@
 # latentPlayer — Product & Architecture Plan
 
 Status: **living reference** for scoping and sequencing. Phases 0–2 are built and closed
-(Phase 2 on 2026-08-18; M1–M4 user-confirmed live on both shells). Phase 3 is next
-and not yet planned. What actually
+(Phase 2 on 2026-08-18; M1–M4 user-confirmed live on both shells). Phase 3 is next,
+planned 2026-08-18 in `tasks/phase-3.md`. What actually
 exists lives in `ARCHITECTURE.md`; per-phase execution detail lives in `tasks/`. This document
 stays the product-level truth: audiences, feature set, phase ordering, and decisions.
 
@@ -172,8 +172,10 @@ player-completeness phase was added — §6's table stakes were listed but never
   waterfall, oscilloscope tunnel); then musically-intelligent reactivity (onset/beat/BPM/spectral
   centroid feeding shader uniforms) and the particle/raymarched scenes it drives; then MilkDrop
   `.milk` preset compatibility and the native WGSL 3D preset format. AI-adaptive presets close the
-  phase or slip to Phase 6 — they need the analysis features and the preset format both. Detail goes
-  in `tasks/phase-3.md` when this phase is planned properly.
+  phase or slip to Phase 6 — they need the analysis features and the preset format both. Planned
+  2026-08-18 in `tasks/phase-3.md`: eight milestones (host+fullscreen, the three built-ins,
+  musical intelligence, particle/raymarched scenes, MilkDrop, the native preset format), nine
+  decisions, AI-adaptive presets recorded as slipping to Phase 6.
 - **Phase 4 — Player completeness:** the §6 table stakes not yet built, plus the tracked gaps that
   are really features. OS media integration (SMTC/MPRIS/macOS Now Playing/Media Session API), global
   media keys + system tray, Last.fm/ListenBrainz scrobbling, ReplayGain/loudness-normalized playback,
