@@ -20,6 +20,7 @@ import {
   SPECTRUM_FLOOR_DB,
   TRUE_PEAK_FLOOR_DB,
   audioViews,
+  bufferingAfterFrames,
 } from "./audioSab";
 
 let audioCtx: AudioContext | null = null;
@@ -47,6 +48,11 @@ export interface TransportState {
   volume: number;
   finished: boolean;
   trackIndex: number;
+  /// Waiting for audio that has not arrived (M5). The state both engines have
+  /// always had -- an empty ring with the track not ended -- and neither could
+  /// say until now, which over a network is the difference between "this is
+  /// slow" and "this is broken".
+  buffering: boolean;
 }
 
 /// The load in flight, if any. One at a time by construction -- a second load
@@ -376,20 +382,36 @@ async function waitForCurve(after: number): Promise<EqState> {
 /// Current transport state, matching the native adapter's shape.
 export function transport(): TransportState {
   if (!views) {
-    return { position: 0, duration: 0, playing: false, volume, finished: false, trackIndex: 0 };
+    return {
+      position: 0,
+      duration: 0,
+      playing: false,
+      volume,
+      finished: false,
+      trackIndex: 0,
+      buffering: false,
+    };
   }
   const { control } = views;
   // 0 means the container didn't state a length -- the same "unknown" the
   // native adapter reports. Phase 0 always knew, because it had decoded the
   // whole file and could measure it.
   const totalFrames = Atomics.load(control, CONTROL.totalFrames);
+  const finished = isFinished();
   return {
     position: Atomics.load(control, CONTROL.positionFrames) / sampleRate,
     duration: totalFrames / sampleRate,
     playing: isPlaying(),
     volume,
-    finished: isFinished(),
+    finished,
     trackIndex: trackIndex(),
+    // The worklet counts the silence; how much of it is worth calling
+    // "buffering" is one number, and it comes from the same Rust the native
+    // shell applies (M5 decision 15) rather than being written again here.
+    // False at the end of a track, where there is nothing left to wait for.
+    buffering:
+      !finished &&
+      Atomics.load(control, CONTROL.starvedFrames) >= bufferingAfterFrames(sampleRate),
   };
 }
 

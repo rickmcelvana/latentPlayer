@@ -22,11 +22,42 @@ import {
   type ServerState,
 } from "./server";
 import { trackFromServer, type PlaylistTrack } from "./playlist";
+import { isTauri } from "./isTauri";
 
 /// How many tracks "Play random tracks" asks for. Enough that the gapless
 /// hand-off between two *server* tracks actually gets exercised by pressing the
 /// button, which is the point of the control existing this early.
 const RANDOM_COUNT = 10;
+
+/// What to go and do about a failure, per kind (M5 decision 17).
+///
+/// The certificate case is the one worth spelling out. Self-signed certificates
+/// are the norm on a self-hosted box, and this app now verifies against the
+/// **OS** trust store (decision 16) rather than a bundle compiled into the
+/// binary -- which is what makes "add it to your system trust store" real advice
+/// rather than a sentence that changes nothing. The web build gets a different
+/// half of the same answer: a browser has its own store and its own way of being
+/// asked, and visiting the server once is how you ask it.
+function advice(kind: string): string {
+  switch (kind) {
+    case "certificate":
+      return isTauri()
+        ? "Self-signed certificates are normal on a self-hosted server. Add its certificate (or its CA) to this machine's trust store and reconnect -- this app trusts what the OS trusts. A certificate from Let's Encrypt is the other way out."
+        : "Open the server's address in a browser tab first and accept its certificate there; this page cannot ask on your behalf. A certificate from Let's Encrypt is the other way out.";
+    case "unreachable":
+      return "Check the address and that the server is running. A server on another machine also has to be reachable from this one.";
+    case "credentials":
+      return "The server did not accept this username and password.";
+    case "address":
+      return "";
+    case "server":
+      return "The server answered, and refused. Its own words are above.";
+    case "malformed":
+      return "The answer did not look like a Subsonic server's. Check that the address points at the server itself rather than at a page in front of it.";
+    default:
+      return "";
+  }
+}
 
 interface Props {
   /// Replaces the queue with these and starts at `index` -- the same callback
@@ -100,7 +131,12 @@ export function ServerPanel({ onPlay, onState }: Props) {
       }
       onPlay(tracks.map(trackFromServer), 0);
     } catch (e) {
-      setState((current) => ({ ...current, error: String(e), errorIsCredentials: false }));
+      setState((current) => ({
+        ...current,
+        error: String(e),
+        errorIsCredentials: false,
+        errorKind: "",
+      }));
     } finally {
       setBusy(false);
     }
@@ -124,7 +160,12 @@ export function ServerPanel({ onPlay, onState }: Props) {
         setShowForm(true);
       }
     } catch (e) {
-      setState((current) => ({ ...current, error: String(e), errorIsCredentials: false }));
+      setState((current) => ({
+        ...current,
+        error: String(e),
+        errorIsCredentials: false,
+        errorKind: "",
+      }));
     } finally {
       setBusy(false);
     }
@@ -237,6 +278,10 @@ export function ServerPanel({ onPlay, onState }: Props) {
       {state.error && (
         <p className="server-error">
           {state.error}
+          {/* What to do about it, which until M5 was one sentence for three
+              entirely different problems. The kind is decided in Rust on both
+              shells (decision 17) so this never reads message text. */}
+          {advice(state.errorKind) && <span className="server-advice">{advice(state.errorKind)}</span>}
           {state.errorIsCredentials && !showForm && (
             <button type="button" className="link" onClick={() => setShowForm(true)}>
               Change the password

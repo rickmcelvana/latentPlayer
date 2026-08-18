@@ -59,6 +59,11 @@ export interface ServerState {
   supportsApiKey: boolean;
   error: string;
   errorIsCredentials: boolean;
+  /// What kind of failure it was, in terms of what has to change (M5): one of
+  /// "credentials", "certificate", "unreachable", "address", "server",
+  /// "malformed" -- or empty when nothing failed. Decided in Rust on both
+  /// shells, never by reading message text.
+  errorKind: string;
 }
 
 export function emptyServerState(): ServerState {
@@ -75,16 +80,21 @@ export function emptyServerState(): ServerState {
     supportsApiKey: false,
     error: "",
     errorIsCredentials: false,
+    errorKind: "",
   };
 }
 
 /// What `subsonicParse` hands back. The classification is Rust's; this is only
 /// its shape on the way through.
 interface ParsedError {
-  kind: "server" | "http" | "malformed" | "transport" | "badUrl";
+  kind: "server" | "http" | "malformed" | "transport" | "certificate" | "badUrl";
   code: string | null;
   message: string;
   credentials: boolean;
+  /// What has to change for this to work (M5). Optional because the failures
+  /// this module builds itself -- a browser's own refusals, which have no Rust
+  /// counterpart -- state it directly instead.
+  failure?: string;
 }
 
 type Parsed =
@@ -113,12 +123,17 @@ type ParsedPlaylists =
 export class SubsonicFailure extends Error {
   readonly kind: ParsedError["kind"];
   readonly credentials: boolean;
+  /// What has to change for this to work (M5): "credentials", "certificate",
+  /// "unreachable", "address", "server" or "malformed". Decided by the same
+  /// Rust the desktop shell asks.
+  readonly failure: string;
 
   constructor(error: ParsedError) {
     super(error.message);
     this.name = "SubsonicFailure";
     this.kind = error.kind;
     this.credentials = error.credentials;
+    this.failure = error.failure ?? "";
   }
 }
 
@@ -172,8 +187,18 @@ async function call(
 ): Promise<Parsed & { ok: true }> {
   const bytes = await callBytes(server, endpoint, params);
   const parsed = JSON.parse(subsonicParse(bytes)) as Parsed;
-  if (!parsed.ok) throw new SubsonicFailure(parsed.error);
+  if (!parsed.ok) throw noticed(new SubsonicFailure(parsed.error));
   return parsed;
+}
+
+/// Remembers a credentials refusal, then hands the failure back to be thrown.
+///
+/// Wrapped around every place a parsed failure becomes an exception, so a
+/// password that stopped being accepted is noticed wherever it is first used
+/// rather than only in the settings panel.
+function noticed(failure: SubsonicFailure): SubsonicFailure {
+  noteFailure(failure);
+  return failure;
 }
 
 /// The same call, stopping at the bytes -- for the endpoints whose response is
@@ -213,6 +238,7 @@ async function get(server: StoredServer, url: string): Promise<Response> {
       code: null,
       message: browserFailure(server.baseUrl, e),
       credentials: false,
+      failure: "unreachable",
     });
   }
 
@@ -220,14 +246,48 @@ async function get(server: StoredServer, url: string): Promise<Response> {
     // A real HTTP failure means something other than the application talking --
     // a proxy, an auth layer, a wrong path. Subsonic's own failures arrive as
     // 200s and are caught by whichever parser reads the body.
-    throw new SubsonicFailure({
+    //
+    // 401/403 is the exception worth naming (M5): that is an auth layer *in
+    // front of* the server refusing the listener, which is a credentials
+    // problem even though the server itself never saw the request. Classified
+    // the same way natively, in `SubsonicError::kind`.
+    const credentials = response.status === 401 || response.status === 403;
+    const failure = new SubsonicFailure({
       kind: "http",
       code: String(response.status),
       message: `The server answered with HTTP ${response.status}.`,
-      credentials: false,
+      credentials,
+      failure: credentials ? "credentials" : "server",
     });
+    noteFailure(failure);
+    throw failure;
   }
   return response;
+}
+
+/// Why the connection stopped working, when it did (M5).
+///
+/// A credential can stop being accepted an hour after it was accepted -- the
+/// password changed on the server, the API key revoked, the account disabled.
+/// Before M5 that failed one request and vanished: the panel still said
+/// "connected", and only whatever the listener happened to click said anything.
+/// Mirrors `SharedFailure` in src-tauri/src/servers.rs, and for the same reason.
+let expired: string | null = null;
+
+/// Notices a credentials refusal on any request, and remembers it.
+///
+/// Only credentials, deliberately: a request that failed because the network
+/// blinked is a reason to try again, not a reason to declare the server
+/// disconnected. A credential that is no longer accepted will not start working
+/// on its own.
+export function noteFailure(e: unknown): void {
+  if (e instanceof SubsonicFailure && e.credentials) expired = e.message;
+}
+
+/// Forgets a remembered refusal -- called when a connection is established, or
+/// the server is replaced.
+function clearFailure(): void {
+  expired = null;
 }
 
 function stateFrom(server: StoredServer): ServerState {
@@ -237,6 +297,11 @@ function stateFrom(server: StoredServer): ServerState {
     baseUrl: server.baseUrl,
     user: server.user,
     auth: server.auth,
+    // A credential that stopped being accepted mid-session (M5), so the panel
+    // offers the password field rather than looking merely not-connected.
+    ...(expired
+      ? { error: expired, errorIsCredentials: true, errorKind: "credentials" }
+      : {}),
   };
 }
 
@@ -254,6 +319,7 @@ async function failureState(server: StoredServer, e: unknown): Promise<ServerSta
     configured: (await storedServer()) !== null,
     error: failure ? failure.message : String(e),
     errorIsCredentials: failure?.credentials ?? false,
+    errorKind: failure?.failure ?? "",
   };
 }
 
@@ -261,6 +327,9 @@ async function failureState(server: StoredServer, e: unknown): Promise<ServerSta
 /// requirement: a server that has never heard of them answers with an error
 /// envelope, which is "no extensions" rather than a failure to connect.
 async function connectTo(server: StoredServer): Promise<ServerState> {
+  // Whatever went wrong before, this attempt is the current truth about the
+  // credentials -- and if it fails, `failureState` says so with its own words.
+  clearFailure();
   const ping = await call(server, "ping");
   let supportsApiKey = false;
   try {
@@ -362,7 +431,7 @@ export async function browse(request: BrowseRequest): Promise<BrowseResult> {
   const response = await get(server, url);
   const bytes = new Uint8Array(await response.arrayBuffer());
   const parsed = JSON.parse(subsonicBrowseResult(requestJson, bytes)) as ParsedBrowse;
-  if (!parsed.ok) throw new SubsonicFailure(parsed.error);
+  if (!parsed.ok) throw noticed(new SubsonicFailure(parsed.error));
   return { artists: parsed.artists, albums: parsed.albums, tracks: parsed.tracks };
 }
 
@@ -423,8 +492,24 @@ export async function randomTracks(count: number): Promise<ServerTrack[]> {
   const server = await requireServer();
   const bytes = await callBytes(server, "getRandomSongs", { size: String(count) });
   const parsed = JSON.parse(subsonicRandomSongs(bytes)) as ParsedSongs;
-  if (!parsed.ok) throw new SubsonicFailure(parsed.error);
+  if (!parsed.ok) throw noticed(new SubsonicFailure(parsed.error));
   return parsed.songs;
+}
+
+/// How many server tracks are being fetched right now (M5).
+///
+/// A count rather than a flag because two can legitimately be in flight -- the
+/// track being played and the one queued behind it, which is the prefetch that
+/// keeps a gapless hand-off gapless.
+let fetching = 0;
+
+/// Whether this shell is downloading a track's bytes.
+///
+/// Read by playlist.ts, which folds it into the transport's `buffering`: on this
+/// shell a server track is fetched whole before it plays, and that wait is
+/// invisible to the engine because no ring is involved.
+export function fetchingTrack(): boolean {
+  return fetching > 0;
 }
 
 /// Most of a track this build will hold in memory at once.
@@ -453,6 +538,18 @@ const MAX_TRACK_BYTES = 512 * 1024 * 1024;
 /// `File.arrayBuffer()` in playerEngine.ts -- so it is not a new cost on this
 /// shell, only one the desktop shell no longer pays.
 export async function trackBytes(id: string): Promise<Uint8Array> {
+  fetching += 1;
+  try {
+    return await fetchTrackBytes(id);
+  } finally {
+    // In a `finally` so a track that fails to arrive stops the app claiming it
+    // is still buffering -- the failure is what the listener needs to see, and
+    // a spinner over it would hide it.
+    fetching -= 1;
+  }
+}
+
+async function fetchTrackBytes(id: string): Promise<Uint8Array> {
   const server = await requireServer();
   await ready();
   const url = subsonicStreamUrl(
@@ -526,7 +623,7 @@ export async function playlists(request: PlaylistRequest): Promise<PlaylistResul
   const response = await get(server, url);
   const bytes = new Uint8Array(await response.arrayBuffer());
   const parsed = JSON.parse(subsonicPlaylistResult(requestJson, bytes)) as ParsedPlaylists;
-  if (!parsed.ok) throw new SubsonicFailure(parsed.error);
+  if (!parsed.ok) throw noticed(new SubsonicFailure(parsed.error));
   return { playlists: parsed.playlists, tracks: parsed.tracks };
 }
 
@@ -575,7 +672,7 @@ async function write(server: StoredServer, url: string): Promise<void> {
   const response = await get(server, url);
   const bytes = new Uint8Array(await response.arrayBuffer());
   const parsed = JSON.parse(subsonicWriteResult(bytes)) as { ok: true } | ParsedFailure;
-  if (!parsed.ok) throw new SubsonicFailure(parsed.error);
+  if (!parsed.ok) throw noticed(new SubsonicFailure(parsed.error));
 }
 
 /// The web shell's scrobble tracker.

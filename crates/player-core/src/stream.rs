@@ -19,6 +19,26 @@
 //! `SeekTo::Time`, `Track::num_frames`/`time_base`), verified against its
 //! source per CONVENTIONS.md.
 
+/// How long a run of silence-for-want-of-audio has to last before it counts as
+/// buffering (Phase 2 M5 decision 15).
+///
+/// Counted rather than latched: a single short underrun is a hiccup, not a state
+/// worth putting on screen, and a flag set by the first starved callback would
+/// flicker on every decoder stumble. 250ms is far past any scheduling jitter and
+/// short enough to explain itself before the listener starts wondering whether
+/// the app has hung.
+///
+/// It lives in *this* module, which is neither of the two places that count the
+/// silence, because it is the one thing about them that must agree: natively the
+/// audio callback counts (`playback.rs`, which a browser never compiles) and on
+/// the web the AudioWorklet does. What both apply is this number.
+pub const BUFFERING_AFTER_SECONDS: f64 = 0.25;
+
+/// The threshold in frames, for a given output rate.
+pub fn buffering_after_frames(sample_rate: u32) -> u64 {
+    (BUFFERING_AFTER_SECONDS * sample_rate as f64) as u64
+}
+
 use symphonia::core::codecs::audio::AudioDecoder;
 use symphonia::core::codecs::CodecParameters;
 use symphonia::core::formats::probe::Hint;
@@ -264,6 +284,27 @@ pub fn decode_all(source: &dyn PlaybackSource) -> Result<crate::decode::DecodedA
         channels,
         sample_rate,
     })
+}
+
+#[cfg(test)]
+mod buffering_tests {
+    use super::*;
+
+    /// The number `audioSab.ts` mirrors. A change here that is not made there
+    /// would leave the two shells disagreeing about when to say "buffering",
+    /// which /failing.html is what actually catches -- this is the reminder.
+    #[test]
+    fn the_threshold_is_a_quarter_of_a_second() {
+        assert_eq!(BUFFERING_AFTER_SECONDS, 0.25);
+        assert_eq!(buffering_after_frames(44_100), 11_025);
+        assert_eq!(buffering_after_frames(48_000), 12_000);
+        // It is a duration, so it means the same length of silence whatever the
+        // device runs at.
+        assert_eq!(
+            buffering_after_frames(96_000),
+            buffering_after_frames(48_000) * 2
+        );
+    }
 }
 
 #[cfg(test)]

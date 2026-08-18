@@ -47,7 +47,7 @@ pub use playback::Playback;
 pub use remote::RemoteSource;
 pub use source::{InMemorySource, LocalFile, PlaybackSource};
 pub use spectrum::SpectrumAnalyzer;
-pub use stream::StreamingDecoder;
+pub use stream::{buffering_after_frames, StreamingDecoder, BUFFERING_AFTER_SECONDS};
 pub use subsonic::{Credentials, Server, SubsonicError};
 pub use tags::{read_tags, CoverArt, TrackTags};
 pub use tap::{AnalysisTap, TapCursor, TapRead};

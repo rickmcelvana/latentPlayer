@@ -37,7 +37,7 @@ import {
   setVolume as setVolumeWeb,
   transport as transportWeb,
 } from "./playerEngine";
-import { trackBytes } from "./subsonicWeb";
+import { fetchingTrack, trackBytes } from "./subsonicWeb";
 import type { ServerTrack } from "./server";
 
 export type { TransportState };
@@ -143,7 +143,15 @@ export async function queueTrack(track: PlaylistTrack | null): Promise<void> {
 }
 
 export async function readTransport(): Promise<TransportState> {
-  return isTauri() ? transportNative() : transportWeb();
+  if (isTauri()) return transportNative();
+  const state = transportWeb();
+  // The web shell has a second way to be waiting for audio, and it is the one
+  // a listener meets first: a server track is fetched *whole* before it plays
+  // (the parity limit M2 named and stated rather than hid). No ring is
+  // involved and the engine cannot see it, but it is buffering by any honest
+  // reading -- so it is ORed in here, at the seam that already knows a server
+  // track on this shell is a download.
+  return state.buffering ? state : { ...state, buffering: fetchingTrack() };
 }
 
 export async function setPlaying(playing: boolean): Promise<TransportState> {

@@ -678,3 +678,151 @@ gaps from M2 that are really its work: a network hiccup outlasting the request
 timeout ends the track (no retry, no backoff), and nothing anywhere says
 "buffering" -- both in ARCHITECTURE.md's "Known gaps", both waiting for exactly
 this milestone.
+
+## M5 -- Failing well: planned
+
+The phase's last milestone, and deliberately not where all error handling goes:
+each milestone above handles its own failures, and this is the pass that hunts
+for the ones nobody thought of. Two of them are already written down as gaps M2
+left standing on purpose, which makes them this milestone's work rather than its
+discoveries.
+
+### Decisions
+
+**14. A stalled read is retried, not fatal.** Today a network hiccup that
+outlasts the request timeout ends the track: the read is an error, and the
+decoder treats a broken track the way it treats a corrupt file, by moving on to
+whatever is queued. On a flaky connection that turns a five-second outage into a
+skipped song. So `remote.rs`'s fetch retries -- **three times, backing off
+250ms, 1s, 3s** -- which buys about four seconds of patience on top of the
+timeouts themselves, enough for the hiccups that actually happen and short
+enough that a server which is really gone is reported while the listener still
+remembers pressing play.
+
+What is *not* retried matters as much. A retry is only worth making when the
+same request could plausibly succeed next time: a transport failure, a timeout,
+or a 5xx/408/429. A **4xx is never retried** -- a token the server rejects is
+still rejected three seconds later, and retrying it only delays telling the
+listener something they have to act on. Neither is a TLS failure, which is a
+decision about trust and not a hiccup.
+
+**15. Buffering is a counted underrun, and it is counted where the audio is.**
+Both engines already know this state -- an empty ring with the track not ended is
+exactly it -- and neither could say so. Now the audio callback and the worklet
+each count *consecutive* frames they had to fill with silence, and the transport
+snapshot carries `buffering` once that passes **250ms**. Counted rather than
+latched because a single short underrun is a hiccup and not a state worth
+drawing; 250ms is far past any scheduling jitter and short enough to explain
+itself before the listener starts wondering.
+
+The threshold is one number, and it comes from `player-core` on both shells for
+the reason the scrobble rule does (decision 10). The web shell ORs one more
+thing into it: `subsonicWeb.ts` fetches a server track *whole* before playing it
+(the parity limit named in M2), and that wait is buffering by any honest reading
+even though no ring is involved.
+
+**16. The desktop shell trusts what the OS trusts** -- which turns out to be a
+change, not a restatement. `ureq` 3.4 defaults to rustls with **webpki-roots**:
+Mozilla's root bundle, compiled into the binary. Under that default a
+self-hoster who installs their own CA in the Windows certificate store changes
+nothing at all, so the obvious diagnosis to write ("install the certificate and
+try again") would have been advice that does not work. Enabling ureq's
+`platform-verifier` feature and asking for `RootCerts::PlatformVerifier` makes
+the OS trust store the authority, which is where a machine's trust decisions
+belong and what every other desktop app on it already does.
+
+That is the whole of the answer, and deliberately so. "Trust everything" is not
+it, and neither is a fingerprint-pinning trust-on-first-use flow: that is a
+security-sensitive feature to get right, it asks a listener to compare a hex
+string they have no way to obtain safely, and it is unnecessary once the OS
+store works -- installing a CA there is a documented operation the person
+running the server has already done for their browser. A certificate this app
+still cannot verify is therefore named as itself, with the two routes out (add
+the CA to the OS store, or get a real certificate) rather than an opaque
+"could not reach the server".
+
+**17. Every failure says which thing to change.** `SubsonicError` already keeps
+the server's own error codes rather than flattening them; what M5 adds is that
+the *transport* failures are classified too, so the panel can tell "your
+password is wrong" from "that address is not answering" from "that certificate
+is not trusted" -- three different things to go and do, which until now shared
+one sentence. And a token the server stops accepting **mid-session** marks the
+connection as needing credentials again rather than failing one request quietly:
+the state the UI already draws for a bad password at connect time is the right
+state for a password that stopped working an hour later.
+
+### Shape of the work
+
+- `remote.rs`: decision 14's retry, and the classification of what is worth
+  retrying.
+- `playback.rs` and `player-worklet.ts`: count consecutive silent frames;
+  `playback.rs` also owns the threshold both shells apply.
+- `subsonic/mod.rs`: a `FailureKind` on the error, so a shell draws the right
+  sentence rather than parsing message text.
+- `subsonic/http.rs`: the platform verifier, and TLS failures named as
+  themselves.
+- Both shells: `buffering` in the transport snapshot and something in the UI
+  that draws it; the server panel saying the right sentence per failure.
+
+### Verified
+
+- **`cargo test -p player-core --test failing_well`: 10/10**, against a server
+  that fails on purpose. The headline first: a server that answers two 503s and
+  then the music plays the track through, byte for byte, where before M5 the
+  first of those ended it. Its opposite is checked in the same file -- a 404 is
+  reported after **one** request, not four, because retrying what will never
+  work only delays saying so. Then the rest: a server that never answers, a
+  server that is not there, a token the server has stopped accepting, a proxy
+  asking for its own password (a 401, which Subsonic itself never sends), a
+  captive portal answering 200 with HTML, a 5xx being worth another go where a
+  4xx is not, and a stall partway through a track costing time but never samples.
+- **9 new unit tests** across `subsonic/mod.rs` and `stream.rs`: the six failure
+  kinds, the proxy-401 case, the whole retry classification, and the buffering
+  threshold as a duration that means the same length of silence at any output
+  rate. `player-core` unit tests: **161**, up from 157.
+- **`/failing.html`: 6/6 in a real browser** (run 2026-08-18), which is where the
+  mirror is actually held: `audioSab.ts`'s copy of `BUFFERING_AFTER_SECONDS`
+  equals the Rust value and converts to frames identically at 44.1k, 48k and
+  96k -- and this shell classifies a rejected password, a server refusal and a
+  captive portal with the same Rust the desktop shell calls.
+- **The advice line was driven in the real UI**, not only unit-tested: connecting
+  the web app to a closed port renders the browser's own explanation *plus*
+  "Check the address and that the server is running", i.e. the `unreachable`
+  kind reaching the panel through the whole chain.
+- The full suite stayed green: 161 `player-core` unit tests, 10 `failing_well`,
+  10 `subsonic_write`, 10 `remote_source`, 11 `subsonic_http`, 7
+  `subsonic_browse`, 4 in `src-tauri`, 16 in `player-render`, clippy and fmt
+  clean on both targets, `tsc` and oxlint clean, both builds clean.
+
+### What a live run would add
+
+Less than the previous milestones, and worth saying why rather than skipping
+quietly. M5's cases are ones a real server will not perform on cue -- it will not
+drop two requests and recover when asked, and a Navidrome with a valid
+certificate cannot demonstrate what happens to an invalid one. The fake server
+is not a second-best here; it is the only way to arrange them at all. What a real
+server would still add is the certificate path end to end (a self-signed
+Navidrome, trusted through the OS store and then not), which needs a certificate
+to exist before it can be tried.
+
+## Phase 2: closed
+
+Five milestones, all built and all verified, M1-M4 user-confirmed live on both
+shells against a real Navidrome. What the phase set out to do, it did: a track on
+a server plays through the same engine as a file on disk, and nothing downstream
+of the source can tell the difference -- the ring, the EQ, the tap, the meters
+and the scope were not touched by any of it. The protocol lives in `player-core`
+and the transport does not, so both shells reach the same conclusion about every
+response; the server's library is browsed live rather than mirrored; playlists,
+stars, ratings and plays are written back; and the failures a network feature
+actually meets are handled as themselves rather than as one shrug.
+
+The web shell's parity limit is the honest exception, stated in M2 and unchanged:
+a browser has no `MediaSource` for the worker, so a server track is fetched whole
+before it plays. It is the same cost a picked local file has always had there,
+and everything after the fetch is identical.
+
+Deferred on purpose and still deferred: offline caching, one search box over
+local and server music, podcasts/radio/jukebox, and a native Jellyfin backend.
+The first two are real features with real designs behind them and belong to
+whoever schedules them next; the last two are not this app's pitch.

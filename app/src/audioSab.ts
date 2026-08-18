@@ -123,6 +123,16 @@ export const CONTROL = {
   /// behind it as a dot in the centre.
   goniometerPoints: 22,
 
+  /// Consecutive frames the worklet has had to fill with silence because there
+  /// was nothing to play (Phase 2 M5) -- reset by any block that fills
+  /// completely, so it measures the *current* stall rather than a total.
+  ///
+  /// `starved_frames` on `Shared` in player-core/src/playback.rs, counted the
+  /// same way for the same reason. What turns it into "buffering" is one
+  /// threshold, and that threshold comes from Rust on both shells rather than
+  /// being written here as well.
+  starvedFrames: 24,
+
   /// Bumped by the worker after it writes a new set of EQ coefficients (M8).
   ///
   /// The worklet keeps its own copy of the cascade and refreshes it only when
@@ -201,6 +211,20 @@ export const TRUE_PEAK_FLOOR_DB = -120;
 /// Goniometer points the analyser publishes per frame, mirroring
 /// `GONIOMETER_POINTS` in player-core/src/analysis.rs. Two floats each.
 export const GONIOMETER_POINTS = 256;
+
+/// How long a run of silence-for-want-of-audio has to last before it counts as
+/// buffering (Phase 2 M5), mirroring `BUFFERING_AFTER_SECONDS` in
+/// player-core/src/playback.rs -- which is where the number is decided.
+///
+/// Mirrored rather than fetched because `transport()` is called ten times a
+/// second on the UI thread, where this module has no wasm to ask. Held to the
+/// Rust value by /failing.html, the same way eqFilter.ts's copy of the biquad
+/// is held to player-core's.
+export const BUFFERING_AFTER_SECONDS = 0.25;
+
+export function bufferingAfterFrames(sampleRate: number): number {
+  return Math.floor(BUFFERING_AFTER_SECONDS * sampleRate);
+}
 
 /// The EQ's cascade as the worker writes it and the worklet reads it (M8),
 /// mirroring `EqCoefficients::to_array` in player-core/src/eq.rs -- which is

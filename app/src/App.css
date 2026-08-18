@@ -43,6 +43,45 @@ button {
   font-size: 14px;
 }
 
+/* What to do about a server failure (M5). Its own line under the server's own
+   words, quieter than them: the error is what happened, this is what to try. */
+.server-advice {
+  display: block;
+  margin-top: 6px;
+  color: var(--text);
+  font-size: 12px;
+  line-height: 1.5;
+}
+
+/* Waiting for audio that hasn't arrived (M5). Pulsing rather than static:
+   the whole point is to distinguish "this is slow" from "this has hung", and
+   a word that sits perfectly still says the second thing. */
+.buffering {
+  margin-left: 10px;
+  color: var(--accent);
+  font-size: 12px;
+  animation: buffering-pulse 1.2s ease-in-out infinite;
+}
+
+@keyframes buffering-pulse {
+  0%,
+  100% {
+    opacity: 0.35;
+  }
+  50% {
+    opacity: 1;
+  }
+}
+
+/* Someone who has asked for less motion gets the word without the pulse --
+   it is doing informational work, so it stays. */
+@media (prefers-reduced-motion: reduce) {
+  .buffering {
+    animation: none;
+    opacity: 1;
+  }
+}
+
 .error {
   color: #ff6b6b;
   font-family: var(--mono);

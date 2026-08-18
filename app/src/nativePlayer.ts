@@ -48,6 +48,10 @@ export interface TransportState {
   /// `loadFile`. Not a playlist index -- the engine only ever knows two
   /// tracks -- so the UI adds it to the index it last loaded.
   trackIndex: number;
+  /// Waiting for audio that has not arrived (M5). Over a network this is the
+  /// difference between "slow" and "broken", and until M5 the two drew the
+  /// same picture: playing, with the position held and nothing said.
+  buffering: boolean;
 }
 
 /// Decodes and starts playing the file at `path`.
@@ -219,6 +223,12 @@ export interface ServerState {
   supportsApiKey: boolean;
   error: string;
   errorIsCredentials: boolean;
+  /// What kind of failure it was, in terms of what has to change (M5): one of
+  /// "credentials", "certificate", "unreachable", "address", "server",
+  /// "malformed" -- or empty when nothing failed. `error_kind` in
+  /// src-tauri/src/servers.rs, out of `SubsonicError::kind` -- so both shells
+  /// classify with the same Rust rather than by reading message text.
+  errorKind: string;
 }
 
 export async function serverState(): Promise<ServerState> {

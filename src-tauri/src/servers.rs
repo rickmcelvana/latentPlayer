@@ -85,6 +85,38 @@ pub struct Connection {
 /// file is what remembers across sessions.
 pub type SharedServer = Arc<Mutex<Option<Connection>>>;
 
+/// Why the connection stopped working, when it did (M5).
+///
+/// A credential can stop being accepted an hour after it was accepted -- the
+/// password was changed on the server, the API key was revoked, the account was
+/// disabled. Before M5 that failed one request and vanished: the panel still
+/// said "connected", because the connection object was still there, and only
+/// whatever the listener happened to click reported anything. Now the refusal
+/// drops the connection and is kept here, so the state the panel already draws
+/// for a wrong password at connect time is the state it draws for one that
+/// stopped working later.
+pub type SharedFailure = Arc<Mutex<Option<String>>>;
+
+/// Notices a credentials refusal on any request, and remembers it.
+///
+/// Only credentials, deliberately. A browse that fails because the network
+/// blinked is not a reason to declare the server disconnected -- it is a reason
+/// to try again, which the listener can do by clicking the thing again. A
+/// credential that is no longer accepted will not start working on its own, and
+/// leaving the panel saying "connected" while every request fails is the lie
+/// this exists to stop telling.
+fn note_failure(
+    shared: &tauri::State<'_, SharedServer>,
+    failures: &tauri::State<'_, SharedFailure>,
+    error: &SubsonicError,
+) {
+    if !error.is_credentials_problem() {
+        return;
+    }
+    *failures.lock().unwrap() = Some(error.to_string());
+    *shared.lock().unwrap() = None;
+}
+
 /// What the UI needs to draw the server panel, in one round trip -- the same
 /// rule `TransportState` and `EqState` follow.
 #[derive(Debug, Clone, Default, serde::Serialize)]
@@ -111,6 +143,15 @@ pub struct ServerState {
     /// Whether that failure was about credentials, so the UI knows whether to
     /// send the user back to the password field or to the address field.
     pub error_is_credentials: bool,
+    /// What kind of failure it was, in terms of what has to change (M5
+    /// decision 17): `"credentials"`, `"certificate"`, `"unreachable"`,
+    /// `"address"`, `"server"` or `"malformed"`. Empty when nothing failed.
+    ///
+    /// A name rather than a sentence, so the shells can say the same things in
+    /// their own words -- and so neither of them decides by reading message
+    /// text, which is how a client ends up matching on the wording of somebody
+    /// else's error.
+    pub error_kind: String,
 }
 
 impl ServerState {
@@ -130,10 +171,12 @@ impl ServerState {
     fn with_error(mut self, error: &SubsonicError) -> Self {
         self.connected = false;
         self.error = error.to_string();
-        self.error_is_credentials = matches!(
-            error,
-            SubsonicError::Server { code, .. } if code.is_credentials_problem()
-        );
+        // Asked of the whole error rather than only of a server-side code, so a
+        // reverse proxy's 401 -- which is the listener's credentials being
+        // refused before the server ever sees them -- sends them to the
+        // password field like any other credentials problem (M5).
+        self.error_is_credentials = error.is_credentials_problem();
+        self.error_kind = format!("{:?}", error.kind()).to_lowercase();
         self
     }
 }
@@ -288,13 +331,28 @@ fn reconnect_blocking(data_dir: &Path, shared: &SharedServer) -> Result<ServerSt
 pub fn server_state(
     data_dir: tauri::State<PathBuf>,
     shared: tauri::State<SharedServer>,
+    failures: tauri::State<SharedFailure>,
 ) -> ServerState {
     let Some(settings) = load_settings(&data_dir) else {
         return ServerState::default();
     };
     match shared.lock().unwrap().as_ref() {
         Some(connection) => state_of(&settings, connection),
-        None => ServerState::from_settings(&settings),
+        None => {
+            let base = ServerState::from_settings(&settings);
+            // A credential that stopped being accepted mid-session (M5): the
+            // connection is gone and this is why, so the panel offers the
+            // password field rather than looking merely disconnected.
+            match failures.lock().unwrap().as_ref() {
+                Some(message) => ServerState {
+                    error: message.clone(),
+                    error_is_credentials: true,
+                    error_kind: "credentials".into(),
+                    ..base
+                },
+                None => base,
+            }
+        }
     }
 }
 
@@ -309,6 +367,11 @@ pub fn server_state(
 /// not leave a wrong password in the credential store to be retried at every
 /// launch.
 #[tauri::command]
+// Four of these eight are Tauri injecting managed state, which is how this
+// framework hands a command the things it needs -- not a signature anyone
+// chose. Splitting them into a struct would mean a struct built per call to
+// satisfy a lint about a shape the framework owns.
+#[allow(clippy::too_many_arguments)]
 pub async fn connect_server(
     base_url: String,
     user: String,
@@ -317,10 +380,15 @@ pub async fn connect_server(
     data_dir: tauri::State<'_, PathBuf>,
     shared: tauri::State<'_, SharedServer>,
     covers: tauri::State<'_, SharedCovers>,
+    failures: tauri::State<'_, SharedFailure>,
 ) -> Result<ServerState, String> {
     // Whatever art is held belongs to the server being replaced, and a cover id
     // means nothing on a different one.
     covers.clear();
+    // And whatever refusal was remembered belongs to the credentials being
+    // replaced (M5). This attempt is the current truth about them; if it fails,
+    // its own error says so.
+    *failures.lock().unwrap() = None;
     let settings = ServerSettings {
         base_url,
         user,
@@ -365,7 +433,11 @@ pub async fn connect_server(
 pub async fn reconnect_server(
     data_dir: tauri::State<'_, PathBuf>,
     shared: tauri::State<'_, SharedServer>,
+    failures: tauri::State<'_, SharedFailure>,
 ) -> Result<ServerState, String> {
+    // A reconnect is a fresh attempt at the stored credentials, so whatever was
+    // remembered about them stops being the current answer (M5).
+    *failures.lock().unwrap() = None;
     let data_dir = data_dir.inner().clone();
     let shared = Arc::clone(shared.inner());
     tauri::async_runtime::spawn_blocking(move || reconnect_blocking(&data_dir, &shared))
@@ -381,6 +453,7 @@ pub fn forget_server(
     data_dir: tauri::State<PathBuf>,
     shared: tauri::State<SharedServer>,
     covers: tauri::State<SharedCovers>,
+    failures: tauri::State<SharedFailure>,
 ) -> Result<ServerState, String> {
     covers.clear();
     if let Some(settings) = load_settings(&data_dir) {
@@ -391,6 +464,8 @@ pub fn forget_server(
         }
     }
     *shared.lock().unwrap() = None;
+    // Nothing left to have refused anything.
+    *failures.lock().unwrap() = None;
     Ok(ServerState::default())
 }
 
@@ -520,13 +595,13 @@ pub use player_core::subsonic::TrackRow as ServerTrack;
 pub async fn server_random_tracks(
     count: u32,
     shared: tauri::State<'_, SharedServer>,
+    failures: tauri::State<'_, SharedFailure>,
 ) -> Result<Vec<ServerTrack>, String> {
     let client = client_for(&shared)?;
-    tauri::async_runtime::spawn_blocking(move || {
-        client.random_songs(count).map_err(|e| e.to_string())
-    })
-    .await
-    .map_err(|e| e.to_string())?
+    let result = tauri::async_runtime::spawn_blocking(move || client.random_songs(count))
+        .await
+        .map_err(|e| e.to_string())?;
+    reported(result, &shared, &failures)
 }
 
 /// One browse request against the server's library (Phase 2 M3).
@@ -539,11 +614,13 @@ pub async fn server_random_tracks(
 pub async fn server_browse(
     request: player_core::subsonic::BrowseRequest,
     shared: tauri::State<'_, SharedServer>,
+    failures: tauri::State<'_, SharedFailure>,
 ) -> Result<player_core::subsonic::BrowseResult, String> {
     let client = client_for(&shared)?;
-    tauri::async_runtime::spawn_blocking(move || client.browse(&request).map_err(|e| e.to_string()))
+    let result = tauri::async_runtime::spawn_blocking(move || client.browse(&request))
         .await
-        .map_err(|e| e.to_string())?
+        .map_err(|e| e.to_string())?;
+    reported(result, &shared, &failures)
 }
 
 /// One playlist request against the server (Phase 2 M4): the two reads and the
@@ -552,13 +629,13 @@ pub async fn server_browse(
 pub async fn server_playlists(
     request: player_core::subsonic::PlaylistRequest,
     shared: tauri::State<'_, SharedServer>,
+    failures: tauri::State<'_, SharedFailure>,
 ) -> Result<player_core::subsonic::PlaylistResult, String> {
     let client = client_for(&shared)?;
-    tauri::async_runtime::spawn_blocking(move || {
-        client.playlists(&request).map_err(|e| e.to_string())
-    })
-    .await
-    .map_err(|e| e.to_string())?
+    let result = tauri::async_runtime::spawn_blocking(move || client.playlists(&request))
+        .await
+        .map_err(|e| e.to_string())?;
+    reported(result, &shared, &failures)
 }
 
 /// One star, unstar or rating (Phase 2 M4).
@@ -566,11 +643,31 @@ pub async fn server_playlists(
 pub async fn server_mark(
     request: player_core::subsonic::MarkRequest,
     shared: tauri::State<'_, SharedServer>,
+    failures: tauri::State<'_, SharedFailure>,
 ) -> Result<(), String> {
     let client = client_for(&shared)?;
-    tauri::async_runtime::spawn_blocking(move || client.mark(&request).map_err(|e| e.to_string()))
+    let result = tauri::async_runtime::spawn_blocking(move || client.mark(&request))
         .await
-        .map_err(|e| e.to_string())?
+        .map_err(|e| e.to_string())?;
+    reported(result, &shared, &failures)
+}
+
+/// One request's outcome, with a credentials refusal noticed on the way past
+/// (M5).
+///
+/// Every command that talks to the server goes through here, which is the point:
+/// a password that stopped being accepted has to be noticed wherever it is first
+/// used, not only by whichever call the listener happens to make from the
+/// settings panel.
+fn reported<T>(
+    result: Result<T, SubsonicError>,
+    shared: &tauri::State<'_, SharedServer>,
+    failures: &tauri::State<'_, SharedFailure>,
+) -> Result<T, String> {
+    result.map_err(|error| {
+        note_failure(shared, failures, &error);
+        error.to_string()
+    })
 }
 
 /// The scrobble tracker, which outlives any one track and any one command.

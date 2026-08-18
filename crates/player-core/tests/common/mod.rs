@@ -53,6 +53,14 @@ pub enum Reply {
     /// case it has to survive -- a server that ignores the range and sends
     /// everything (a transcoding endpoint, per phase-2 decision 7).
     Ranged { body: Vec<u8> },
+    /// Refuse the first `fail_until` requests with a 503, then serve `body` the
+    /// way [`Reply::Ranged`] does (M5).
+    ///
+    /// This is what a retry can be proved against: a server having a moment and
+    /// then recovering, which before M5 ended the track outright. 503 rather
+    /// than a dropped connection because it is unambiguous -- the client is
+    /// meant to read it as "try again", and the test is about whether it does.
+    FlakyRanged { body: Vec<u8>, fail_until: usize },
 }
 
 impl Reply {
@@ -346,6 +354,20 @@ fn serve_one(
             false
         }
         Reply::Ranged { body } => serve_ranged(stream, range.as_deref(), &body),
+        Reply::FlakyRanged { body, fail_until } => {
+            // Counted across the whole server, as `Stalling` is and for the
+            // same reason: the tests using this talk to one path.
+            if requests.load(Ordering::Acquire) <= fail_until {
+                let head = "HTTP/1.1 503 Service Unavailable
+Content-Length: 0
+
+";
+                let _ = stream.write_all(head.as_bytes());
+                let _ = stream.flush();
+                return true;
+            }
+            serve_ranged(stream, range.as_deref(), &body)
+        }
         Reply::Stalling { body, delay } => {
             // Counted across the whole server rather than per path, which is
             // enough: the tests that use this talk to one path.

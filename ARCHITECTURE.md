@@ -125,6 +125,16 @@ crates/
                      heard. Like the rest of this module it does no IO and reads
                      no clock -- the shell passes the time in, as it passes the
                      auth salt.
+                     M5 added the two things a network feature earns: a
+                     `FailureKind` on `SubsonicError` (what has to *change* --
+                     an address, a password, a trust store, or nothing because
+                     the server simply said no), and `is_transient`, which is
+                     what decides whether a request is worth making again. Both
+                     are here rather than in the shells so a shell draws its
+                     sentence from a name and never from parsing message text --
+                     which is how a client ends up matching on the wording of
+                     somebody else's error. `http::classify` is the one place
+                     ureq's twenty-nine error variants become that handful.
                      remote.rs (Phase 2 M2) is a PlaybackSource over HTTP, and
                      is the whole of what remote playback adds to the engine:
                      one 512KB chunk held at a time, seeks that move a cursor
@@ -654,24 +664,44 @@ at the correct rate, re-verified with the same probe.
   or two per ring's worth of audio and keeps the consumer free of any
   signalling work, which is the trade that matters on the audio callback --
   but it is a poll, and worth revisiting if it ever shows up in a profile.
-- **A network hiccup that outlasts the request timeout ends the track** (Phase 2
-  M2, desktop). A stall is handled well while it lasts -- the source blocks, the
-  ring drains, the callback plays silence and holds the position, and the audio
-  resumes with nothing missing (checked against a server that stalls per chunk).
-  But there is no retry: once ureq's 60s timeout fires, the read is an error, and
-  the decoder treats a broken track the way it treats a corrupt file, by moving
-  on to whatever is queued. On a flaky connection that turns a five-second
-  outage's worth of patience into a skipped track. The fix is a bounded retry
-  with backoff inside `HttpStream::fetch`, which also wants the UI to be able to
-  say "buffering" -- neither exists yet, and M5 ("failing well") is where they
-  belong.
-- **Nothing says "buffering"** (Phase 2 M2, both shells). A track that is slow to
-  arrive looks like a UI that is doing nothing: natively the transport reports
-  `playing` with the position held, and on the web `loadTrack` does not return
-  until the whole track has been fetched, so a row clicked on a slow connection
-  simply takes a while to make a sound. Honest but mute. The state exists in both
-  engines (an empty ring with the track not ended is exactly it); what is missing
-  is a way for the transport snapshot to carry it and something in the UI to draw.
+- ~~**A network hiccup that outlasts the request timeout ends the track**~~
+  Fixed in Phase 2 M5, as that milestone's headline. `HttpStream::fetch` now
+  retries three times behind `fetch_once`, backing off 250ms/1s/3s -- about four
+  seconds of patience on top of the timeouts. What is retried is deliberately
+  narrow (`SubsonicError::is_transient`): a transport failure or a 5xx/408/429,
+  never a 4xx and never a certificate, because a token the server rejects is
+  still rejected three seconds later and retrying it only delays telling someone
+  what they have to fix. Checked over real TCP against a server that answers two
+  503s and then the music (`tests/failing_well.rs`), with the audio arriving byte
+  for byte.
+- ~~**Nothing says "buffering"**~~ Fixed in Phase 2 M5. The audio callback and
+  the AudioWorklet each count *consecutive* frames they had to fill with silence,
+  and `buffering` rides the transport snapshot once that passes 250ms --
+  `BUFFERING_AFTER_SECONDS` in `stream.rs`, which is neither of the two places
+  that count because it is the one thing about them that must agree (`audioSab.ts`
+  mirrors it, and `/failing.html` holds the mirror to the Rust). Counted rather
+  than latched so a single underrun does not flicker a word on screen. The web
+  shell ORs in one more thing at `playlist.ts`: a server track is fetched *whole*
+  before it plays there, and that wait is buffering by any honest reading even
+  though no ring is involved.
+- **Certificate trust is the OS's, and only the OS's** (Phase 2 M5). The desktop
+  client verifies against the platform trust store (ureq's `platform-verifier`),
+  which is what makes "add your CA to this machine" real advice rather than a
+  sentence that changes nothing -- the previous default, webpki-roots, is a
+  bundle compiled into the binary that no OS-level install can affect. What this
+  deliberately does *not* have is a trust-on-first-use fingerprint flow: it asks
+  a listener to compare a hex string they have no safe way to obtain, and it is
+  unnecessary once the OS store is the authority. A server whose certificate the
+  OS does not trust is named as itself, with the two routes out. Not verifiable
+  by the fake server, which is plaintext -- what `tests/failing_well.rs` checks is
+  the classification every shell's message is drawn from.
+- **A credentials refusal mid-session drops the connection, and nothing else
+  does** (Phase 2 M5). A password changed on the server, or a revoked API key,
+  used to fail one request and vanish while the panel still said "connected".
+  Now any request noticing a credentials refusal clears the connection and
+  records why, so the panel shows the state it already had for a wrong password
+  at connect time. Only credentials: a request that failed because the network
+  blinked is a reason to try again, not to declare the server gone.
 - **The web shell fetches a whole server track before playing it** (Phase 2 M2).
   A browser has no `MediaSource` the worker can pull through, so there is no web
   counterpart to `remote.rs`'s 512KB chunking: the track's bytes are fetched, and

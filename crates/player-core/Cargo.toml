@@ -32,8 +32,12 @@ rtrb = "0.3.4"
 # The desktop shell's Subsonic transport (Phase 2 M1). Blocking, because every
 # caller is a thread allowed to block and none of them is the audio callback --
 # an async client would cost this crate an executor it does not otherwise have.
-# rustls by default, so no OpenSSL to find on Windows.
-ureq = "3.4"
+# rustls by default, so no OpenSSL to find on Windows. `platform-verifier` is
+# M5 decision 16: without it ureq verifies against webpki-roots (Mozilla's
+# bundle, compiled in), under which a self-hosted server's own CA installed in
+# the OS certificate store changes nothing -- which is the norm on the boxes
+# this phase exists to reach.
+ureq = { version = "3.4", features = ["platform-verifier"] }
 # Salts for Subsonic's token auth, from the OS. Native-only on purpose: the web
 # shell has crypto.getRandomValues and this crate stays free of the wasm feature
 # flag getrandom would otherwise need (tasks/phase-2.md decision 3).

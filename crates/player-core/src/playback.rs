@@ -139,6 +139,10 @@ struct Shared {
     finished: AtomicBool,
     /// Set once the ring has been filled enough to start playing.
     primed: AtomicBool,
+    /// Consecutive frames the callback has had to fill with silence because
+    /// there was nothing to play (M5). Reset by any callback that fills
+    /// completely, so it measures the *current* stall rather than a total.
+    starved_frames: AtomicU64,
     /// Tells the decoder thread to exit (set by `Drop`).
     stop: AtomicBool,
     tap: AnalysisTap,
@@ -153,6 +157,8 @@ impl Shared {
         f64::from_bits(self.duration_seconds.load(Ordering::Relaxed))
     }
 }
+
+use crate::stream::buffering_after_frames;
 
 /// A track change riding in the stream, one queue slot per hand-off.
 ///
@@ -299,6 +305,7 @@ impl Playback {
             duration_seconds: AtomicU64::new(track.duration_seconds.to_bits()),
             src_channels: AtomicU32::new(u32::from(track.shape.src_channels)),
             track_index: AtomicU64::new(0),
+            starved_frames: AtomicU64::new(0),
             eos: AtomicBool::new(false),
             finished: AtomicBool::new(false),
             primed: AtomicBool::new(false),
@@ -578,6 +585,21 @@ impl Playback {
     /// is not an ending at all.
     pub fn is_finished(&self) -> bool {
         self.shared.finished.load(Ordering::Relaxed)
+    }
+
+    /// Whether playback is waiting for audio that has not arrived (M5).
+    ///
+    /// The state both engines have always had and neither could say: an empty
+    /// ring with the track not ended. Over a network that is the difference
+    /// between "this is slow" and "this is broken", and until M5 the two looked
+    /// identical from outside -- the transport reported `playing` with the
+    /// position held, and nothing said why.
+    ///
+    /// False at the end of a track, where there is nothing left to wait for.
+    pub fn is_buffering(&self) -> bool {
+        !self.is_finished()
+            && self.shared.starved_frames.load(Ordering::Relaxed)
+                >= buffering_after_frames(self.sample_rate)
     }
 
     pub fn output_channels(&self) -> u16 {
@@ -1141,6 +1163,11 @@ where
 
                 if !shared.playing.load(Ordering::Relaxed) {
                     silence(data, convert);
+                    // A pause is not a stall. Without this, pausing during an
+                    // underrun and resuming later would report buffering off a
+                    // count that stopped being true when the listener pressed
+                    // the button.
+                    shared.starved_frames.store(0, Ordering::Relaxed);
                     // Paused audio is still audio the device received, and the
                     // tap holds what the device received. Without this the
                     // meters freeze on the last frame before the pause and hold
@@ -1209,6 +1236,18 @@ where
                     // trace on the last good audio -- hiding a dropout at the
                     // exact moment the scope would have shown it.
                     shared.tap.push_silence(data.len() - filled);
+                    // And the same silence is what "buffering" is made of (M5).
+                    // Counted in frames rather than callbacks so the threshold
+                    // is a duration rather than a number that means something
+                    // different at every block size.
+                    shared.starved_frames.fetch_add(
+                        ((data.len() - filled) / out_channels) as u64,
+                        Ordering::Relaxed,
+                    );
+                } else {
+                    // A block that filled completely ends the stall, whatever
+                    // came before it.
+                    shared.starved_frames.store(0, Ordering::Relaxed);
                 }
                 if filled > 0 {
                     consumed_total += filled as u64;

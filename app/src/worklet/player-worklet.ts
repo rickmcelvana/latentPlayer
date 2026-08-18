@@ -137,6 +137,11 @@ class PlayerWorklet extends AudioWorkletProcessor {
 
     if (Atomics.load(c, CONTROL.playing) !== 1) {
       this.silence(output);
+      // A pause is not a stall -- same rule, same place, as the native
+      // callback. Without it, pausing during an underrun and resuming later
+      // reports buffering off a count that stopped being true when the
+      // listener pressed the button.
+      Atomics.store(c, CONTROL.starvedFrames, 0);
       // Paused audio is still audio the output received, and the tap holds
       // what the output received -- same rule, same reason, as the native
       // callback. Without it the meters freeze on the last frame before the
@@ -208,6 +213,16 @@ class PlayerWorklet extends AudioWorkletProcessor {
       Atomics.add(c, CONTROL.filledFrames, -frames);
       Atomics.add(c, CONTROL.positionFrames, frames);
       Atomics.add(c, CONTROL.consumedFrames, frames);
+    }
+
+    // What "buffering" is made of (M5): the frames this block had to invent
+    // because the ring was empty. Counted in frames rather than blocks so the
+    // threshold is a duration, and reset by a block that filled completely --
+    // whatever came before it, the stall is over.
+    if (frames < BLOCK_FRAMES) {
+      Atomics.add(c, CONTROL.starvedFrames, BLOCK_FRAMES - frames);
+    } else {
+      Atomics.store(c, CONTROL.starvedFrames, 0);
     }
 
     this.applyBoundaries();

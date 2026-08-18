@@ -32,6 +32,7 @@ const EMPTY: TransportState = {
   volume: 1,
   finished: false,
   trackIndex: 0,
+  buffering: false,
 };
 
 /// How often the scrobble tracker is told where playback is (M4).
@@ -329,7 +330,17 @@ function App() {
           </label>
         )}
 
-        {current !== null && <p className="now-playing">{tracks[current]?.name}</p>}
+        {current !== null && (
+          <p className="now-playing">
+            {tracks[current]?.name}
+            {/* The state both engines always had and neither could say (M5).
+                Beside the title rather than over the transport: the controls
+                still work while it waits -- pausing, seeking and skipping are
+                all reasonable things to do to a track that is taking its time
+                -- so covering them would be a lie about what is available. */}
+            {state.buffering && <span className="buffering">buffering…</span>}
+          </p>
+        )}
 
         <div className="transport">
           <button type="button" onClick={() => skip(-1)} disabled={!loaded || current === 0}>

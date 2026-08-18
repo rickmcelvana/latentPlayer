@@ -35,6 +35,7 @@ use symphonia::core::io::MediaSource;
 
 use crate::error::PlayerError;
 use crate::source::PlaybackSource;
+use crate::subsonic::SubsonicError;
 
 /// How much is fetched per range request.
 ///
@@ -58,6 +59,24 @@ const MAX_WHOLE_BYTES: u64 = 512 * 1024 * 1024;
 /// longer than a JSON response ever should.
 const REQUEST_TIMEOUT: Duration = Duration::from_secs(60);
 
+/// How long to wait before each retry of a chunk that failed (M5 decision 14).
+///
+/// Three attempts after the first, backing off, which buys about four seconds
+/// of patience on top of the timeouts themselves. Long enough for the hiccups
+/// that actually happen -- a wifi roam, a VPN reconnecting, a server paging
+/// something back in -- and short enough that a server which is really gone is
+/// reported while the listener still remembers pressing play.
+///
+/// What gets retried is `SubsonicError::is_transient`'s business, and it is
+/// narrow on purpose: a 4xx is never retried, because a token the server
+/// rejects is still rejected three seconds later and retrying it only delays
+/// telling someone what they have to fix.
+const RETRY_BACKOFF: [Duration; 3] = [
+    Duration::from_millis(250),
+    Duration::from_secs(1),
+    Duration::from_secs(3),
+];
+
 /// A track on a server, identified by an already-authenticated URL.
 pub struct RemoteSource {
     url: String,
@@ -72,6 +91,10 @@ impl RemoteSource {
     pub fn new(url: impl Into<String>, extension_hint: Option<String>) -> Self {
         let config = ureq::Agent::config_builder()
             .timeout_global(Some(REQUEST_TIMEOUT))
+            // The same trust store the metadata client uses (M5 decision 16) --
+            // it would be its own kind of bug for a server to browse and then
+            // refuse to stream over a certificate question.
+            .tls_config(crate::subsonic::http::platform_tls())
             .build();
         Self {
             url: url.into(),
@@ -135,8 +158,42 @@ impl HttpStream {
         Ok(stream)
     }
 
-    /// Fetches the chunk containing `at`, replacing whatever is buffered.
+    /// Fetches the chunk containing `at`, retrying a failure that could
+    /// plausibly go away (M5 decision 14).
+    ///
+    /// This is the difference between a five-second outage and a skipped track.
+    /// Before M5 a single failed read was fatal to the track: the decoder treats
+    /// a broken source the way it treats a corrupt file, by moving on to
+    /// whatever is queued. While this is retrying, the ring drains and the
+    /// callback plays silence with the position held -- which is exactly the
+    /// state `Playback::is_buffering` now reports, so the wait is something the
+    /// listener can see rather than a mute pause.
     fn fetch(&mut self, at: u64) -> Result<(), PlayerError> {
+        let mut attempt = 0;
+        loop {
+            let failure = match self.fetch_once(at) {
+                Ok(()) => return Ok(()),
+                Err(failure) => failure,
+            };
+            // Asked in this order deliberately: something that will never
+            // work must be reported as itself, not as "gave up after four
+            // attempts" -- which would describe patience this never spent.
+            if !failure.is_transient() {
+                return Err(PlayerError::Remote(failure.to_string()));
+            }
+            let Some(backoff) = RETRY_BACKOFF.get(attempt) else {
+                return Err(PlayerError::Remote(format!(
+                    "{failure} (gave up after {} attempts)",
+                    RETRY_BACKOFF.len() + 1
+                )));
+            };
+            std::thread::sleep(*backoff);
+            attempt += 1;
+        }
+    }
+
+    /// One attempt at the chunk containing `at`, replacing whatever is buffered.
+    fn fetch_once(&mut self, at: u64) -> Result<(), SubsonicError> {
         if self.whole {
             // The whole body is already here; there is nothing to fetch and
             // nothing that could arrive.
@@ -149,12 +206,9 @@ impl HttpStream {
             .get(&self.url)
             .header("Range", format!("bytes={at}-{last}"))
             .call()
-            .map_err(|e| match e {
-                ureq::Error::StatusCode(status) => {
-                    PlayerError::Remote(format!("the server answered with HTTP {status}"))
-                }
-                other => PlayerError::Remote(other.to_string()),
-            })?;
+            // The same classification the metadata client uses, so "is this
+            // worth trying again" has one answer in this crate rather than two.
+            .map_err(crate::subsonic::http::classify)?;
 
         let status = response.status().as_u16();
         let content_range = response
@@ -182,7 +236,10 @@ impl HttpStream {
             .with_config()
             .limit(limit)
             .read_to_vec()
-            .map_err(|e| PlayerError::Remote(format!("reading the track failed: {e}")))?;
+            // A body that stops arriving mid-chunk is exactly the hiccup this
+            // milestone exists to survive, so it is transport rather than
+            // something final.
+            .map_err(|e| SubsonicError::Transport(format!("reading the track failed: {e}")))?;
 
         if ranged {
             if self.len.is_none() {
@@ -194,7 +251,8 @@ impl HttpStream {
             // Not rangeable. Everything the server sent is everything there is,
             // so keep it and stop asking (decision 7's fallback).
             if body.len() as u64 >= MAX_WHOLE_BYTES {
-                return Err(PlayerError::Remote(format!(
+                // Not transient: asking again gets the same enormous body.
+                return Err(SubsonicError::Malformed(format!(
                     "the server will not serve byte ranges and the track is larger than \
                      {MAX_WHOLE_BYTES} bytes, so it cannot be buffered whole"
                 )));

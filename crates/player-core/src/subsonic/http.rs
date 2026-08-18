@@ -96,6 +96,7 @@ impl HttpClient {
     pub fn new(server: Server, credentials: Credentials) -> Self {
         let config = ureq::Agent::config_builder()
             .timeout_global(Some(REQUEST_TIMEOUT))
+            .tls_config(platform_tls())
             .build();
         Self {
             agent: config.into(),
@@ -243,10 +244,7 @@ impl HttpClient {
     pub fn cover_art(&self, id: &str, size: u32) -> Result<CoverArt, SubsonicError> {
         let url = self.url_for("getCoverArt", &cover_art_params(id, size))?;
 
-        let mut response = self.agent.get(&url).call().map_err(|e| match e {
-            ureq::Error::StatusCode(status) => SubsonicError::Http { status },
-            other => SubsonicError::Transport(other.to_string()),
-        })?;
+        let mut response = self.agent.get(&url).call().map_err(classify)?;
         let content_type = response
             .headers()
             .get(ureq::http::header::CONTENT_TYPE)
@@ -306,14 +304,7 @@ impl HttpClient {
     /// error type -- so a caller matches on `SubsonicError` and never on
     /// `ureq::Error`.
     fn fetch(&self, url: &str) -> Result<Vec<u8>, SubsonicError> {
-        let mut response = self.agent.get(url).call().map_err(|e| match e {
-            // 4xx/5xx: a real HTTP failure, which for this protocol means
-            // something *other* than the application talking -- a proxy, a
-            // wrong path, an auth layer in front of the server. Subsonic's own
-            // failures arrive as 200s (see `mod.rs`).
-            ureq::Error::StatusCode(status) => SubsonicError::Http { status },
-            other => SubsonicError::Transport(other.to_string()),
-        })?;
+        let mut response = self.agent.get(url).call().map_err(classify)?;
 
         response
             .body_mut()
@@ -321,6 +312,58 @@ impl HttpClient {
             .limit(MAX_RESPONSE_BYTES)
             .read_to_vec()
             .map_err(|e| SubsonicError::Transport(format!("reading the response failed: {e}")))
+    }
+}
+
+/// TLS that trusts what the OS trusts (M5 decision 16).
+///
+/// Not the default, and the difference is the whole point. ureq's default is
+/// rustls with **webpki-roots** -- Mozilla's root bundle, compiled into the
+/// binary -- under which a self-hoster who installs their own CA in the Windows
+/// certificate store, the macOS keychain or `/etc/ssl/certs` changes nothing
+/// whatsoever. That is the normal situation on the boxes this phase exists to
+/// reach, so the honest diagnosis under the old default ("install the
+/// certificate") would have been advice that does not work.
+///
+/// The alternative considered and rejected was pinning a fingerprint the user
+/// confirms once. It is a security-sensitive thing to get right, it asks a
+/// listener to compare a hex string they have no safe way to obtain, and it is
+/// unnecessary the moment the OS store is the authority -- adding a CA there is
+/// something the person running the server has already done for their browser.
+pub fn platform_tls() -> ureq::tls::TlsConfig {
+    ureq::tls::TlsConfig::builder()
+        .root_certs(ureq::tls::RootCerts::PlatformVerifier)
+        .build()
+}
+
+/// One `ureq::Error`, as this crate's error type (M5).
+///
+/// The one place ureq's twenty-nine variants become the handful of things a
+/// person can actually do something about -- so `remote.rs` and this module
+/// classify a failure identically, and neither decides by reading message text.
+pub fn classify(error: ureq::Error) -> SubsonicError {
+    match error {
+        // 4xx/5xx: a real HTTP failure, which for this protocol means something
+        // *other* than the application talking -- a proxy, a wrong path, an
+        // auth layer in front of the server. Subsonic's own failures arrive as
+        // 200s (see `mod.rs`).
+        ureq::Error::StatusCode(status) => SubsonicError::Http { status },
+        // Every way TLS can refuse. Its own kind because it is the one network
+        // failure with a specific cause and a specific fix, and because
+        // retrying it is pointless by definition.
+        ureq::Error::Tls(what) => SubsonicError::Certificate(what.to_string()),
+        ureq::Error::Rustls(e) => SubsonicError::Certificate(e.to_string()),
+        ureq::Error::Pem(e) => SubsonicError::Certificate(e.to_string()),
+        ureq::Error::TlsRequired => SubsonicError::Certificate(
+            "the server offered an unencrypted connection where https was required".into(),
+        ),
+        ureq::Error::HostNotFound => {
+            SubsonicError::Transport("that host could not be found".into())
+        }
+        ureq::Error::Timeout(what) => {
+            SubsonicError::Transport(format!("the server did not answer in time ({what})"))
+        }
+        other => SubsonicError::Transport(other.to_string()),
     }
 }
 

@@ -1,0 +1,33 @@
+<!doctype html>
+<!--
+  Dev-only harness for Phase 2 M5 (failing well) on the web shell. Served at
+  /failing.html by `npm run dev`; deliberately not in vite's build inputs, so it
+  never ships. The native counterpart is
+  `cargo test -p player-core --test failing_well`.
+
+  What only this side can check: that `audioSab.ts`'s mirrored copy of the
+  buffering threshold still equals player-core's, and that this shell classifies
+  a failure with the same Rust the desktop shell does. Both run offline -- no
+  server needed, nothing written anywhere.
+-->
+<html lang="en">
+  <head>
+    <meta charset="UTF-8" />
+    <title>failing-well smoke</title>
+    <style>
+      body { background: #14161a; color: #dfe3ea; font: 13px/1.6 ui-monospace, monospace; padding: 24px; }
+      button { font: inherit; padding: 6px 10px; background: #1d2027; color: inherit; border: 1px solid #333842; border-radius: 4px; }
+      pre { white-space: pre-wrap; }
+      .note { opacity: 0.6; }
+    </style>
+  </head>
+  <body>
+    <p>Holds this shell's copy of the buffering threshold, and its failure classification, to player-core's.</p>
+    <p class="note">
+      Runs entirely offline: no server, no network, nothing written. Makes no sound.
+    </p>
+    <button id="run">Run</button>
+    <pre id="out"></pre>
+    <script type="module" src="/src/failingSmoke.ts"></script>
+  </body>
+</html>

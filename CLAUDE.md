@@ -195,6 +195,33 @@ changed nothing. Both smokes put the library back the way they found it, except
 a *play*, which is opt-in on each because it writes to a listening history
 nothing here can edit. M5 (failing well) is next and is the last of Phase 2.
 
+**Phase 2 M5 is done, and Phase 2 is closed** (2026-08-18): failing well. Three
+things that a network feature earns and this one did not have. **A stalled read
+is retried** rather than ending the track -- `remote.rs` backs off 250ms/1s/3s
+behind `fetch_once`, and what is worth retrying is narrow on purpose
+(`SubsonicError::is_transient`: a transport failure or a 5xx/408/429, never a 4xx
+and never a certificate, since a token the server rejects is still rejected three
+seconds later). **Buffering is a state the UI draws** -- the audio callback and
+the AudioWorklet each count consecutive silent frames, and `buffering` rides the
+transport snapshot past 250ms (`BUFFERING_AFTER_SECONDS` in `stream.rs`, mirrored
+in `audioSab.ts` and held to it by `/failing.html`); the web shell ORs in its
+whole-track fetch, which is buffering with no ring involved. **Every failure says
+which thing to change** -- `FailureKind` classifies in Rust so neither shell reads
+message text, a proxy's 401 counts as a credentials problem, and a credentials
+refusal *mid-session* drops the connection and says why instead of failing one
+request quietly.
+
+The certificate answer changed a finding into a fix: ureq defaults to
+webpki-roots, a bundle compiled into the binary, under which installing a
+self-hosted server's CA in the OS store does nothing -- so the obvious advice
+would have been advice that does not work. The desktop client now verifies
+against the **platform trust store** (`platform-verifier`), which makes "add your
+CA to this machine" real. No trust-on-first-use fingerprint flow, deliberately.
+Verified: **10/10** `cargo test -p player-core --test failing_well` (including a
+server that answers two 503s and then the music, playing through byte for byte,
+and a 404 reported after one request rather than four), 9 new unit tests (161 in
+`player-core`), and **6/6 in a real browser** at `/failing.html`.
+
 **Phase 2 is planned** (2026-08-17) -- see `tasks/phase-2.md` for
 the milestone plan (M1 connection, M2 remote playback, M3 browsing, M4
 playlists/scrobbling/stars, M5 failing well) and its eight decisions. The short
@@ -205,6 +232,11 @@ stays lockstep with the CORS and mixed-content limits stated rather than hidden,
 and the server's library is browsed live rather than mirrored. Nothing in the
 phase should touch the audio callback, the DSP path or the renderer. It needs a
 real Navidrome to verify against.
+
+`cargo test -p player-core --test failing_well` checks what happens when the
+server misbehaves -- retries, refusals, a captive portal, a token that stopped
+working; `/failing.html` is its web half and is what holds `audioSab.ts`'s
+mirrored buffering threshold to `player-core`'s.
 
 `cargo run -p player-core --example seek_smoke -- <path>` checks that seeking a given file yields
 the same audio as playing through to that point — written for MP3, whose bit reservoir makes

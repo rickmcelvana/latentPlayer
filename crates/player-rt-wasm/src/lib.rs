@@ -887,6 +887,45 @@ impl WasmScrobbler {
     }
 }
 
+/// How long a stall has to last before it counts as buffering (Phase 2 M5).
+///
+/// `audioSab.ts` mirrors this number, because `transport()` runs on the UI
+/// thread ten times a second where there is no wasm to ask. This binding is what
+/// /failing.html holds that mirror to -- the same arrangement eqFilter.ts's copy
+/// of the biquad lives under.
+#[wasm_bindgen(js_name = bufferingAfterSeconds)]
+pub fn buffering_after_seconds() -> f64 {
+    player_core::stream::BUFFERING_AFTER_SECONDS
+}
+
+/// What kind of failure a Subsonic error is, as the shells need to say it
+/// (Phase 2 M5): `"credentials"`, `"certificate"`, `"unreachable"`,
+/// `"address"`, `"server"` or `"malformed"`.
+///
+/// Exposed so the web shell classifies a failure with the same Rust the desktop
+/// shell uses rather than by reading message text -- and so /failing.html can
+/// check that it does.
+#[wasm_bindgen(js_name = subsonicFailureKind)]
+pub fn subsonic_failure_kind(bytes: &[u8]) -> String {
+    match player_core::subsonic::parse::<serde_json::Value>(bytes) {
+        Ok(_) => "ok".to_string(),
+        Err(error) => failure_kind_name(&error),
+    }
+}
+
+fn failure_kind_name(error: &player_core::subsonic::SubsonicError) -> String {
+    use player_core::subsonic::FailureKind;
+    match error.kind() {
+        FailureKind::Address => "address",
+        FailureKind::Unreachable => "unreachable",
+        FailureKind::Certificate => "certificate",
+        FailureKind::Credentials => "credentials",
+        FailureKind::Server => "server",
+        FailureKind::Malformed => "malformed",
+    }
+    .to_string()
+}
+
 fn playlist_request(request_json: &str) -> Result<player_core::subsonic::PlaylistRequest, JsValue> {
     serde_json::from_str(request_json)
         .map_err(|e| JsValue::from_str(&format!("bad playlist request: {e}")))
@@ -1013,16 +1052,13 @@ pub fn subsonic_random_songs(bytes: &[u8]) -> String {
 fn subsonic_failure_json(error: &player_core::subsonic::SubsonicError) -> serde_json::Value {
     use player_core::subsonic::SubsonicError;
 
-    let (kind, code, credentials) = match error {
-        SubsonicError::Server { code, .. } => (
-            "server",
-            Some(format!("{code:?}")),
-            code.is_credentials_problem(),
-        ),
-        SubsonicError::Http { .. } => ("http", None, false),
-        SubsonicError::Malformed(_) => ("malformed", None, false),
-        SubsonicError::Transport(_) => ("transport", None, false),
-        SubsonicError::BadUrl(_) => ("badUrl", None, false),
+    let (kind, code) = match error {
+        SubsonicError::Server { code, .. } => ("server", Some(format!("{code:?}"))),
+        SubsonicError::Http { .. } => ("http", None),
+        SubsonicError::Malformed(_) => ("malformed", None),
+        SubsonicError::Transport(_) => ("transport", None),
+        SubsonicError::Certificate(_) => ("certificate", None),
+        SubsonicError::BadUrl(_) => ("badUrl", None),
     };
     serde_json::json!({
         "ok": false,
@@ -1030,7 +1066,12 @@ fn subsonic_failure_json(error: &player_core::subsonic::SubsonicError) -> serde_
             "kind": kind,
             "code": code,
             "message": error.to_string(),
-            "credentials": credentials,
+            // Both from the error itself now (M5 decision 17), so a proxy's 401
+            // counts as a credentials problem on this shell exactly as it does
+            // natively -- and so a shell picks its sentence from a name rather
+            // than by reading message text.
+            "credentials": error.is_credentials_problem(),
+            "failure": failure_kind_name(error),
         },
     })
 }

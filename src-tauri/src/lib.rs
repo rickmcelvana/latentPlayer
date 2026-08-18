@@ -130,6 +130,10 @@ struct TransportState {
     /// the rest of it does: the UI resolves "which track is playing" from the
     /// same snapshot it draws the clock from, so the two cannot disagree.
     track_index: u64,
+    /// Waiting for audio that has not arrived (Phase 2 M5). Over a network this
+    /// is the difference between "slow" and "broken", and until M5 the two were
+    /// the same picture: `playing`, with the position held and nothing said.
+    buffering: bool,
 }
 
 impl TransportState {
@@ -140,6 +144,7 @@ impl TransportState {
             playing: playback.is_playing(),
             volume: playback.volume(),
             finished: playback.is_finished(),
+            buffering: playback.is_buffering(),
             track_index: playback.track_index(),
         }
     }
@@ -153,6 +158,7 @@ impl TransportState {
             volume: 1.0,
             finished: false,
             track_index: 0,
+            buffering: false,
         }
     }
 }
@@ -821,6 +827,10 @@ pub fn run() {
             // outlives any one track, and it is consulted from the transport
             // poll rather than from anything that holds the connection.
             app.manage(servers::SharedScrobbler::default());
+            // Why the connection stopped working, when it did (M5). Its own
+            // state because it outlives the connection it describes -- that is
+            // the whole point: the connection is gone and this says why.
+            app.manage(servers::SharedFailure::default());
             // Reconnecting at startup happens off the main thread: it is a
             // network round trip, and a server that is not there takes the
             // request timeout to say so -- which on this thread would be the

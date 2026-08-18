@@ -477,15 +477,21 @@ impl ErrorCode {
 /// Everything that can go wrong between typing a server address and holding a
 /// parsed payload.
 ///
-/// `Transport` is the one variant this module never constructs: it is where the
-/// shells put what their own HTTP client told them, so that a caller matches on
-/// one error type rather than on two.
+/// `Transport` and `Certificate` are the two variants this module never
+/// constructs: they are where the shells put what their own HTTP client told
+/// them, so that a caller matches on one error type rather than on two.
 #[derive(Debug, Clone, PartialEq, Eq, thiserror::Error)]
 pub enum SubsonicError {
     #[error("{0}")]
     BadUrl(String),
     #[error("could not reach the server: {0}")]
     Transport(String),
+    /// TLS said no (M5). Its own variant rather than a `Transport` because it
+    /// is the one network failure with a specific, actionable cause -- and
+    /// because it must never be retried: a certificate that is not trusted now
+    /// is not trusted three seconds later.
+    #[error("the server's certificate could not be verified: {0}")]
+    Certificate(String),
     #[error("the server answered with HTTP {status}")]
     Http { status: u16 },
     #[error("the server's answer could not be read: {0}")]
@@ -494,9 +500,164 @@ pub enum SubsonicError {
     Server { code: ErrorCode, message: String },
 }
 
+/// What kind of thing went wrong, in terms of what the person has to go and do
+/// about it (M5 decision 17).
+///
+/// The point of this enum is that a shell draws its sentence from a *kind* and
+/// never from parsing message text. Until M5 there was one sentence for "your
+/// password is wrong", "that address is not answering" and "that certificate is
+/// not trusted" -- three entirely different things to go and fix.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize)]
+#[serde(rename_all = "camelCase")]
+pub enum FailureKind {
+    /// The address is wrong before anything was sent.
+    Address,
+    /// Nothing answered, or the answer never arrived.
+    Unreachable,
+    /// TLS refused. Almost always a self-hosted server with its own
+    /// certificate, which is a thing to fix on the machine and not in this app.
+    Certificate,
+    /// The credentials are not accepted -- now, or any more.
+    Credentials,
+    /// The server answered, and said no for its own reasons.
+    Server,
+    /// The server answered with something this client could not read.
+    Malformed,
+}
+
+impl SubsonicError {
+    /// What has to change for this to work.
+    pub fn kind(&self) -> FailureKind {
+        match self {
+            Self::BadUrl(_) => FailureKind::Address,
+            Self::Transport(_) => FailureKind::Unreachable,
+            Self::Certificate(_) => FailureKind::Certificate,
+            // A 401/403 from *in front of* the server -- a reverse proxy with
+            // its own auth -- is still the listener's credentials being
+            // refused, even though Subsonic's own refusals arrive as 200s.
+            Self::Http { status } if *status == 401 || *status == 403 => FailureKind::Credentials,
+            Self::Http { .. } => FailureKind::Server,
+            Self::Malformed(_) => FailureKind::Malformed,
+            Self::Server { code, .. } if code.is_credentials_problem() => FailureKind::Credentials,
+            Self::Server { .. } => FailureKind::Server,
+        }
+    }
+
+    /// Whether re-entering credentials is the useful thing to offer.
+    ///
+    /// The one question the server panel has always asked; now asked of the
+    /// whole error rather than only of a server-side code, so a proxy's 401
+    /// counts too.
+    pub fn is_credentials_problem(&self) -> bool {
+        self.kind() == FailureKind::Credentials
+    }
+
+    /// Whether making the same request again could plausibly work (M5
+    /// decision 14).
+    ///
+    /// Deliberately narrow. A 4xx is never retried: a token the server rejects
+    /// is still rejected three seconds later, and retrying only delays telling
+    /// the listener something they have to act on. A certificate is a decision
+    /// about trust, not a hiccup. What is left is the genuinely transient --
+    /// nothing answered, or the server said it is having a moment.
+    pub fn is_transient(&self) -> bool {
+        match self {
+            Self::Transport(_) => true,
+            // 408 request timeout, 429 too many requests, 5xx server-side.
+            Self::Http { status } => *status == 408 || *status == 429 || *status >= 500,
+            Self::BadUrl(_) | Self::Certificate(_) | Self::Malformed(_) | Self::Server { .. } => {
+                false
+            }
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// M5 decision 17: three failures that used to share one sentence.
+    #[test]
+    fn a_failure_says_which_thing_to_change() {
+        assert_eq!(
+            SubsonicError::BadUrl("no scheme".into()).kind(),
+            FailureKind::Address
+        );
+        assert_eq!(
+            SubsonicError::Transport("connection refused".into()).kind(),
+            FailureKind::Unreachable
+        );
+        assert_eq!(
+            SubsonicError::Certificate("unknown issuer".into()).kind(),
+            FailureKind::Certificate
+        );
+        assert_eq!(
+            SubsonicError::Server {
+                code: ErrorCode::BadCredentials,
+                message: "wrong username or password".into(),
+            }
+            .kind(),
+            FailureKind::Credentials
+        );
+        assert_eq!(
+            SubsonicError::Server {
+                code: ErrorCode::NotFound,
+                message: "not found".into(),
+            }
+            .kind(),
+            FailureKind::Server
+        );
+        assert_eq!(
+            SubsonicError::Malformed("not JSON".into()).kind(),
+            FailureKind::Malformed
+        );
+    }
+
+    /// An auth layer in *front of* the server refuses with a real HTTP status,
+    /// unlike Subsonic itself -- and it is still the listener's password.
+    #[test]
+    fn a_proxys_401_is_a_credentials_problem_too() {
+        assert_eq!(
+            SubsonicError::Http { status: 401 }.kind(),
+            FailureKind::Credentials
+        );
+        assert_eq!(
+            SubsonicError::Http { status: 403 }.kind(),
+            FailureKind::Credentials
+        );
+        assert!(SubsonicError::Http { status: 401 }.is_credentials_problem());
+        // But an ordinary server error is not.
+        assert_eq!(
+            SubsonicError::Http { status: 502 }.kind(),
+            FailureKind::Server
+        );
+        assert!(!SubsonicError::Http { status: 502 }.is_credentials_problem());
+    }
+
+    /// M5 decision 14. The narrowness is the point: retrying what will never
+    /// work only delays telling someone what they have to fix.
+    #[test]
+    fn only_the_genuinely_transient_is_worth_retrying() {
+        assert!(SubsonicError::Transport("timed out".into()).is_transient());
+        assert!(SubsonicError::Http { status: 500 }.is_transient());
+        assert!(SubsonicError::Http { status: 503 }.is_transient());
+        assert!(SubsonicError::Http { status: 408 }.is_transient());
+        assert!(SubsonicError::Http { status: 429 }.is_transient());
+
+        // A token the server rejects is still rejected three seconds later.
+        assert!(!SubsonicError::Http { status: 401 }.is_transient());
+        assert!(!SubsonicError::Http { status: 404 }.is_transient());
+        // A certificate is a decision about trust, not a hiccup.
+        assert!(!SubsonicError::Certificate("unknown issuer".into()).is_transient());
+        // And the server answering clearly is an answer, not a stumble.
+        assert!(!SubsonicError::Server {
+            code: ErrorCode::BadCredentials,
+            message: "no".into(),
+        }
+        .is_transient());
+        assert!(!SubsonicError::Malformed("not JSON".into()).is_transient());
+        assert!(!SubsonicError::BadUrl("no scheme".into()).is_transient());
+    }
 
     /// The spec's own worked example (subsonic.org's API page): password
     /// `sesame`, salt `c19b2d`, token `26719a1196d2a940705a59634eb18eab`. A
