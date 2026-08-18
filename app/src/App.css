@@ -637,6 +637,50 @@ input[type="range"] {
       color: var(--accent);
     }
   }
+
+  /* Stars and ratings (M4). Siblings of the row's own button rather than
+     children of it -- a button inside a button is invalid HTML. */
+  .star,
+  .rate {
+    padding: 6px 2px;
+    border: none;
+    border-radius: 0;
+    background: none;
+    color: var(--text-d, var(--text));
+    font-size: 14px;
+    line-height: 1;
+    opacity: 0.45;
+
+    &:hover:not(:disabled) {
+      color: var(--accent);
+      opacity: 1;
+    }
+  }
+
+  .star {
+    padding: 6px 6px;
+  }
+
+  /* A mark that is set stays visible; an unset one is faint until hovered, so
+     a list of sixty rows is not sixty competing stars. */
+  .star.starred,
+  .rate.on {
+    color: var(--accent);
+    opacity: 1;
+  }
+
+  .rating {
+    display: inline-flex;
+    align-items: center;
+    /* Out of the way until the row is under the pointer -- the rating is a
+       thing to reach for, not a thing to read. */
+    opacity: 0;
+  }
+
+  li:hover .rating,
+  .rating:focus-within {
+    opacity: 1;
+  }
 }
 
 /* Fixed square so rows don't jump as covers resolve one by one. */

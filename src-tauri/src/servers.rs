@@ -27,7 +27,9 @@ use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex};
 
 use player_core::subsonic::http::HttpClient;
-use player_core::subsonic::{Credentials, Extensions, Server, ServerInfo, SubsonicError};
+use player_core::subsonic::{
+    Credentials, Extensions, ScrobbleAction, ScrobbleTracker, Server, ServerInfo, SubsonicError,
+};
 
 /// The service name the secret is filed under in the OS credential store. It is
 /// what the user sees in Credential Manager / Keychain Access, so it says the
@@ -542,6 +544,100 @@ pub async fn server_browse(
     tauri::async_runtime::spawn_blocking(move || client.browse(&request).map_err(|e| e.to_string()))
         .await
         .map_err(|e| e.to_string())?
+}
+
+/// One playlist request against the server (Phase 2 M4): the two reads and the
+/// four writes, through one command for the reason `server_browse` is one.
+#[tauri::command]
+pub async fn server_playlists(
+    request: player_core::subsonic::PlaylistRequest,
+    shared: tauri::State<'_, SharedServer>,
+) -> Result<player_core::subsonic::PlaylistResult, String> {
+    let client = client_for(&shared)?;
+    tauri::async_runtime::spawn_blocking(move || {
+        client.playlists(&request).map_err(|e| e.to_string())
+    })
+    .await
+    .map_err(|e| e.to_string())?
+}
+
+/// One star, unstar or rating (Phase 2 M4).
+#[tauri::command]
+pub async fn server_mark(
+    request: player_core::subsonic::MarkRequest,
+    shared: tauri::State<'_, SharedServer>,
+) -> Result<(), String> {
+    let client = client_for(&shared)?;
+    tauri::async_runtime::spawn_blocking(move || client.mark(&request).map_err(|e| e.to_string()))
+        .await
+        .map_err(|e| e.to_string())?
+}
+
+/// The scrobble tracker, which outlives any one track and any one command.
+pub type SharedScrobbler = Arc<Mutex<ScrobbleTracker>>;
+
+/// One observation of where playback is, and whatever it earned (Phase 2 M4).
+///
+/// Called from the transport poll the UI already runs, so most calls decide
+/// nothing and return immediately -- a track announces itself once and submits
+/// once. The decision is `player_core`'s (decision 10), and this command is the
+/// half that has a clock, a network and a lock.
+///
+/// Returns what it sent, as `"nowPlaying:<id>"`/`"submit:<id>"`, which is what
+/// makes the rule checkable from outside rather than only in Rust's own tests.
+#[tauri::command]
+pub async fn server_scrobble_tick(
+    track_id: Option<String>,
+    position_seconds: f64,
+    duration_seconds: f64,
+    playing: bool,
+    now_ms: f64,
+    shared: tauri::State<'_, SharedServer>,
+    scrobbler: tauri::State<'_, SharedScrobbler>,
+) -> Result<Vec<String>, String> {
+    // The lock is taken and released around a decision, never around a request:
+    // the sends below are network round trips, and a tick arriving every 100ms
+    // must not queue behind one.
+    let actions = {
+        let mut tracker = scrobbler.lock().unwrap();
+        tracker.observe(
+            track_id.as_deref(),
+            position_seconds,
+            duration_seconds,
+            playing,
+            now_ms.max(0.0) as u64,
+        )
+    };
+    if actions.is_empty() {
+        return Ok(Vec::new());
+    }
+
+    // No connected server is not an error here: the tracker still ran, and the
+    // UI polls this whether or not a server is configured.
+    let Ok(client) = client_for(&shared) else {
+        return Ok(Vec::new());
+    };
+
+    tauri::async_runtime::spawn_blocking(move || {
+        let mut sent = Vec::new();
+        for action in actions {
+            let (id, submission, time_ms, label) = match &action {
+                ScrobbleAction::NowPlaying { id } => {
+                    (id.clone(), false, None, format!("nowPlaying:{id}"))
+                }
+                ScrobbleAction::Submit { id, time_ms } => {
+                    (id.clone(), true, Some(*time_ms), format!("submit:{id}"))
+                }
+            };
+            client
+                .scrobble(&id, submission, time_ms)
+                .map_err(|e| e.to_string())?;
+            sent.push(label);
+        }
+        Ok(sent)
+    })
+    .await
+    .map_err(|e| e.to_string())?
 }
 
 /// The connected server's client, cloned out from under the lock.

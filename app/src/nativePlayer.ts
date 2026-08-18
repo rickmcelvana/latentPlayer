@@ -11,7 +11,14 @@
 // in the browser instead (§5's "Web audio I/O" note).
 import { convertFileSrc, invoke } from "@tauri-apps/api/core";
 import { open } from "@tauri-apps/plugin-dialog";
-import type { BrowseRequest, BrowseResult, ServerTrack } from "./serverTypes";
+import type {
+  BrowseRequest,
+  BrowseResult,
+  MarkRequest,
+  PlaylistRequest,
+  PlaylistResult,
+  ServerTrack,
+} from "./serverTypes";
 
 const AUDIO_FILTERS = [
   { name: "Audio", extensions: ["mp3", "flac", "wav", "aac", "m4a", "ogg"] },
@@ -253,6 +260,40 @@ export async function serverRandomTracks(count: number): Promise<ServerTrack[]> 
 /// module the web shell calls through wasm.
 export async function serverBrowse(request: BrowseRequest): Promise<BrowseResult> {
   return invoke<BrowseResult>("server_browse", { request });
+}
+
+/// One playlist request against the server (Phase 2 M4).
+///
+/// One command for the two reads and the four writes, for the reason
+/// `serverBrowse` is one command for five browses.
+export async function serverPlaylists(request: PlaylistRequest): Promise<PlaylistResult> {
+  return invoke<PlaylistResult>("server_playlists", { request });
+}
+
+/// One star, unstar or rating (Phase 2 M4).
+export async function serverMark(request: MarkRequest): Promise<void> {
+  return invoke("server_mark", { request });
+}
+
+/// One observation of where playback is, and whatever it earned (Phase 2 M4).
+///
+/// The tracker lives in this shell's Tauri state rather than here, because the
+/// rule it applies is `player_core`'s and the web shell holds the very same code
+/// in a wasm object (decision 10). The clock is passed in from here for the same
+/// reason the auth salt is: time and randomness belong to the shell.
+export async function serverScrobbleTick(
+  trackId: string | null,
+  positionSeconds: number,
+  durationSeconds: number,
+  playing: boolean,
+): Promise<string[]> {
+  return invoke<string[]>("server_scrobble_tick", {
+    trackId,
+    positionSeconds,
+    durationSeconds,
+    playing,
+    nowMs: Date.now(),
+  });
 }
 
 /// A URL for one piece of the server's cover art.

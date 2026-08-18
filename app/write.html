@@ -1,0 +1,47 @@
+<!doctype html>
+<!--
+  Dev-only harness for writing to the music server from a browser (Phase 2 M4).
+  Served at /write.html by `npm run dev`; deliberately not in vite's build
+  inputs, so it never ships. The native counterparts are
+  `cargo test -p player-core --test subsonic_write` (the fake-server half) and
+  `cargo run -p player-core --example write_smoke` (the live half), making the
+  same claims about the same things.
+
+  What only this side can check: that the browser's copy of the scrobble tracker
+  -- the same `player_core::subsonic::ScrobbleTracker` the desktop shell holds
+  natively -- counts a play exactly as the native one does. If the two shells
+  ever came to disagree about what a listener has heard, this is where it shows.
+
+  There is nowhere to type a password here: this uses the server the app's own
+  panel stored. Connect one in the app first. Makes no sound.
+-->
+<html lang="en">
+  <head>
+    <meta charset="UTF-8" />
+    <title>write smoke</title>
+    <style>
+      body { background: #14161a; color: #dfe3ea; font: 13px/1.6 ui-monospace, monospace; padding: 24px; }
+      button { font: inherit; padding: 6px 10px; background: #1d2027; color: inherit; border: 1px solid #333842; border-radius: 4px; }
+      pre { white-space: pre-wrap; }
+      .note { opacity: 0.6; }
+      label { display: block; margin: 8px 0; }
+    </style>
+  </head>
+  <body>
+    <p>Writes to the music server from this browser, through the app's own adapter.</p>
+    <p class="note">
+      Uses the server set up in the app (same origin, same IndexedDB). The rule
+      checks run without one. Everything it changes is put back: the playlist it
+      creates is deleted, and every star and rating is restored.
+    </p>
+    <label>
+      <input type="checkbox" id="allow-play" />
+      Also submit a play (scrobble). This one is <em>not</em> undone &mdash; it adds
+      to a listening history nothing here can edit, and your server may relay it
+      to Last.fm.
+    </label>
+    <button id="run">Run</button>
+    <pre id="out"></pre>
+    <script type="module" src="/src/writeSmoke.ts"></script>
+  </body>
+</html>

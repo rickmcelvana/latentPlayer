@@ -140,6 +140,9 @@ pub struct ArtistRow {
     /// never travels as JSON on either shell (M7 decision 5).
     pub cover_art: Option<String>,
     pub album_count: u32,
+    /// Whether the listener has starred this (M4). A boolean here and a date on
+    /// the wire -- see `stars::is_starred`.
+    pub starred: bool,
 }
 
 /// One album, as a row.
@@ -157,6 +160,9 @@ pub struct AlbumRow {
     /// makes for a file whose container states no length.
     pub duration_seconds: f64,
     pub year: Option<u32>,
+    pub starred: bool,
+    /// The listener's own rating, 1-5, or none (M4).
+    pub rating: Option<u32>,
 }
 
 /// One track, as a row -- and as everything else on this side of the boundary
@@ -175,6 +181,8 @@ pub struct TrackRow {
     pub duration_seconds: f64,
     pub cover_art: Option<String>,
     pub track_number: Option<u32>,
+    pub starred: bool,
+    pub rating: Option<u32>,
 }
 
 impl From<Song> for TrackRow {
@@ -188,6 +196,8 @@ impl From<Song> for TrackRow {
             duration_seconds: song.duration.unwrap_or(0) as f64,
             cover_art: song.cover_art,
             track_number: song.track,
+            starred: super::stars::is_starred(song.starred.as_deref()),
+            rating: song.user_rating,
         }
     }
 }
@@ -218,6 +228,8 @@ struct WireArtist {
     cover_art: Option<String>,
     #[serde(rename = "albumCount", default)]
     album_count: Option<u32>,
+    #[serde(default)]
+    starred: Option<String>,
 }
 
 impl From<WireArtist> for ArtistRow {
@@ -227,6 +239,7 @@ impl From<WireArtist> for ArtistRow {
             name: artist.name,
             cover_art: artist.cover_art,
             album_count: artist.album_count.unwrap_or(0),
+            starred: super::stars::is_starred(artist.starred.as_deref()),
         }
     }
 }
@@ -256,6 +269,10 @@ struct WireAlbum {
     #[serde(default)]
     year: Option<u32>,
     #[serde(default)]
+    starred: Option<String>,
+    #[serde(rename = "userRating", default)]
+    user_rating: Option<u32>,
+    #[serde(default)]
     song: Vec<Song>,
 }
 
@@ -275,6 +292,8 @@ impl From<WireAlbum> for AlbumRow {
             song_count: album.song_count.unwrap_or(0),
             duration_seconds: album.duration.unwrap_or(0) as f64,
             year: album.year,
+            starred: super::stars::is_starred(album.starred.as_deref()),
+            rating: album.user_rating,
         }
     }
 }

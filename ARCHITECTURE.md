@@ -103,6 +103,28 @@ crates/
                      back from all five, which is what lets one set of rows draw
                      a search and a browse. Cover art is asked for at a size,
                      once, for both shells.
+                     subsonic/playlists.rs, stars.rs and scrobble.rs (M4) are
+                     the writing half, built the same way and here for a sharper
+                     version of the same reason: every mistake available in a
+                     write is one the server answers "ok" to. stars.rs exists as
+                     its own module because `star` spells its id three ways --
+                     `id` for a song, `albumId`/`artistId` for the ID3-tagged
+                     album and artist this app always browses -- and the wrong
+                     one stars nothing, successfully. playlists.rs owns the
+                     repeated parameters (`songId`, `songIdToAdd`,
+                     `songIndexToRemove`), which is why a request's params are a
+                     Vec of pairs and not a map. scrobble.rs holds the *rule*:
+                     ScrobbleTracker is a state machine, driven by both shells
+                     with the position they already poll, that answers "announce
+                     this" and "count this play" -- half the track or four
+                     minutes, whichever comes first, measured in time actually
+                     played rather than in the position reached, so a seek to the
+                     end earns nothing. It is here rather than in each shell for
+                     the reason the error envelope is: four numbers written twice
+                     is two shells that eventually disagree about what a listener
+                     heard. Like the rest of this module it does no IO and reads
+                     no clock -- the shell passes the time in, as it passes the
+                     auth salt.
                      remote.rs (Phase 2 M2) is a PlaybackSource over HTTP, and
                      is the whole of what remote playback adds to the engine:
                      one 512KB chunk held at a time, seeks that move a cursor
@@ -273,7 +295,18 @@ app/                 React + TS + Vite. Same component tree renders in the
                      written in TypeScript, imported by both adapters rather than
                      mirrored into each -- five types is where that convention
                      stops paying. They are a transcription of browse.rs, which
-                     is what fills them on both shells.
+                     is what fills them on both shells; M4 added the playlist and
+                     mark shapes beside them, out of playlists.rs and stars.rs.
+                     The server browser grew a Playlists tab (M4) -- the server's
+                     playlists beside its albums and artists, created out of the
+                     queue, added to, renamed, reordered by removal and deleted.
+                     Rows carry the listener's star and rating there and
+                     everywhere else server rows appear; both are drawn
+                     optimistically and put back if the server refuses, since a
+                     star that waits for a round trip feels broken and one that
+                     survives a failure is a lie. Scrobbling rides the transport
+                     poll App.tsx already runs -- the one place that knows both
+                     which track is playing and how much of it has gone by.
                      playlist.ts, analysis.ts, scope.ts, library.ts, eq.ts and
                      server.ts are the six adapter modules components call:
                      playlist.ts picks the shell for playback, analysis.ts for
@@ -649,6 +682,31 @@ at the correct rate, re-verified with the same probe.
   identical, including instant seeking. A real fix is a `Blob`/stream-backed wasm
   source that reads on demand, which is the same missing piece as the web
   library's whole-file tag scan above.
+- **A play is submitted at most once per run of a track id** (Phase 2 M4, both
+  shells). Playing the same track twice in a row -- or seeking back to its start
+  and letting it run again -- earns one scrobble, not two, because the tracker
+  keys a play on the track id and the position cannot tell "played it again"
+  from "seeked backwards". Deliberate, and the direction to err in: the failure
+  it avoids writes to a listening history this app has no way to edit. The fix,
+  if it is ever wanted, is for the engines to say *how many times* they have
+  started a track rather than only which one is playing.
+- **Nothing scrobbles a local file** (Phase 2 M4). The tracker is told a null id
+  for anything that is not a server track, and sends nothing. That is the shape
+  of the milestone rather than an oversight -- what M4 sends is the *server's*
+  scrobble, which relays onward for anyone whose server is configured for it.
+  Direct Last.fm/ListenBrainz is Phase 4 (PLAN.md §7), and when it lands it can
+  drive the same tracker from the same poll.
+- **Star and rating are only as fresh as the last browse** (Phase 2 M4). The
+  rows carry the marks that arrived with them and are updated in place when this
+  app changes one; a star put on the same library from a phone in the meantime
+  is not seen until that view is asked for again. Live re-reading per row would
+  be a request per row against someone's server, which is what decision 6
+  (browse live, do not mirror) already declined to do for everything else.
+- **Server playlists and local playlists are two lists** (Phase 2 M4). Neither
+  is pushed to or mirrored from the other. Merging them is a real design question
+  -- which one wins on a conflict, what happens to a local playlist holding files
+  the server has never heard of -- and it wants deciding deliberately rather than
+  as a corner of a milestone.
 - **AAC/M4A encoder delay and padding are not trimmed.** For MP3 and Ogg this
   is handled for us: the demuxer populates `Packet::trim_start`/`trim_end` and
   the decoder applies them itself (`symphonia-bundle-mp3/src/decoder.rs:131`

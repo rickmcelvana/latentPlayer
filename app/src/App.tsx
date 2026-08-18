@@ -20,7 +20,7 @@ import { LibraryPanel } from "./LibraryPanel";
 import { Loudness } from "./Loudness";
 import { ScopeControls } from "./ScopeControls";
 import { ServerPanel } from "./ServerPanel";
-import type { ServerState } from "./server";
+import { resetScrobbler, serverScrobbleTick, type ServerState } from "./server";
 import { Spectrum } from "./Spectrum";
 import { DEFAULT_SCOPE_SIZE, attachWebCanvas } from "./scope";
 import { startScope } from "./webScope";
@@ -33,6 +33,13 @@ const EMPTY: TransportState = {
   finished: false,
   trackIndex: 0,
 };
+
+/// How often the scrobble tracker is told where playback is (M4).
+///
+/// Slower than the transport poll on purpose. The rule it applies is measured in
+/// tens of seconds, so a second's resolution is far more than it needs, and each
+/// tick natively is a command across the Tauri boundary.
+const SCROBBLE_TICK_MS = 1000;
 
 /// mm:ss. Negative/NaN durations collapse to 0:00 rather than rendering
 /// "NaN:NaN" while nothing is loaded.
@@ -68,6 +75,16 @@ function App() {
   // `trackIndex` counts hand-offs since then, so the track actually coming
   // out of the speakers is the sum of the two.
   const loadedIndex = useRef(0);
+  // What the scrobble ticker below should report (M4). A ref rather than a
+  // dependency: the ticker runs on its own second, and making it depend on the
+  // position would tear its interval down and rebuild it every 100ms poll --
+  // which is an interval that never fires.
+  const scrobbleInput = useRef({
+    id: null as string | null,
+    position: 0,
+    duration: 0,
+    playing: false,
+  });
   // The id of the track currently sitting in the engine's next slot, so the
   // queue is only rewritten when it should actually change. Null after a load,
   // which clears that slot on both shells.
@@ -106,6 +123,11 @@ function App() {
     setReady(false);
     loadedIndex.current = index;
     queuedId.current = null;
+    // A track chosen by hand is a new play, whatever the tracker had
+    // accumulated for the last one (M4). A gapless hand-off does not come
+    // through here, and does not need to: the tracker starts over the moment it
+    // is told a different track id.
+    resetScrobbler();
     try {
       setState(await loadTrack(track));
       setReady(true);
@@ -131,6 +153,34 @@ function App() {
     }, 100);
     return () => clearInterval(id);
   }, [loaded, tracks.length]);
+
+  // Scrobbling (Phase 2 M4), on its own second rather than off the poll above:
+  // the rule is measured in tens of seconds, and each tick natively crosses the
+  // Tauri boundary. What it reports comes from the poll all the same -- this is
+  // the one place in the app that knows both how much of a track has gone by and
+  // which track it is.
+  useEffect(() => {
+    const track = current === null ? null : tracks[current];
+    scrobbleInput.current = {
+      id: track?.server?.id ?? null,
+      position: state.position,
+      duration: state.duration,
+      playing: state.playing && !state.finished,
+    };
+  }, [current, tracks, state.position, state.duration, state.playing, state.finished]);
+
+  useEffect(() => {
+    if (!loaded) return;
+    const id = setInterval(() => {
+      const { id: trackId, position, duration, playing } = scrobbleInput.current;
+      // Deliberately not awaited into anything the UI draws: a slow server must
+      // not hold up the seek bar, and a scrobble that failed is not something to
+      // put in front of someone mid-track. A local file passes a null id and
+      // scrobbles nowhere -- direct Last.fm is Phase 4 (PLAN.md §7).
+      void serverScrobbleTick(trackId, position, duration, playing).catch(() => {});
+    }, SCROBBLE_TICK_MS);
+    return () => clearInterval(id);
+  }, [loaded]);
 
   // Keep the engine's one-deep lookahead pointed at whatever follows the
   // track being heard. Queuing early is the point -- the decoder picks the

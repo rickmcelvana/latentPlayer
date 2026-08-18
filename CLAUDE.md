@@ -119,7 +119,9 @@ transports against a real server.
 
 `cargo run -p player-core --example subsonic_smoke` checks the client against a
 real server; `cargo test -p player-core --test subsonic_http` checks it against
-a fake one that misbehaves on purpose (`tests/common/mod.rs`, which M2 reuses).
+a fake one that misbehaves on purpose (`tests/common/mod.rs`, which M2-M4 reuse
+-- M4 taught it to remember repeated parameters, since a map keeps one `songId`
+out of three).
 
 **Phase 2 M2 is done and user-confirmed on both shells** (2026-08-17), and is the phase's point: a track on the
 server plays through the same engine as a file on disk. `player-core::remote` is
@@ -163,6 +165,31 @@ both**, the web one including the check only a browser can make (cover art from
 another origin decoding under this app's COEP header). M4 (server playlists,
 scrobbling, stars) is next, and is the first milestone here that writes to the
 server.
+
+**Phase 2 M4 is built and awaiting its live run on both shells** (2026-08-18):
+server playlists, scrobbling, stars and ratings -- the first milestone in this
+phase that *writes* to the server, which is why it is checked on what arrived
+rather than on what came back. `subsonic/playlists.rs` owns the five playlist
+calls and their repeated parameters (`songId`, `songIdToAdd`,
+`songIndexToRemove` -- a map-shaped client sends one of three and the server says
+ok), `subsonic/stars.rs` owns the fact that `star` spells its id three ways
+(`id`/`albumId`/`artistId`, and the wrong one stars nothing *successfully*), and
+`subsonic/scrobble.rs` owns the **rule**: half the track or four minutes,
+whichever comes first, never under thirty seconds, measured in time actually
+played rather than the position reached -- so seeking to the end earns nothing.
+That rule is a state machine both shells drive with the position they already
+poll (natively in the Tauri state, on the web as a wasm object holding the very
+same Rust), because four numbers written twice is two shells that eventually
+disagree about what a listener heard. The library panel grew a Playlists tab and
+every server row grew a star and a rating, drawn optimistically and put back if
+the server refuses.
+Verified: **10/10** `cargo test -p player-core --test subsonic_write`, 28 new
+unit tests (157 in `player-core`, up from 129), and **6/6 in a real browser**
+at `/write.html` -- the browser's tracker agreeing with the native one action
+for action. Still to run live: `cargo run -p player-core --example write_smoke`
+and `/write.html`'s server half against the real Navidrome. Both put the library
+back the way they found it, except a *play*, which is opt-in on both shells
+because it writes to a listening history nothing here can edit.
 
 **Phase 2 is planned** (2026-08-17) -- see `tasks/phase-2.md` for
 the milestone plan (M1 connection, M2 remote playback, M3 browsing, M4

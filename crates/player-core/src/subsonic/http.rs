@@ -16,6 +16,9 @@ use std::time::Duration;
 use serde::de::DeserializeOwned;
 
 use super::browse::{cover_art_params, parse_browse, BrowseRequest, BrowseResult, TrackRow};
+use super::playlists::{parse_playlists, PlaylistRequest, PlaylistResult};
+use super::scrobble::scrobble_params;
+use super::stars::{parse_mark, MarkRequest};
 use super::{
     request_url, salt_hex, stream_params, Credentials, Extensions, NoPayload, Parsed, RandomSongs,
     Server, ServerInfo, SubsonicError,
@@ -171,19 +174,63 @@ impl HttpClient {
     /// knows nothing about any of the five and cannot disagree with the web
     /// shell, which calls the same two functions through wasm.
     pub fn browse(&self, request: &BrowseRequest) -> Result<BrowseResult, SubsonicError> {
-        let owned = request.params();
+        let url = self.url_for(request.endpoint(), &request.params())?;
+        Ok(parse_browse(request, &self.fetch(&url)?)?.payload)
+    }
+
+    /// One playlist request (Phase 2 M4): the two reads and the four writes.
+    ///
+    /// One method for all six, like [`Self::browse`] -- which endpoint it is,
+    /// what it carries and where the answer hides its list are
+    /// `player_core::subsonic::playlists`' business on both shells.
+    pub fn playlists(&self, request: &PlaylistRequest) -> Result<PlaylistResult, SubsonicError> {
+        let bytes = self.fetch(&self.url_for(request.endpoint(), &request.params())?)?;
+        Ok(parse_playlists(request, &bytes)?.payload)
+    }
+
+    /// One star, unstar or rating (Phase 2 M4).
+    ///
+    /// Answers with nothing on success -- what is being checked is the
+    /// envelope, since a Subsonic refusal is an HTTP 200 and a write that
+    /// quietly did nothing is this milestone's worst available failure.
+    pub fn mark(&self, request: &MarkRequest) -> Result<(), SubsonicError> {
+        let bytes = self.fetch(&self.url_for(request.endpoint(), &request.params())?)?;
+        parse_mark(&bytes)?;
+        Ok(())
+    }
+
+    /// One scrobble (Phase 2 M4): `submission=false` is "now playing",
+    /// `submission=true` is a play.
+    ///
+    /// *When* to call this is not decided here -- that is
+    /// `subsonic::scrobble::ScrobbleTracker`, which both shells drive so they
+    /// cannot disagree about what a play is (decision 10).
+    pub fn scrobble(
+        &self,
+        id: &str,
+        submission: bool,
+        time_ms: Option<u64>,
+    ) -> Result<(), SubsonicError> {
+        let params = scrobble_params(id, submission, time_ms);
+        let bytes = self.fetch(&self.url_for("scrobble", &params)?)?;
+        parse_mark(&bytes)?;
+        Ok(())
+    }
+
+    /// A URL for an endpoint whose parameters are owned strings, which is what
+    /// every request type in this protocol produces (they render numbers).
+    fn url_for(&self, endpoint: &str, owned: &[(String, String)]) -> Result<String, SubsonicError> {
         let params: Vec<(&str, &str)> = owned
             .iter()
             .map(|(k, v)| (k.as_str(), v.as_str()))
             .collect();
-        let url = request_url(
+        request_url(
             &self.server,
             &self.credentials,
-            request.endpoint(),
+            endpoint,
             &params,
             &fresh_salt()?,
-        )?;
-        Ok(parse_browse(request, &self.fetch(&url)?)?.payload)
+        )
     }
 
     /// One piece of cover art, scaled by the server.
@@ -194,18 +241,7 @@ impl HttpClient {
     /// art sends a document rather than a picture, which this turns into an
     /// error instead of handing the webview bytes it will not draw.
     pub fn cover_art(&self, id: &str, size: u32) -> Result<CoverArt, SubsonicError> {
-        let owned = cover_art_params(id, size);
-        let params: Vec<(&str, &str)> = owned
-            .iter()
-            .map(|(k, v)| (k.as_str(), v.as_str()))
-            .collect();
-        let url = request_url(
-            &self.server,
-            &self.credentials,
-            "getCoverArt",
-            &params,
-            &fresh_salt()?,
-        )?;
+        let url = self.url_for("getCoverArt", &cover_art_params(id, size))?;
 
         let mut response = self.agent.get(&url).call().map_err(|e| match e {
             ureq::Error::StatusCode(status) => SubsonicError::Http { status },

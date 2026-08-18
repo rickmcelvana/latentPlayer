@@ -42,10 +42,22 @@ pub mod http;
 /// payload shapes their answers arrive in. Cross-target, like this module.
 pub mod browse;
 
+/// The server's playlists (Phase 2 M4), reading and writing.
+pub mod playlists;
+
+/// Scrobbling (Phase 2 M4), including the rule for when a play counts.
+pub mod scrobble;
+
+/// Stars and ratings (Phase 2 M4).
+pub mod stars;
+
 pub use browse::{
     cover_art_params, parse_browse, AlbumRow, AlbumSort, ArtistRow, BrowseRequest, BrowseResult,
     TrackRow, COVER_SIZE_PX,
 };
+pub use playlists::{parse_playlists, PlaylistRequest, PlaylistResult, PlaylistRow};
+pub use scrobble::{scrobble_params, ScrobbleAction, ScrobbleRequest, ScrobbleTracker};
+pub use stars::{parse_mark, MarkRequest, StarTarget};
 
 use serde::de::DeserializeOwned;
 use serde::Deserialize;
@@ -323,6 +335,15 @@ pub struct Song {
     /// Track number within its album, for ordering an album view.
     #[serde(default)]
     pub track: Option<u32>,
+    /// When the listener starred this, if they did (M4). A *date*, not a
+    /// boolean -- absent when it is not starred. `stars::is_starred` is the one
+    /// place that becomes the boolean a row draws.
+    #[serde(default)]
+    pub starred: Option<String>,
+    /// The listener's own rating, 1-5, if they set one (M4). Not
+    /// `averageRating`, which is everyone's.
+    #[serde(rename = "userRating", default)]
+    pub user_rating: Option<u32>,
 }
 
 /// `getRandomSongs`.

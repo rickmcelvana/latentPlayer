@@ -12,16 +12,23 @@
 // the album follows gaplessly.
 import { useCallback, useEffect, useState } from "react";
 import { formatDuration } from "./format";
-import { Row } from "./Rows";
+import { Row, type RowMarks } from "./Rows";
 import {
   emptyBrowseResult,
+  emptyPlaylistResult,
   serverBrowse,
+  serverMark,
+  serverPlaylists,
   type AlbumRow,
   type AlbumSort,
   type ArtistRow,
   type BrowseRequest,
   type BrowseResult,
+  type MarkRequest,
+  type PlaylistRequest,
+  type PlaylistResult,
   type ServerTrack,
+  type StarTarget,
 } from "./server";
 import { trackFromServer, type PlaylistTrack } from "./playlist";
 
@@ -32,6 +39,10 @@ interface Props {
   onPlay: (tracks: PlaylistTrack[], index: number) => void;
   /// Appends to the queue without disturbing what is playing.
   onQueue: (tracks: PlaylistTrack[]) => void;
+  /// The current queue, so a server playlist can be made out of it (M4). Only
+  /// its server tracks can go: a playlist on the server is a list of the
+  /// server's own ids, and a file on this machine has none.
+  queue: PlaylistTrack[];
 }
 
 /// Where the browser is. `search` is not one of these: a query overrides
@@ -40,7 +51,16 @@ type Place =
   | { kind: "albums" }
   | { kind: "artists" }
   | { kind: "artist"; id: string; name: string }
-  | { kind: "album"; id: string; name: string };
+  | { kind: "album"; id: string; name: string }
+  | { kind: "playlists" }
+  | { kind: "playlist"; id: string; name: string };
+
+/// Whether a place is one of the playlist views, which are asked for through
+/// `serverPlaylists` rather than `serverBrowse` -- a different endpoint family
+/// with a different answer, so a different effect below.
+function isPlaylistPlace(place: Place): boolean {
+  return place.kind === "playlists" || place.kind === "playlist";
+}
 
 /// Albums per page. The spec allows up to 500 and the server is being asked
 /// live, so this trades a slightly longer wait for far fewer round trips than a
@@ -54,7 +74,7 @@ const PAGE = 60;
 /// one search rather than five.
 const SEARCH_DEBOUNCE_MS = 300;
 
-export function ServerBrowser({ onPlay, onQueue }: Props) {
+export function ServerBrowser({ onPlay, onQueue, queue }: Props) {
   const [place, setPlace] = useState<Place>({ kind: "albums" });
   const [sort, setSort] = useState<AlbumSort>("alphabeticalByName");
   const [query, setQuery] = useState("");
@@ -67,6 +87,15 @@ export function ServerBrowser({ onPlay, onQueue }: Props) {
   const [more, setMore] = useState(false);
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState<string | null>(null);
+  /// The playlist views' own result (M4), kept apart from `result` because they
+  /// come from a different family of endpoints and answer with a different
+  /// shape.
+  const [playlists, setPlaylists] = useState<PlaylistResult>(emptyPlaylistResult());
+  const [newName, setNewName] = useState("");
+  /// Bumped to ask the playlist views for their contents again, after a write
+  /// that changed them.
+  const [reload, setReload] = useState(0);
+  const [note, setNote] = useState<string | null>(null);
 
   useEffect(() => {
     const id = setTimeout(() => setAsked(query.trim()), SEARCH_DEBOUNCE_MS);
@@ -75,21 +104,31 @@ export function ServerBrowser({ onPlay, onQueue }: Props) {
 
   /// What to ask for, given where we are. A search wins over the place, which
   /// is why the two are separate pieces of state rather than one.
+  ///
+  /// The two playlist places have no browse request of their own -- they are a
+  /// different family of endpoints -- so they name the album list here and the
+  /// effect below declines to send it. That keeps this a total function over
+  /// `Place` rather than one with a hole in it.
   const request: BrowseRequest = asked
     ? { kind: "search", query: asked }
-    : place.kind === "albums"
-      ? { kind: "albums", sort, size: PAGE, offset }
-      : place.kind === "artists"
-        ? { kind: "artists" }
-        : place.kind === "artist"
-          ? { kind: "artist", id: place.id }
-          : { kind: "album", id: place.id };
+    : place.kind === "artists"
+      ? { kind: "artists" }
+      : place.kind === "artist"
+        ? { kind: "artist", id: place.id }
+        : place.kind === "album"
+          ? { kind: "album", id: place.id }
+          : { kind: "albums", sort, size: PAGE, offset };
 
   // Serialised rather than passed as an object: this is an effect dependency,
   // and a fresh object every render would ask the server on every render.
   const requestKey = JSON.stringify(request);
+  const playlistPlace = isPlaylistPlace(place) && !asked;
 
   useEffect(() => {
+    // The playlist views ask a different family of endpoints; their effect is
+    // below. Without this the browser would issue a browse for a place that has
+    // no browse request to make.
+    if (playlistPlace) return;
     let live = true;
     setBusy(true);
     setError(null);
@@ -120,7 +159,32 @@ export function ServerBrowser({ onPlay, onQueue }: Props) {
     // of `requestKey` for the album list, and reading it here only decides
     // whether to append.
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [requestKey]);
+  }, [requestKey, playlistPlace]);
+
+  // The playlists, and one playlist's tracks (M4). Re-run by `reload` after any
+  // write, because a playlist that was just renamed or added to is exactly the
+  // thing on screen.
+  useEffect(() => {
+    if (!playlistPlace) return;
+    let live = true;
+    setBusy(true);
+    setError(null);
+    const request: PlaylistRequest =
+      place.kind === "playlist" ? { kind: "get", id: place.id } : { kind: "list" };
+    serverPlaylists(request)
+      .then((next) => {
+        if (live) setPlaylists(next);
+      })
+      .catch((e) => {
+        if (live) setError(String(e));
+      })
+      .finally(() => {
+        if (live) setBusy(false);
+      });
+    return () => {
+      live = false;
+    };
+  }, [playlistPlace, place, reload]);
 
   /// Moves to a place, from the top. Every navigation clears the search box,
   /// since a search result is what you clicked *out of*.
@@ -130,7 +194,98 @@ export function ServerBrowser({ onPlay, onQueue }: Props) {
     setAsked("");
     setOffset(0);
     setResult(emptyBrowseResult());
+    setPlaylists(emptyPlaylistResult());
+    setNote(null);
   }, []);
+
+  /// Stars, unstars or rates something, moving the rows first.
+  ///
+  /// Optimistic on purpose: a star that waits for a round trip before drawing
+  /// feels broken on a server across a network. `revert` puts it back if the
+  /// server refuses, so a failure is never left looking like a success -- which
+  /// matters more here than anywhere else in the app, since this is the one
+  /// place the app writes to someone else's library.
+  const send = useCallback(async (request: MarkRequest, apply: () => void, revert: () => void) => {
+    apply();
+    setError(null);
+    try {
+      await serverMark(request);
+    } catch (e) {
+      revert();
+      setError(String(e));
+    }
+  }, []);
+
+  /// The star and rating for one track row, wherever it is being listed.
+  function trackMarks(track: ServerTrack, update: (next: ServerTrack) => void): RowMarks {
+    const put = (changed: Partial<ServerTrack>) => update({ ...track, ...changed });
+    return {
+      starred: track.starred,
+      onStar: (starred) =>
+        void send(
+          { kind: starred ? "star" : "unstar", target: "song", id: track.id },
+          () => put({ starred }),
+          () => put({ starred: !starred }),
+        ),
+      rating: track.rating,
+      onRate: (rating) =>
+        void send(
+          { kind: "setRating", id: track.id, rating },
+          () => put({ rating: rating === 0 ? null : rating }),
+          () => put({ rating: track.rating }),
+        ),
+    };
+  }
+
+  /// The same, for a row that is not a track. `target` is what keeps the id in
+  /// the right parameter -- see `player_core::subsonic::stars`.
+  function starMarks(
+    target: StarTarget,
+    id: string,
+    starred: boolean,
+    update: (starred: boolean) => void,
+  ): RowMarks {
+    return {
+      starred,
+      onStar: (next) =>
+        void send(
+          { kind: next ? "star" : "unstar", target, id },
+          () => update(next),
+          () => update(!next),
+        ),
+    };
+  }
+
+  /// Replaces one track in whichever list is holding it, so a star drawn
+  /// optimistically survives until the next request.
+  function replaceTrack(where: "browse" | "playlist", next: ServerTrack) {
+    const swap = (tracks: ServerTrack[]) =>
+      tracks.map((track) => (track.id === next.id ? next : track));
+    if (where === "browse") setResult((previous) => ({ ...previous, tracks: swap(previous.tracks) }));
+    else setPlaylists((previous) => ({ ...previous, tracks: swap(previous.tracks) }));
+  }
+
+  /// The queue's server tracks, which are the only ones a server playlist can
+  /// hold.
+  const queueServerIds = queue.map((track) => track.server?.id).filter((id): id is string => !!id);
+
+  /// One playlist write, followed by asking for the result again rather than
+  /// guessing at it: the server owns the order and the count, and a playlist
+  /// this app has just changed is exactly the one worth being right about.
+  async function writePlaylist(request: PlaylistRequest, said: string) {
+    setError(null);
+    setNote(null);
+    setBusy(true);
+    try {
+      await serverPlaylists(request);
+      setNote(said);
+      setReload((n) => n + 1);
+    } catch (e) {
+      setError(String(e));
+    } finally {
+      setBusy(false);
+    }
+  }
 
   function playTracks(tracks: ServerTrack[], index: number) {
     if (tracks.length === 0) return;
@@ -180,6 +335,13 @@ export function ServerBrowser({ onPlay, onQueue }: Props) {
             onClick={() => go({ kind: "artists" })}
           >
             Artists
+          </button>
+          <button
+            type="button"
+            className={isPlaylistPlace(place) && !searching ? "tab current" : "tab"}
+            onClick={() => go({ kind: "playlists" })}
+          >
+            Playlists
           </button>
           {place.kind === "albums" && !searching && (
             <select
@@ -243,8 +405,154 @@ export function ServerBrowser({ onPlay, onQueue }: Props) {
         </p>
       )}
 
+      {place.kind === "playlist" && !searching && (
+        <p className="browser-crumb">
+          <button type="button" className="link" onClick={() => go({ kind: "playlists" })}>
+            &larr; Back
+          </button>
+          <span className="crumb-name">{place.name}</span>
+          {playlists.playlists[0] && (
+            <span className="crumb-meta">
+              {`${playlists.playlists[0].songCount} tracks`}
+              {playlists.playlists[0].owner ? ` — ${playlists.playlists[0].owner}` : ""}
+              {` — ${formatDuration(playlists.playlists[0].durationSeconds)}`}
+            </span>
+          )}
+          <button
+            type="button"
+            className="link"
+            onClick={() => playTracks(playlists.tracks, 0)}
+            disabled={playlists.tracks.length === 0}
+          >
+            Play
+          </button>
+          <button
+            type="button"
+            className="link"
+            disabled={busy || queueServerIds.length === 0}
+            onClick={() =>
+              void writePlaylist(
+                { kind: "addSongs", id: place.id, songIds: queueServerIds },
+                `Added ${queueServerIds.length} from the queue`,
+              )
+            }
+          >
+            Add queue
+          </button>
+          <button
+            type="button"
+            className="link"
+            disabled={busy}
+            onClick={() => {
+              const name = newName.trim();
+              if (!name) {
+                setError("Type a new name first");
+                return;
+              }
+              setNewName("");
+              setPlace({ ...place, name });
+              void writePlaylist({ kind: "rename", id: place.id, name }, `Renamed to "${name}"`);
+            }}
+          >
+            Rename to
+          </button>
+          <input
+            className="library-search"
+            type="text"
+            placeholder="new name…"
+            value={newName}
+            onChange={(e) => setNewName(e.target.value)}
+            aria-label="New name for this playlist"
+          />
+        </p>
+      )}
+
+      {place.kind === "playlists" && !searching && (
+        <p className="browser-crumb">
+          <span className="crumb-meta">
+            {queueServerIds.length > 0
+              ? `${queueServerIds.length} server tracks in the queue`
+              : "Queue up some server tracks to save them here"}
+          </span>
+          <input
+            className="library-search"
+            type="text"
+            placeholder="New playlist name…"
+            value={newName}
+            onChange={(e) => setNewName(e.target.value)}
+            aria-label="Name for a new server playlist"
+          />
+          <button
+            type="button"
+            className="link"
+            disabled={busy || queueServerIds.length === 0 || newName.trim().length === 0}
+            onClick={() => {
+              const name = newName.trim();
+              setNewName("");
+              void writePlaylist(
+                { kind: "create", name, songIds: queueServerIds },
+                `Saved "${name}" to the server`,
+              );
+            }}
+          >
+            Save queue
+          </button>
+        </p>
+      )}
+
       {busy && <p className="library-status">Asking the server…</p>}
+      {note && <p className="library-status">{note}</p>}
       {error && <p className="error">{error}</p>}
+
+      {place.kind === "playlists" && !searching && playlists.playlists.length > 0 && (
+        <ol className="library-rows">
+          {playlists.playlists.map((playlist) => (
+            <Row
+              key={playlist.id}
+              coverSource="server"
+              coverId={playlist.coverArt}
+              name={playlist.name}
+              meta={[playlist.owner, playlist.comment].filter(Boolean).join(" — ")}
+              count={`${playlist.songCount} tracks`}
+              onOpen={() => go({ kind: "playlist", id: playlist.id, name: playlist.name })}
+              onRemove={() =>
+                void writePlaylist(
+                  { kind: "delete", id: playlist.id },
+                  `Deleted "${playlist.name}"`,
+                )
+              }
+            />
+          ))}
+        </ol>
+      )}
+
+      {place.kind === "playlist" && !searching && (
+        <ol className="library-rows">
+          {playlists.tracks.map((track, index) => (
+            <Row
+              key={`${track.id}-${index}`}
+              coverSource="server"
+              coverId={track.coverArt}
+              name={track.title}
+              meta={[track.artist, track.album].filter(Boolean).join(" — ")}
+              durationSeconds={track.durationSeconds}
+              onOpen={() => playTracks(playlists.tracks, index)}
+              onQueue={() => onQueue([trackFromServer(track)])}
+              marks={trackMarks(track, (next) => replaceTrack("playlist", next))}
+              onRemove={() =>
+                void writePlaylist(
+                  // By position, which is what the endpoint takes -- and why a
+                  // removal asks for the playlist again rather than splicing
+                  // its own copy: every later index means a different track
+                  // once the server has done it.
+                  { kind: "removeIndices", id: place.id, indices: [index] },
+                  `Removed "${track.title}"`,
+                )
+              }
+            />
+          ))}
+        </ol>
+      )}
 
       {result.artists.length > 0 && (
         <>
@@ -258,6 +566,14 @@ export function ServerBrowser({ onPlay, onQueue }: Props) {
                 name={artist.name}
                 count={artist.albumCount > 0 ? `${artist.albumCount} albums` : ""}
                 onOpen={() => go({ kind: "artist", id: artist.id, name: artist.name })}
+                marks={starMarks("artist", artist.id, artist.starred, (starred) =>
+                  setResult((previous) => ({
+                    ...previous,
+                    artists: previous.artists.map((row) =>
+                      row.id === artist.id ? { ...row, starred } : row,
+                    ),
+                  })),
+                )}
               />
             ))}
           </ol>
@@ -280,6 +596,14 @@ export function ServerBrowser({ onPlay, onQueue }: Props) {
                 count={`${album.songCount} tracks`}
                 onOpen={() => go({ kind: "album", id: album.id, name: album.name })}
                 onQueue={() => void playAlbum(album, true)}
+                marks={starMarks("album", album.id, album.starred, (starred) =>
+                  setResult((previous) => ({
+                    ...previous,
+                    albums: previous.albums.map((row) =>
+                      row.id === album.id ? { ...row, starred } : row,
+                    ),
+                  })),
+                )}
               />
             ))}
           </ol>
@@ -310,6 +634,7 @@ export function ServerBrowser({ onPlay, onQueue }: Props) {
                 durationSeconds={track.durationSeconds}
                 onOpen={() => playTracks(result.tracks, index)}
                 onQueue={() => onQueue([trackFromServer(track)])}
+                marks={trackMarks(track, (next) => replaceTrack("browse", next))}
               />
             ))}
           </ol>
@@ -320,9 +645,17 @@ export function ServerBrowser({ onPlay, onQueue }: Props) {
         !error &&
         result.artists.length === 0 &&
         result.albums.length === 0 &&
-        result.tracks.length === 0 && (
+        result.tracks.length === 0 &&
+        playlists.playlists.length === 0 &&
+        playlists.tracks.length === 0 && (
           <p className="hint">
-            {searching ? `Nothing on the server matches "${asked}".` : "The server returned nothing."}
+            {searching
+              ? `Nothing on the server matches "${asked}".`
+              : place.kind === "playlists"
+                ? "No playlists on the server yet."
+                : place.kind === "playlist"
+                  ? "This playlist is empty."
+                  : "The server returned nothing."}
           </p>
         )}
     </div>

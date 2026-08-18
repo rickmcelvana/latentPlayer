@@ -701,6 +701,236 @@ fn browse_request(request_json: &str) -> Result<player_core::subsonic::BrowseReq
         .map_err(|e| JsValue::from_str(&format!("bad browse request: {e}")))
 }
 
+/// Builds the URL for one playlist request (Phase 2 M4).
+///
+/// `request_json` is a `PlaylistRequest`, so which of the five endpoints it is
+/// and what it carries are decided by the same Rust the desktop shell calls --
+/// including the repeated `songId`/`songIdToAdd` parameters, which a browser
+/// building this URL itself would have to know are repeated rather than a list.
+#[wasm_bindgen(js_name = subsonicPlaylistUrl)]
+pub fn subsonic_playlist_url(
+    base_url: &str,
+    user: &str,
+    secret: &str,
+    is_api_key: bool,
+    salt: &str,
+    request_json: &str,
+) -> Result<String, JsValue> {
+    let request = playlist_request(request_json)?;
+    subsonic_url_with(
+        base_url,
+        user,
+        secret,
+        is_api_key,
+        salt,
+        request.endpoint(),
+        &request.params(),
+    )
+}
+
+/// Reads the answer to one playlist request.
+///
+/// Including the writes, whose bodies are not thrown away: a Subsonic failure is
+/// an HTTP 200, so this is the only place "the playlist actually saved" can be
+/// established.
+#[wasm_bindgen(js_name = subsonicPlaylistResult)]
+pub fn subsonic_playlist_result(request_json: &str, bytes: &[u8]) -> String {
+    let request = match playlist_request(request_json) {
+        Ok(request) => request,
+        Err(_) => return unreadable_request_json("the playlist request could not be read"),
+    };
+    match player_core::subsonic::parse_playlists(&request, bytes) {
+        Ok(parsed) => {
+            let mut value = serde_json::to_value(&parsed.payload)
+                .unwrap_or_else(|_| serde_json::json!({"playlists":[],"tracks":[]}));
+            if let Some(object) = value.as_object_mut() {
+                object.insert("ok".into(), serde_json::Value::Bool(true));
+            }
+            value.to_string()
+        }
+        Err(error) => subsonic_failure_json(&error).to_string(),
+    }
+}
+
+/// Builds the URL for one star, unstar or rating (Phase 2 M4).
+///
+/// The reason this is not "an endpoint and an id" from TypeScript: `star` spells
+/// its id three different ways depending on what is being starred, and the wrong
+/// one succeeds while doing nothing (see `player_core::subsonic::stars`).
+#[wasm_bindgen(js_name = subsonicMarkUrl)]
+pub fn subsonic_mark_url(
+    base_url: &str,
+    user: &str,
+    secret: &str,
+    is_api_key: bool,
+    salt: &str,
+    request_json: &str,
+) -> Result<String, JsValue> {
+    let request: player_core::subsonic::MarkRequest = serde_json::from_str(request_json)
+        .map_err(|e| JsValue::from_str(&format!("bad mark request: {e}")))?;
+    subsonic_url_with(
+        base_url,
+        user,
+        secret,
+        is_api_key,
+        salt,
+        request.endpoint(),
+        &request.params(),
+    )
+}
+
+/// Builds the URL for one scrobble (Phase 2 M4).
+///
+/// `request_json` is a `ScrobbleRequest` -- `{"id":..,"submission":..,"timeMs":..}`
+/// -- for the same reason the three above take one: the browser chooses what to
+/// say, never how to say it.
+#[wasm_bindgen(js_name = subsonicScrobbleUrl)]
+pub fn subsonic_scrobble_url(
+    base_url: &str,
+    user: &str,
+    secret: &str,
+    is_api_key: bool,
+    salt: &str,
+    request_json: &str,
+) -> Result<String, JsValue> {
+    let request: player_core::subsonic::ScrobbleRequest = serde_json::from_str(request_json)
+        .map_err(|e| JsValue::from_str(&format!("bad scrobble request: {e}")))?;
+    subsonic_url_with(
+        base_url,
+        user,
+        secret,
+        is_api_key,
+        salt,
+        request.endpoint(),
+        &request.params(),
+    )
+}
+
+/// Reads the answer to a write that carries no payload -- a mark, or a scrobble.
+///
+/// `{"ok":true}` or the same failure shape every other entry point here returns.
+#[wasm_bindgen(js_name = subsonicWriteResult)]
+pub fn subsonic_write_result(bytes: &[u8]) -> String {
+    match player_core::subsonic::parse_mark(bytes) {
+        Ok(_) => serde_json::json!({ "ok": true }).to_string(),
+        Err(error) => subsonic_failure_json(&error).to_string(),
+    }
+}
+
+/// When a play counts, on the web shell (Phase 2 M4).
+///
+/// Stateful, like `WasmAnalyzer` and for the same reason: the rule is about what
+/// happened between polls, not about one poll. It is
+/// `player_core::subsonic::ScrobbleTracker` itself rather than a
+/// reimplementation -- decision 10, so the two shells cannot come to disagree
+/// about what a listener has heard.
+#[wasm_bindgen]
+pub struct WasmScrobbler {
+    inner: player_core::subsonic::ScrobbleTracker,
+}
+
+impl Default for WasmScrobbler {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
+#[wasm_bindgen]
+impl WasmScrobbler {
+    #[wasm_bindgen(constructor)]
+    pub fn new() -> WasmScrobbler {
+        WasmScrobbler {
+            inner: player_core::subsonic::ScrobbleTracker::new(),
+        }
+    }
+
+    /// One observation of where playback is; answers with what to send, as
+    /// `["nowPlaying:<id>", "submit:<id>:<timeMs>"]`.
+    ///
+    /// A string list rather than a structure because it crosses the wasm
+    /// boundary on every poll and the caller's whole job is to turn each entry
+    /// into one request.
+    pub fn observe(
+        &mut self,
+        track_id: Option<String>,
+        position_seconds: f64,
+        duration_seconds: f64,
+        playing: bool,
+        now_ms: f64,
+    ) -> Vec<String> {
+        use player_core::subsonic::ScrobbleAction;
+        self.inner
+            .observe(
+                track_id.as_deref(),
+                position_seconds,
+                duration_seconds,
+                playing,
+                now_ms.max(0.0) as u64,
+            )
+            .into_iter()
+            .map(|action| match action {
+                ScrobbleAction::NowPlaying { id } => format!("nowPlaying:{id}"),
+                ScrobbleAction::Submit { id, time_ms } => format!("submit:{id}:{time_ms}"),
+            })
+            .collect()
+    }
+
+    pub fn reset(&mut self) {
+        self.inner.reset();
+    }
+
+    /// Seconds of continuous playback accumulated for what is playing, so the
+    /// web smoke can watch the rule work rather than only its outcome.
+    #[wasm_bindgen(js_name = heardSeconds)]
+    pub fn heard_seconds(&self) -> f64 {
+        self.inner.heard_seconds()
+    }
+}
+
+fn playlist_request(request_json: &str) -> Result<player_core::subsonic::PlaylistRequest, JsValue> {
+    serde_json::from_str(request_json)
+        .map_err(|e| JsValue::from_str(&format!("bad playlist request: {e}")))
+}
+
+/// A request URL from parameters that are already owned strings, which is what
+/// every request type in this protocol produces.
+fn subsonic_url_with(
+    base_url: &str,
+    user: &str,
+    secret: &str,
+    is_api_key: bool,
+    salt: &str,
+    endpoint: &str,
+    owned: &[(String, String)],
+) -> Result<String, JsValue> {
+    let params: Vec<(&str, &str)> = owned
+        .iter()
+        .map(|(k, v)| (k.as_str(), v.as_str()))
+        .collect();
+    player_core::subsonic::request_url(
+        &subsonic_server(base_url)?,
+        &subsonic_credentials(user, secret, is_api_key),
+        endpoint,
+        &params,
+        salt,
+    )
+    .map_err(|e| JsValue::from_str(&e.to_string()))
+}
+
+/// The failure shape for a request this side could not even read.
+fn unreadable_request_json(message: &str) -> String {
+    serde_json::json!({
+        "ok": false,
+        "error": {
+            "kind": "malformed",
+            "code": serde_json::Value::Null,
+            "message": message,
+            "credentials": false,
+        },
+    })
+    .to_string()
+}
+
 fn subsonic_server(base_url: &str) -> Result<player_core::subsonic::Server, JsValue> {
     player_core::subsonic::Server::new(base_url).map_err(|e| JsValue::from_str(&e.to_string()))
 }
@@ -766,21 +996,12 @@ pub fn subsonic_parse(bytes: &[u8]) -> String {
 pub fn subsonic_random_songs(bytes: &[u8]) -> String {
     match player_core::subsonic::parse::<player_core::subsonic::RandomSongs>(bytes) {
         Ok(parsed) => {
-            let songs: Vec<serde_json::Value> = parsed
+            let songs: Vec<player_core::subsonic::TrackRow> = parsed
                 .payload
                 .inner
                 .song
                 .into_iter()
-                .map(|song| {
-                    serde_json::json!({
-                        "id": song.id,
-                        "title": song.title,
-                        "artist": song.artist,
-                        "album": song.album,
-                        "suffix": song.suffix,
-                        "durationSeconds": song.duration.unwrap_or(0),
-                    })
-                })
+                .map(player_core::subsonic::TrackRow::from)
                 .collect();
             serde_json::json!({ "ok": true, "songs": songs }).to_string()
         }

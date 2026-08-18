@@ -17,12 +17,25 @@ import init, {
   subsonicBrowseResult,
   subsonicBrowseUrl,
   subsonicCoverUrl,
+  subsonicMarkUrl,
   subsonicParse,
+  subsonicPlaylistResult,
+  subsonicPlaylistUrl,
   subsonicRandomSongs,
   subsonicRequestUrl,
+  subsonicScrobbleUrl,
   subsonicStreamUrl,
+  subsonicWriteResult,
+  WasmScrobbler,
 } from "./wasm/player_rt_wasm.js";
-import type { BrowseRequest, BrowseResult, ServerTrack } from "./serverTypes";
+import type {
+  BrowseRequest,
+  BrowseResult,
+  MarkRequest,
+  PlaylistRequest,
+  PlaylistResult,
+  ServerTrack,
+} from "./serverTypes";
 import {
   CURRENT_SERVER,
   deleteServer,
@@ -86,6 +99,14 @@ type Parsed =
       payload: Record<string, unknown>;
     }
   | { ok: false; error: ParsedError };
+
+type ParsedFailure = { ok: false; error: ParsedError };
+
+/// What `subsonicPlaylistResult` hands back -- rows, or the same failure shape
+/// every other entry point in the wasm binding returns.
+type ParsedPlaylists =
+  | { ok: true; playlists: PlaylistResult["playlists"]; tracks: ServerTrack[] }
+  | ParsedFailure;
 
 /// Thrown by `call` so the caller can tell a credentials problem from an
 /// unreachable server without parsing message text.
@@ -482,6 +503,133 @@ function audioFailure(bytes: Uint8Array): SubsonicFailure | null {
   return parsed.ok ? null : new SubsonicFailure(parsed.error);
 }
 
+/// One playlist request (Phase 2 M4): the two reads and the four writes.
+///
+/// Built exactly like `browse` above, and the resemblance is the point --
+/// the request goes to Rust as JSON and comes back as a URL, the bytes go to
+/// Rust and come back as rows. What is new is that four of these six change
+/// something on the server, so the *response* to a write is parsed rather than
+/// discarded: a Subsonic failure is an HTTP 200, and this is the only place a
+/// playlist that did not save can be told from one that did.
+export async function playlists(request: PlaylistRequest): Promise<PlaylistResult> {
+  const server = await requireServer();
+  await ready();
+  const requestJson = JSON.stringify(request);
+  const url = subsonicPlaylistUrl(
+    server.baseUrl,
+    server.user,
+    server.secret,
+    server.auth === "apiKey",
+    freshSalt(),
+    requestJson,
+  );
+  const response = await get(server, url);
+  const bytes = new Uint8Array(await response.arrayBuffer());
+  const parsed = JSON.parse(subsonicPlaylistResult(requestJson, bytes)) as ParsedPlaylists;
+  if (!parsed.ok) throw new SubsonicFailure(parsed.error);
+  return { playlists: parsed.playlists, tracks: parsed.tracks };
+}
+
+/// One star, unstar or rating (Phase 2 M4).
+///
+/// Note what does not appear here: the parameter the id goes in. `star` spells
+/// it three ways depending on what is being starred and answers "ok" to the
+/// wrong one while doing nothing, so that choice is made in Rust from the
+/// request's own kind (decision 12).
+export async function mark(request: MarkRequest): Promise<void> {
+  const server = await requireServer();
+  await ready();
+  const url = subsonicMarkUrl(
+    server.baseUrl,
+    server.user,
+    server.secret,
+    server.auth === "apiKey",
+    freshSalt(),
+    JSON.stringify(request),
+  );
+  await write(server, url);
+}
+
+/// One scrobble (Phase 2 M4). `submission` false is "now playing", true is a
+/// play; `timeMs` is when the play started.
+export async function scrobble(
+  id: string,
+  submission: boolean,
+  timeMs: number | null,
+): Promise<void> {
+  const server = await requireServer();
+  await ready();
+  const url = subsonicScrobbleUrl(
+    server.baseUrl,
+    server.user,
+    server.secret,
+    server.auth === "apiKey",
+    freshSalt(),
+    JSON.stringify({ id, submission, timeMs }),
+  );
+  await write(server, url);
+}
+
+/// One request whose answer is nothing but success or a failure envelope.
+async function write(server: StoredServer, url: string): Promise<void> {
+  const response = await get(server, url);
+  const bytes = new Uint8Array(await response.arrayBuffer());
+  const parsed = JSON.parse(subsonicWriteResult(bytes)) as { ok: true } | ParsedFailure;
+  if (!parsed.ok) throw new SubsonicFailure(parsed.error);
+}
+
+/// The web shell's scrobble tracker.
+///
+/// One per session, holding `player_core::subsonic::ScrobbleTracker` itself --
+/// so when a play counts is decided by the same code the desktop shell runs
+/// (decision 10) rather than by a threshold retyped here.
+let scrobbler: WasmScrobbler | null = null;
+
+/// One observation of where playback is, and whatever it earned.
+///
+/// The web counterpart of `server_scrobble_tick`, down to what it returns: the
+/// labels of what was actually sent, which is what lets /write.html check the
+/// rule from outside Rust.
+export async function scrobbleTick(
+  trackId: string | null,
+  positionSeconds: number,
+  durationSeconds: number,
+  playing: boolean,
+): Promise<string[]> {
+  await ready();
+  scrobbler ??= new WasmScrobbler();
+  const actions = scrobbler.observe(
+    trackId ?? undefined,
+    positionSeconds,
+    durationSeconds,
+    playing,
+    Date.now(),
+  );
+  const sent: string[] = [];
+  for (const action of actions) {
+    // "nowPlaying:<id>" or "submit:<id>:<timeMs>" -- an id may contain a colon,
+    // so the shape is read from the front rather than by splitting.
+    if (action.startsWith("nowPlaying:")) {
+      const id = action.slice("nowPlaying:".length);
+      await scrobble(id, false, null);
+      sent.push(`nowPlaying:${id}`);
+    } else if (action.startsWith("submit:")) {
+      const rest = action.slice("submit:".length);
+      const cut = rest.lastIndexOf(":");
+      const id = rest.slice(0, cut);
+      const timeMs = Number(rest.slice(cut + 1));
+      await scrobble(id, true, timeMs);
+      sent.push(`submit:${id}`);
+    }
+  }
+  return sent;
+}
+
+/// Forgets what was playing, so the next observation starts a fresh play.
+export function resetScrobbler(): void {
+  scrobbler?.reset();
+}
+
 async function requireServer(): Promise<StoredServer> {
   const server = await storedServer();
   if (!server) throw new Error("no music server is configured");
@@ -490,4 +638,4 @@ async function requireServer(): Promise<StoredServer> {
 
 /// Exposed for the harnesses at /subsonic.html and /remote.html, which drive the
 /// same path the UI does against a server the developer names.
-export const testing = { call, callBytes, connectTo, freshSalt };
+export const testing = { call, callBytes, connectTo, freshSalt, scrobbler: () => scrobbler };

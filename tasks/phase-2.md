@@ -502,3 +502,157 @@ So the server's library is now something a person can look through rather than
 something a harness can enumerate, and what they find plays through the path M2
 proved. M4 -- server playlists, scrobbling, stars and ratings -- is next, and it
 is the first milestone in this phase that *writes* to the server.
+
+## M4 -- Playlists, scrobbling, stars and ratings: planned
+
+The first milestone in this phase that **writes** to the server, which changes
+what a mistake costs. M1-M3 could be wrong and show the wrong thing; a wrong
+`star` puts a mark on someone's library, and a wrong `scrobble` adds a play to
+their listening history -- somewhere they may well have years of it, and where
+this app has no delete button. So the parameters go on the wire exactly as the
+spec states them, checked against the spec rather than remembered, and the two
+places that is easy to get subtly wrong get their own decisions below.
+
+Endpoints, and where they were read from: `getPlaylists`/`getPlaylist`/
+`createPlaylist`/`updatePlaylist`/`deletePlaylist`, `scrobble`, `star`/`unstar`/
+`setRating` -- parameters from [the Subsonic API](https://www.subsonic.org/pages/api.jsp),
+payload shapes from [OpenSubsonic's response objects](https://opensubsonic.netlify.app/docs/responses/playlist/).
+
+### Decisions
+
+**9. A play counts once the listener has heard half of it, or four minutes of
+it, whichever comes first -- and only for tracks over 30 seconds.** This is
+Last.fm's own submission rule, and it is the right one to adopt rather than
+invent because of where a scrobble ends up: Navidrome relays what this app sends
+on to Last.fm and ListenBrainz, so a client with its own threshold would either
+double-count against services that already agreed on this one or drop plays
+those services would have kept. Two consequences worth stating:
+
+- **"Heard" is time played, not the position reached.** Seeking to the last
+  thirty seconds of a track is not listening to it, and a threshold measured off
+  `position` alone would count it as a play. The tracker accumulates position
+  deltas only while they look like continuous playback -- a delta between zero
+  and the wall-clock interval that produced it -- so a seek advances the
+  position and adds nothing to the total.
+- **A track whose duration the server does not state submits at four minutes.**
+  The rule needs a duration for its "half" half, and the phase already knows
+  duration can be missing (ARCHITECTURE.md's "Known gaps"). Four minutes is the
+  half of the rule that still applies, and erring towards not-yet is the right
+  direction when the alternative writes to someone's history.
+
+**10. The threshold is a state machine in `player-core`, not a constant in each
+shell.** `subsonic/scrobble.rs` holds it, both shells drive it with the position
+they are already polling, and it answers with what to send. The rule above is
+four numbers and a definition of "heard", and four numbers written twice is two
+shells that eventually disagree about what a play is -- the same reasoning M1
+used for the error envelope and M3 for the payload shapes. The clock is the
+shell's, passed in, exactly as randomness is (decision 3): this module still
+performs no IO and reads no time of its own.
+
+**11. "Now playing" is sent once, when a track starts.** `submission=false` is a
+notification, not a heartbeat; the server holds it for its own window and every
+extra send is a request to someone's Raspberry Pi that changes nothing. A track
+that starts, is paused for an hour and resumes will therefore not re-announce
+itself, which is a real limitation and a cheap one -- nothing in the app depends
+on it, and the play itself still submits on the rule above.
+
+**12. `star` names its id by *kind*, and getting that wrong stars nothing.**
+The endpoint takes three different parameters: `id` for a song (or a
+folder-based album/artist), `albumId` for an ID3-tagged album, and `artistId`
+for an ID3-tagged artist. Every browse request this app makes is the ID3-tagged
+kind -- `getArtists`, `getAlbumList2`, `getAlbum` -- so an album starred through
+`id` is being named the way the *folder* API names things, and a server that
+finds nothing under that id answers with a perfectly ordinary success. A write
+that silently does nothing is the worst failure available here, so the kind is
+part of the request type rather than something a caller passes, and the fake
+server is asked what actually arrived.
+
+**13. Star and rating come back with the browse rows.** `starred` and
+`userRating` are fields of the responses M3 already parses, so the rows carry
+them and a list draws its own marks with no second request. Note what `starred`
+is on the wire: a *date string*, present when starred and absent when not -- not
+a boolean -- so the row states the boolean and the parse is the one place that
+conversion happens.
+
+### Shape of the work
+
+- `subsonic/playlists.rs` -- the five playlist calls and their payload shapes
+  (`getPlaylists` nests under `playlists.playlist`, `getPlaylist` returns one
+  playlist with its tracks under `entry`, and `createPlaylist` doubles as an
+  update when given a `playlistId`).
+- `subsonic/stars.rs` -- `star`/`unstar`/`setRating`, with decision 12's kind in
+  the type.
+- `subsonic/scrobble.rs` -- the request, and decision 9-10's tracker.
+- `browse.rs` grows `starred`/`rating` on all three row types (decision 13).
+- Both shells: the transport (methods on `HttpClient`, Tauri commands; wasm
+  bindings and `fetch`), then `server.ts`, then the UI -- server playlists
+  beside the local ones, a star toggle on rows, and the tracker driven from the
+  transport poll the app already runs.
+
+### What this milestone will not do
+
+Local playlists are not pushed to the server and server playlists are not
+mirrored locally. They are two lists that both exist, the way local and server
+browsing are two sources (decision 6), and merging them is a design question
+about which one wins on a conflict -- worth answering deliberately, not as a
+corner of this milestone. Scrobbling direct to Last.fm/ListenBrainz is Phase 4's
+(PLAN.md §7); what M4 sends is the *server's* scrobble, which is what relays
+onward for anyone whose server is configured for it.
+
+### Verified
+
+Everything below is automated and green. The live half -- a real Navidrome
+answering these writes -- is what M4 still needs, and it has a smoke on each
+shell waiting for it.
+
+- **`cargo test -p player-core --test subsonic_write`: 10/10** against the fake
+  server, on what actually arrived rather than on what the client meant to send:
+  the playlists read back as rows over real TCP; one playlist's tracks come back
+  from under `entry` with the suffix playback needs and their marks; creating one
+  sends `songId` **three times** for three tracks; `updatePlaylist` names its id
+  `playlistId` and repeats `songIdToAdd`/`songIndexToRemove`; deleting takes a
+  plain `id`; a refusal inside an HTTP 200 is an error rather than an empty
+  result; each kind of star lands in *its own* parameter and no other
+  (`id`/`albumId`/`artistId`); a rating travels in range with 0 surviving as
+  itself and 99 clamped to 5; now-playing carries no `time` while a submission
+  carries the moment the play *started*; and a scrobble the server refuses is
+  still an error.
+- **The fake server learned to remember repeated parameters.** `Seen.params` is
+  every parameter in order, `Seen::values(key)` is all of one key's -- because
+  `Seen.query` is a map and a map keeps one `songId` out of three, which is
+  exactly the mistake this milestone had to prove it did not make.
+- **28 new unit tests** across `playlists.rs`, `stars.rs` and `scrobble.rs`:
+  the payload shapes (including `{"playlists":{}}` from a server with none, and
+  `entry` rather than `song`), the three star parameters, the rating clamp,
+  `starred` being a date and not a boolean, and the rule itself -- half the
+  track, four minutes, never under thirty seconds, an unknown duration waiting
+  for four minutes, a seek to the end earning nothing, an hour paused counting
+  as nothing, and one submission per play. `player-core` unit tests: **157**, up
+  from 129.
+- **`/write.html`, offline half: 6/6 in a real browser** (run 2026-08-18), which
+  is the check with no native counterpart: the *browser's* copy of
+  `ScrobbleTracker` -- the same Rust, through wasm -- announces once, submits at
+  30s of a 60-second track timed from 0, credits a seek to the end with nothing,
+  credits an hour paused with nothing, and never submits a 20-second track.
+  Native and web agree action for action.
+- The full suite stayed green: 157 `player-core` unit tests, 10 `subsonic_write`,
+  10 `remote_source`, 11 `subsonic_http`, 7 `subsonic_browse`, 4 in `src-tauri`,
+  16 in `player-render`, clippy and fmt clean, `tsc` and oxlint clean, and both
+  builds (`npm run build`, `npm run wasm`) clean.
+
+### What the live run has to cover
+
+`cargo run -p player-core --example write_smoke` and `/write.html` against the
+real Navidrome, on both shells. They make the same claims, and the claims are
+about what the server *did* rather than what it answered: a playlist created
+holding every track it was given (not one), added to, a track removed by
+position with the right one gone, renamed, and deleted again; a track starred
+and read back starred; **an album starred through `albumId` and read back
+starred**, which is decision 12 in front of a real server and the one check a
+fake one cannot make; a rating set and read back; and "now playing" accepted.
+
+Both put the library back the way they found it -- the playlist is deleted, every
+star and rating is restored -- with one exception neither will make on its own:
+submitting a **play** writes to a listening history nothing here can edit, so it
+runs only behind `LATENTPLAYER_SUBSONIC_SCROBBLE=1` natively and a tick box on
+the web.

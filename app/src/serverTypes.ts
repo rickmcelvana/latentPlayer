@@ -20,6 +20,9 @@ export interface ArtistRow {
   /// The id to fetch art with -- not a URL, and never the image itself.
   coverArt: string | null;
   albumCount: number;
+  /// Whether the listener has starred this (M4). A boolean here and a *date* on
+  /// the wire -- the conversion happens once, in Rust.
+  starred: boolean;
 }
 
 /// One album.
@@ -34,6 +37,9 @@ export interface AlbumRow {
   /// than as 0:00 -- the same distinction the local library makes.
   durationSeconds: number;
   year: number | null;
+  starred: boolean;
+  /// The listener's own rating, 1-5, or null (M4).
+  rating: number | null;
 }
 
 /// One track. `id` and `suffix` are what playback needs (playlist.ts turns them
@@ -47,6 +53,8 @@ export interface ServerTrack {
   durationSeconds: number;
   coverArt: string | null;
   trackNumber: number | null;
+  starred: boolean;
+  rating: number | null;
 }
 
 /// How an album list is ordered. The server rejects anything else.
@@ -82,3 +90,58 @@ export interface BrowseResult {
 export function emptyBrowseResult(): BrowseResult {
   return { artists: [], albums: [], tracks: [] };
 }
+
+/// One playlist on the server (M4). `PlaylistRow` in
+/// player-core/src/subsonic/playlists.rs, transcribed like everything above it.
+export interface ServerPlaylist {
+  id: string;
+  name: string;
+  comment: string;
+  owner: string;
+  public: boolean;
+  songCount: number;
+  /// 0 when the server did not say, rendered as an em dash rather than 0:00.
+  durationSeconds: number;
+  /// ISO 8601, as the server states it.
+  changed: string;
+  coverArt: string | null;
+}
+
+/// One thing the UI can ask about, or do to, the server's playlists.
+///
+/// The four writes are why the ids are spelled out rather than passed loosely:
+/// `updatePlaylist` takes a `playlistId` where every other call takes an `id`,
+/// and `songIndexToRemove` counts positions in the playlist as the server
+/// currently holds it -- neither of which appears on this side of the boundary.
+export type PlaylistRequest =
+  | { kind: "list" }
+  | { kind: "get"; id: string }
+  | { kind: "create"; name: string; songIds: string[] }
+  | { kind: "rename"; id: string; name: string }
+  | { kind: "addSongs"; id: string; songIds: string[] }
+  | { kind: "removeIndices"; id: string; indices: number[] }
+  | { kind: "delete"; id: string };
+
+/// What a playlist request answers with: one shape for all six, with whatever
+/// the request had nothing to say about left empty.
+export interface PlaylistResult {
+  playlists: ServerPlaylist[];
+  tracks: ServerTrack[];
+}
+
+export function emptyPlaylistResult(): PlaylistResult {
+  return { playlists: [], tracks: [] };
+}
+
+/// What is being starred, which decides how its id is spelled on the wire --
+/// `id` for a song, `albumId` for an album, `artistId` for an artist. Sending
+/// the wrong one succeeds and stars nothing, which is why this is part of the
+/// request rather than something a caller remembers.
+export type StarTarget = "song" | "album" | "artist";
+
+/// One mark to put on, or take off, something in the server's library.
+export type MarkRequest =
+  | { kind: "star"; target: StarTarget; id: string }
+  | { kind: "unstar"; target: StarTarget; id: string }
+  /// 1-5, or 0 to clear. `setRating` takes one id for every kind, unlike star.
+  | { kind: "setRating"; id: string; rating: number };

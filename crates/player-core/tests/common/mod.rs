@@ -87,6 +87,14 @@ impl Reply {
 pub struct Seen {
     pub path: String,
     pub query: HashMap<String, String>,
+    /// Every parameter in the order it was sent, repeats included.
+    ///
+    /// `query` above cannot answer for those: Subsonic repeats a parameter to
+    /// mean a list -- `songId=a&songId=b`, `songIndexToRemove=0&...` -- and a
+    /// map keeps one of them. Which is exactly the mistake M4 has to prove it
+    /// did not make, since a client that sent one `songId` would create a
+    /// playlist holding one track and the server would answer "ok".
+    pub params: Vec<(String, String)>,
     /// The `Range` header as sent, so a test can assert on what was actually
     /// asked for rather than on how much came back.
     pub range: Option<String>,
@@ -95,6 +103,15 @@ pub struct Seen {
 impl Seen {
     pub fn param(&self, key: &str) -> Option<&str> {
         self.query.get(key).map(String::as_str)
+    }
+
+    /// Every value sent under `key`, in order.
+    pub fn values(&self, key: &str) -> Vec<&str> {
+        self.params
+            .iter()
+            .filter(|(name, _)| name == key)
+            .map(|(_, value)| value.as_str())
+            .collect()
     }
 }
 
@@ -279,16 +296,18 @@ fn serve_one(
     }
 
     let target = request_line.split_whitespace().nth(1).unwrap_or("/");
-    let (path, query) = match target.split_once('?') {
-        Some((path, query)) => (path.to_string(), parse_query(query)),
-        None => (target.to_string(), HashMap::new()),
+    let (path, params) = match target.split_once('?') {
+        Some((path, query)) => (path.to_string(), parse_params(query)),
+        None => (target.to_string(), Vec::new()),
     };
+    let query: HashMap<String, String> = params.iter().cloned().collect();
 
     requests.fetch_add(1, Ordering::AcqRel);
     if let Ok(mut log) = seen.lock() {
         log.push(Seen {
             path: path.clone(),
             query,
+            params: params.clone(),
             range: range.clone(),
         });
     }
@@ -407,7 +426,8 @@ fn serve_ranged(stream: &mut TcpStream, range: Option<&str>, body: &[u8]) -> boo
     true
 }
 
-fn parse_query(query: &str) -> HashMap<String, String> {
+/// Every parameter in order, repeats kept -- see [`Seen::params`].
+fn parse_params(query: &str) -> Vec<(String, String)> {
     query
         .split('&')
         .filter(|pair| !pair.is_empty())

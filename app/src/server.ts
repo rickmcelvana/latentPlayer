@@ -22,7 +22,10 @@ import {
   reconnectServer as reconnectNative,
   serverBrowse as browseNative,
   serverCoverUrl as coverNative,
+  serverMark as markNative,
+  serverPlaylists as playlistsNative,
   serverRandomTracks as randomNative,
+  serverScrobbleTick as scrobbleTickNative,
   serverState as stateNative,
   type ServerState,
 } from "./nativePlayer";
@@ -31,16 +34,39 @@ import {
   connectServer as connectWeb,
   emptyServerState,
   forgetServer as forgetWeb,
+  mark as markWeb,
+  playlists as playlistsWeb,
   randomTracks as randomWeb,
   reconnectServer as reconnectWeb,
+  resetScrobbler as resetScrobblerWeb,
+  scrobbleTick as scrobbleTickWeb,
   serverCoverUrl as coverWeb,
   serverState as stateWeb,
 } from "./subsonicWeb";
-import type { BrowseRequest, BrowseResult, ServerTrack } from "./serverTypes";
+import type {
+  BrowseRequest,
+  BrowseResult,
+  MarkRequest,
+  PlaylistRequest,
+  PlaylistResult,
+  ServerTrack,
+} from "./serverTypes";
 
 export type { ServerState };
-export type { AlbumRow, AlbumSort, ArtistRow, BrowseRequest, BrowseResult, ServerTrack } from "./serverTypes";
-export { emptyBrowseResult } from "./serverTypes";
+export type {
+  AlbumRow,
+  AlbumSort,
+  ArtistRow,
+  BrowseRequest,
+  BrowseResult,
+  MarkRequest,
+  PlaylistRequest,
+  PlaylistResult,
+  ServerPlaylist,
+  ServerTrack,
+  StarTarget,
+} from "./serverTypes";
+export { emptyBrowseResult, emptyPlaylistResult } from "./serverTypes";
 export { emptyServerState };
 
 /// How the secret is being kept, so the panel can say it plainly where the user
@@ -92,6 +118,40 @@ export async function serverBrowse(request: BrowseRequest): Promise<BrowseResult
   return isTauri() ? browseNative(request) : browseWeb(request);
 }
 
+/// The server's playlists (Phase 2 M4): the two reads and the four writes,
+/// through one call for the reason `serverBrowse` is one.
+export async function serverPlaylists(request: PlaylistRequest): Promise<PlaylistResult> {
+  return isTauri() ? playlistsNative(request) : playlistsWeb(request);
+}
+
+/// One star, unstar or rating (Phase 2 M4).
+export async function serverMark(request: MarkRequest): Promise<void> {
+  return isTauri() ? markNative(request) : markWeb(request);
+}
+
+/// Tells the scrobble tracker where playback is, and lets it send whatever that
+/// earned (Phase 2 M4).
+///
+/// Driven from the transport poll the app already runs, on both shells. *When* a
+/// play counts is not decided on either side of this line -- it is
+/// `player_core::subsonic::scrobble`, held natively in the Tauri shell's state
+/// and in a wasm object on the web, so the two shells cannot come to disagree
+/// about what a listener has heard (decision 10).
+///
+/// Answers with what was actually sent (`"nowPlaying:<id>"`, `"submit:<id>"`),
+/// which is almost always nothing: a track announces itself once and submits
+/// once.
+export async function serverScrobbleTick(
+  trackId: string | null,
+  positionSeconds: number,
+  durationSeconds: number,
+  playing: boolean,
+): Promise<string[]> {
+  return isTauri()
+    ? scrobbleTickNative(trackId, positionSeconds, durationSeconds, playing)
+    : scrobbleTickWeb(trackId, positionSeconds, durationSeconds, playing);
+}
+
 /// A URL for one piece of the server's cover art, or null when there is none to
 /// be had.
 ///
@@ -102,4 +162,13 @@ export async function serverBrowse(request: BrowseRequest): Promise<BrowseResult
 export async function serverCoverUrl(coverArt: string | null): Promise<string | null> {
   if (!coverArt) return null;
   return isTauri() ? coverNative(coverArt) : coverWeb(coverArt);
+}
+
+/// Forgets what was playing, so the next observation starts a fresh play.
+///
+/// Only the web shell has anything to do here: natively the tracker lives in the
+/// Tauri state and starts a fresh play the moment it is told a different track
+/// id, which is the same thing by a different route.
+export function resetScrobbler(): void {
+  if (!isTauri()) resetScrobblerWeb();
 }

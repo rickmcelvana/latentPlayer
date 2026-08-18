@@ -316,7 +316,7 @@ export function LibraryPanel({
           means the same thing -- what differs is that this list is asked for
           rather than held (decision 6). */}
       {source === "server" && (
-        <ServerBrowser onPlay={onPlay} onQueue={onQueue} />
+        <ServerBrowser onPlay={onPlay} onQueue={onQueue} queue={queue} />
       )}
       {source === "library" && (
         <>

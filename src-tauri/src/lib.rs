@@ -753,6 +753,9 @@ pub fn run() {
             set_next_server_track,
             servers::server_random_tracks,
             servers::server_browse,
+            servers::server_playlists,
+            servers::server_mark,
+            servers::server_scrobble_tick,
             servers::server_state,
             servers::connect_server,
             servers::reconnect_server,
@@ -814,6 +817,10 @@ pub fn run() {
             // own state rather than part of the connection, so a fetch never
             // holds the lock the browse commands need.
             app.manage(servers::SharedCovers::default());
+            // The scrobble tracker (M4). Its own state for the same reason: it
+            // outlives any one track, and it is consulted from the transport
+            // poll rather than from anything that holds the connection.
+            app.manage(servers::SharedScrobbler::default());
             // Reconnecting at startup happens off the main thread: it is a
             // network round trip, and a server that is not there takes the
             // request timeout to say so -- which on this thread would be the
