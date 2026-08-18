@@ -227,11 +227,12 @@ Butterchurn-guided route (MIT), never projectM (LGPL); AI-adaptive presets
 slip to Phase 6.
 
 **Phase 3 M1 is done and user-confirmed** (2026-08-18): the visualizer host.
-Confirmed live on the desktop shell -- fullscreen enters and leaves cleanly, Esc
-comes back out of it, and Auto gain "looks right on real music" -- and on the web
-shell for everything but its fullscreen, which no automation here can reach (the
-in-app browser pane refuses `requestFullscreen`) and which no one has yet had
-reason to try by hand. `player-render` is now split along one seam (`visual.rs`) --
+Confirmed live on **both shells**: fullscreen enters and leaves cleanly, Esc
+comes back out of it, and Auto gain "looks right on real music". That closes the
+one thing no automation here can reach -- the in-app browser pane refuses
+`requestFullscreen` and the desktop webview's buttons are out of reach of both
+the automation browser and UI Automation, so fullscreen was always going to be a
+person's observation. `player-render` is now split along one seam (`visual.rs`) --
 **the host owns the surface, the analysis feed, selection and fullscreen; a
 visual owns only its scene** -- so `Renderer` holds a `BoxedVisual`,
 `set_visual` swaps the scene without touching the surface, and `draw_frame`

@@ -410,13 +410,12 @@ focus-loss exit and the gallery under real music are the live confirmation this
 milestone is waiting on**, and they are exactly what decision 4 said to check
 first.
 
-**That confirmation came the same day, and found three things** -- the two bugs
-below and the background difference after them. What is confirmed: fullscreen
-enters and leaves cleanly on the desktop, Esc comes back out of it (after the
-fix below), and Auto gain looks right on real music. What is still unconfirmed is
-**web fullscreen specifically**: the automation pane refuses `requestFullscreen`
-outright, and the desktop shell is where this gets used. Worth a minute in a real
-browser tab before M2 builds a second visual on top of the same host.
+**That confirmation came the same day, on both shells, and found three things**
+-- the two bugs below and the background difference after them. Confirmed live:
+fullscreen enters and leaves cleanly, Esc comes back out of it (after the fix
+below), and Auto gain looks right on real music. Nothing about M1 is left waiting
+on a person, which matters for M2: the next visual plugs into a host that has
+been used rather than one that has only been measured.
 
 ### Two bugs from the first live desktop run (2026-08-18)
 

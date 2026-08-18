@@ -955,8 +955,11 @@ at the correct rate, re-verified with the same probe.
   automation browser and UI Automation, which is the identical limit the
   2026-08-17 lifecycle work ran into. Esc, the focus-loss exit and the shortcut
   being *unregistered* afterwards are therefore user-confirmed rather than
-  asserted. The shortcut's registration failing is at least logged loudly, since
-  it is the one thing that would leave someone stuck.
+  asserted -- and they are: confirmed live on both shells, 2026-08-18. The
+  shortcut's registration failing is at least logged loudly, since it is the one
+  thing that would leave someone stuck. What remains true is that a regression
+  here would not be caught by anything in this repo, so fullscreen belongs on the
+  list of things a person checks before a release.
 - **A global Esc is a strong thing to hold, and it is held for as long as
   fullscreen lasts** (Phase 3 M1). While the desktop visualizer is fullscreen,
   Esc belongs to this app process-wide -- that is what a global shortcut means,
