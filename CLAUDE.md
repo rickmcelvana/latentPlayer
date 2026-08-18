@@ -4,9 +4,10 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 
 ## Project
 
-latentPlayer — Latentbeats.com Music Player. See `PLAN.md` for product/architecture planning
-(status: Phase 0 spikes in progress) and `ARCHITECTURE.md`/`CONVENTIONS.md`/`WORKFLOW.md` for
-what's actually built and how to work on it.
+latentPlayer — Latentbeats.com Music Player. Open source (MIT). See `PLAN.md` for the
+product-level plan (audiences, feature set, phase ordering, decisions — revised 2026-08-18:
+visualizer suite + fullscreen requirement, player-completeness phase, roadmap reorder) and
+`ARCHITECTURE.md`/`CONVENTIONS.md`/`WORKFLOW.md` for what's actually built and how to work on it.
 
 ## Status
 

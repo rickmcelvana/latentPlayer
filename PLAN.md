@@ -1,6 +1,9 @@
 # latentPlayer — Product & Architecture Plan
 
-Status: **planning only** — no implementation yet. This document is the reference for scoping and sequencing work.
+Status: **living reference** for scoping and sequencing. Phases 0–1 are built, closed and
+user-confirmed on both shells; Phase 2 is underway (M1–M3 closed as of 2026-08-17). What actually
+exists lives in `ARCHITECTURE.md`; per-phase execution detail lives in `tasks/`. This document
+stays the product-level truth: audiences, feature set, phase ordering, and decisions.
 
 ## 1. Vision
 
@@ -56,7 +59,35 @@ This is where latentPlayer earns the "latent" branding, sharing DNA with latentm
 - Dynamic-range (DR/crest-factor) meter, mid-side balance meter.
 - **Reference-track A/B, loudness-matched comparison** — load a reference master and A/B it against the current track at matched LUFS, overlaying spectra. This is a staple mastering-engineer workflow (see: Metric AB) that no free listening app offers.
 
-**The 3D vectorscope (hero feature):** extrude the classic 2D Lissajous/XY scope along a time axis into a literal 3D ribbon — accurate stereo-field data as a piece of generative art, not a stylized "visualizer" faking reactivity.
+**The 3D vectorscope (hero feature):** extrude the classic 2D Lissajous/XY scope along a time axis into a literal 3D ribbon — accurate stereo-field data as a piece of generative art, not a stylized "visualizer" faking reactivity. (Shipped as v1 in Phase 1 M6.)
+
+**The visualizer suite — several visuals, one host, fullscreen everywhere (requirement set 2026-08-18):**
+the app offers a *gallery* of visualizers, not one scope with settings. The user picks a visual the
+way they pick a track, and any visual can go **fullscreen on either shell** — borderless fullscreen
+of the native scope window on desktop, the Fullscreen API on the canvas on web — with all chrome
+hidden and Esc/click to come back. Fullscreen is a hard requirement of the suite, not polish, and it
+lands with the host, before any new visual does.
+
+Planned built-ins, all rendering through `player-render` (wgpu) on both shells behind one
+visualizer-host abstraction (the host owns the surface, the analysis feed, selection, and
+fullscreen — a visual owns only its scene):
+
+1. **3D vectorscope** — the hero, already shipped; becomes the first citizen of the host rather than
+   a special case.
+2. **Spectrum bars** — the classic analyzer as art: the metering spectrum's own bands, re-presented
+   (3D-instanced bars, peak-fall, note-frequency mode).
+3. **Spectrogram waterfall** — the metering spectrogram extruded into a scrolling 3D terrain.
+4. **Oscilloscope tunnel** — the waveform swept along a camera path; the "modern Winamp oscilloscope."
+5. **Particle / raymarched scenes** — GPU-instanced particles and SDF raymarching driven by the
+   musical-intelligence analysis below, not raw amplitude.
+6. **MilkDrop presets** — the compatibility engine, once it lands (see below), presented as one more
+   entry in the same gallery.
+
+The same suite serves both audiences by *presentation*, not by separate engines: the visualizers are
+the listener-facing face of exactly the analysis data the metering suite shows engineers. A "listen"
+layout (visual forward, transport minimal, one click to fullscreen) and a "studio" layout (meters,
+scope-as-instrument, reference A/B) are two arrangements of one pipeline — the tap built in Phase 1
+M4 already guarantees they cannot disagree about the audio.
 
 **Modernizing the Winamp/MilkDrop visualizer:**
 1. Real 3D scenes (particles, SDF raymarching, GPU-instanced geometry) via compute shaders, not MilkDrop's flat-plane pseudo-3D.
@@ -113,10 +144,10 @@ One React/TS codebase (Vite) renders in both shells — the Tauri webview and th
 Local playback of common formats, gapless playback, crossfade, playlists incl. smart playlists, queue, tag editor (ID3/Vorbis comments) with MusicBrainz lookup, library scan + album art fetch, search, basic EQ, ReplayGain/loudness-normalized playback, synced (LRC) lyrics, Last.fm/ListenBrainz scrobbling, OS media integration (MPRIS/SMTC/macOS Now Playing/Media Session API), system tray + global media keys, mini-player, theming (optional legacy `.wsz` Winamp skin import as a nostalgia hook).
 
 ### Playback & Capture (§3)
-Local files + Subsonic/Navidrome/Jellyfin (Mode A, in-app playback) — the only sources the app actually plays. Universal per-app or whole-system audio Capture Mode (Mode B) for visuals/metering against anything playing anywhere else on the machine, with no per-service integration at all.
+Local files + Subsonic/OpenSubsonic servers (Navidrome the reference; Jellyfin only via its third-party Subsonic plugin, see §8.6) — Mode A, in-app playback, the only sources the app actually plays. Universal per-app or whole-system audio Capture Mode (Mode B) for visuals/metering against anything playing anywhere else on the machine, with no per-service integration at all.
 
 ### Visualization & metering (flagship — §4)
-3D vectorscope, phase correlation meter, LUFS meter, true-peak meter, spectrum analyzer + spectrogram, DR/mid-side meters, reference-track loudness-matched A/B, MilkDrop-compatible + native 3D preset engine, AI-adaptive presets, VR mode (stretch). All of it works identically whether the signal comes from Mode A (direct PCM) or Mode B (captured audio).
+The visualizer suite (§4): a gallery of selectable visuals — 3D vectorscope, spectrum bars, spectrogram waterfall, oscilloscope tunnel, particle/raymarched scenes, MilkDrop presets — every one able to go fullscreen on both shells. The metering suite: phase correlation meter, LUFS meter, true-peak meter, spectrum analyzer + spectrogram, DR/mid-side meters, reference-track loudness-matched A/B. Preset engines: MilkDrop-compatible + native 3D preset format, AI-adaptive presets, VR mode (stretch). All of it works identically whether the signal comes from Mode A (direct PCM) or Mode B (captured audio).
 
 ### What's genuinely not in any free app today (the pitch, in one place)
 - A full pro metering suite (LUFS/true-peak/phase/DR) bundled free into a listening app instead of gated behind paid plugins.
@@ -128,14 +159,35 @@ Local files + Subsonic/Navidrome/Jellyfin (Mode A, in-app playback) — the only
 
 ## 7. Phased roadmap
 
-- **Phase 0 — Spikes:** validate `wgpu` rendering shared between Tauri native and wasm/browser; port latent-mixing's AudioWorklet+SharedArrayBuffer pattern (§5, §9) for the web audio path rather than designing one from scratch; minimal local playback + 2D scope as a walking skeleton.
-- **Phase 1 — MVP:** local file player, tagging/library, playlists, basic EQ, spectrum analyzer, phase correlation meter, LUFS meter, 3D vectorscope v1; ships as both a Tauri desktop build and a web build.
-- **Phase 2 — Self-hosted playback:** Subsonic/OpenSubsonic support (Navidrome the reference server) — zero legal risk, immediately unlocks large existing libraries for self-hosting users. Planned in `tasks/phase-2.md`; Jellyfin is explicitly out of scope, see §8.6.
-- **Phase 3 — Capture Mode:** per-OS `CaptureSource` backends (Windows process-loopback, macOS `SCContentFilter`, Linux PipeWire), desktop-only; universal visualizer/metering companion for any other app on the machine.
-- **Phase 4 — Visualizer v2:** MilkDrop preset compatibility, native WGSL 3D preset format, AI-adaptive presets; VR mode as stretch.
-- **Phase 5 — Ecosystem:** latentmastering/latentmixer handoff integrations, community preset sharing, plugin SDK.
+Reordered 2026-08-18 (decision §8.9): the visualizer suite moved ahead of Capture Mode, and a
+player-completeness phase was added — §6's table stakes were listed but never actually scheduled.
 
-## 8. Decisions (resolved 2026-08-15)
+- **Phase 0 — Spikes** *(closed 2026-08-15)*: validate `wgpu` rendering shared between Tauri native and wasm/browser; port latent-mixing's AudioWorklet+SharedArrayBuffer pattern (§5, §9) for the web audio path rather than designing one from scratch; minimal local playback + 2D scope as a walking skeleton.
+- **Phase 1 — MVP** *(closed 2026-08-17)*: local file player, streaming decode, queue + gapless, tagging/library, playlists, basic EQ, spectrum analyzer, phase correlation meter, LUFS/true-peak metering, 3D vectorscope v1; ships as both a Tauri desktop build and a web build. See `tasks/phase-1.md`.
+- **Phase 2 — Self-hosted playback** *(underway; M1–M3 closed 2026-08-17)*: Subsonic/OpenSubsonic support (Navidrome the reference server) — zero legal risk, immediately unlocks large existing libraries for self-hosting users. Remaining: M4 (server playlists, scrobbling to the server, stars/ratings), M5 (failing well). Planned in `tasks/phase-2.md`; Jellyfin is explicitly out of scope, see §8.6.
+- **Phase 3 — Visualizer suite:** the gallery of §4, in order of what unlocks what. First the
+  visualizer host — selection, the analysis feed, and **fullscreen on both shells** — with the
+  existing vectorscope as its first citizen; then the new built-ins (spectrum bars, spectrogram
+  waterfall, oscilloscope tunnel); then musically-intelligent reactivity (onset/beat/BPM/spectral
+  centroid feeding shader uniforms) and the particle/raymarched scenes it drives; then MilkDrop
+  `.milk` preset compatibility and the native WGSL 3D preset format. AI-adaptive presets close the
+  phase or slip to Phase 6 — they need the analysis features and the preset format both. Detail goes
+  in `tasks/phase-3.md` when this phase is planned properly.
+- **Phase 4 — Player completeness:** the §6 table stakes not yet built, plus the tracked gaps that
+  are really features. OS media integration (SMTC/MPRIS/macOS Now Playing/Media Session API), global
+  media keys + system tray, Last.fm/ListenBrainz scrobbling, ReplayGain/loudness-normalized playback,
+  crossfade, tag *editing* with MusicBrainz lookup, synced (LRC) lyrics, smart playlists, mini-player,
+  theming (optional `.wsz` Winamp skin import), and reference-track loudness-matched A/B (§4's one
+  metering feature not yet built). Also the standing engineering debts from ARCHITECTURE.md's "Known
+  gaps" that a quality product can't carry forever: the Opus decision, duration estimates for
+  headerless VBR files, reopening on output-device change, WebGL2 fallback, a visible buffering
+  state, EQ coefficient smoothing + presets, and offline caching for server tracks (deferred from
+  Phase 2 on purpose). Small items here (media keys, SMTC) may ride along with earlier phases when
+  convenient — this phase is the guarantee they land, not a fence keeping them out.
+- **Phase 5 — Capture Mode:** per-OS `CaptureSource` backends (Windows process-loopback, macOS `SCContentFilter`, Linux PipeWire), desktop-only; universal visualizer/metering companion for any other app on the machine. Deliberately *after* the visualizer suite: capture's pitch is "point the visuals at anything," and that pitch is a whole product with a fullscreen gallery behind it where it was one scope before.
+- **Phase 6 — Ecosystem & community:** latentmastering/latentmixer handoff integrations, community preset sharing, plugin SDK, AI-adaptive presets if they slipped from Phase 3, VR/immersive mode (stretch) — plus the open-source project infrastructure a public repo earns: CONTRIBUTING, CI on the full check/test matrix, reproducible binary releases for all three desktop OSes and the hosted web build.
+
+## 8. Decisions (1–5 resolved 2026-08-15; 6 added 2026-08-17; 7–9 added 2026-08-18)
 
 1. **UI framework: React + TypeScript + Vite + Zustand**, not Svelte/SolidJS. Matches both sibling apps exactly (see §9) — reuses their build tooling, adapter-module pattern, and COOP/COEP+SharedArrayBuffer audio path instead of standing up a third stack. Detail and rationale folded into §5.
 2. **Self-hosting scope for v1: Phase 1 is local-files-only.** Subsonic/Navidrome/Jellyfin support waits for Phase 2, as the roadmap in §7 already lays out — no change needed there, just confirmed rather than left as a question.
@@ -143,12 +195,31 @@ Local files + Subsonic/Navidrome/Jellyfin (Mode A, in-app playback) — the only
 4. **macOS permission UX: pre-prompt before the OS dialog.** Detect macOS, show our own honest explanatory dialog (Continue/Not now) before ScreenCaptureKit's screen-recording permission prompt ever appears, so the OS's generic wording is never the user's first exposure to why we're asking. Detail folded into §3.
 5. **Brand integration depth: simple, account-free handoff; exact UX decided per-app later.** Both latentmastering and latentmixer are free to use with no account today (confirmed against their own PROJECT.md decisions — see §9), so latentPlayer's handoff has no account/session state to bridge either. Both sibling apps should be able to **send to latentPlayer**, and latentPlayer should be able to **send to both of them** — the exact mechanics (file handoff vs. a `latentplayer://` deep link vs. shared local storage) get decided in a dedicated session with each app rather than guessed now, matching how latent-mixing's own "Send to Latent Mastering" feature (already on its Phase 3 roadmap, undesigned in detail) is being handled. Scope for now: the *capability* is confirmed in both directions; the *protocol* is not designed yet — track as an open item when that session happens, not a blocker to starting latentPlayer's build.
 6. **Phase 2's servers: Subsonic/OpenSubsonic only** (added 2026-08-17, while planning that phase). Jellyfin, named in §3 and §7 since this document was written, does not speak Subsonic natively — only a third-party plugin does, and it describes itself as experimental. Jellyfin's own REST API is a different auth model, a different browse model and different stream URLs: a second client, not another server behind one. One Subsonic client covers Navidrome, Airsonic, Gonic, Ampache and Subsonic itself — and covers Jellyfin for anyone running the plugin. A native Jellyfin backend goes behind the same `PlaybackSource`/server seam in a later phase if it is ever wanted. Full reasoning, and the rest of Phase 2's decisions, in `tasks/phase-2.md`.
+7. **License: MIT — resolved, already in the repo** (recorded 2026-08-18). §9's open question is
+   closed: the repository carries an MIT `LICENSE` and the project is open source, unlike its
+   closed-source siblings. Consequences worth writing down: dependencies must stay
+   MIT-compatible (the current tree is — wgpu, symphonia, cpal, rubato, Tauri are all
+   MIT/Apache-dual); the MilkDrop path is license-clean (Butterchurn is MIT; projectM is LGPL and
+   is therefore *not* the compatibility route to take); and the sibling apps remaining commercial
+   is not a conflict — MIT lets them reuse anything here.
+8. **The visualizer is a suite with fullscreen, not a single scope** (user direction, 2026-08-18).
+   Several selectable visuals behind one host abstraction; fullscreen on both shells is a hard
+   requirement that lands with the host, before any new visual. The metering surface stays its own
+   thing for studio use — the visualizers are the listener-facing presentation of the same analysis
+   data, and the two must keep reading the one tap so they cannot disagree. Detail in §4.
+9. **Roadmap reordered; a completeness phase added** (2026-08-18). Visualizer suite is Phase 3
+   (was 4), Capture Mode moves to Phase 5, and a new Phase 4 — player completeness — schedules
+   §6's table stakes, which the old roadmap listed but never assigned to any phase. Rationale:
+   the suite is the explicit product priority and Capture Mode's value multiplies once it has a
+   gallery to feed rather than one scope; and "feature rich, quality final product" is not
+   credible while scrobbling, ReplayGain, tag editing, lyrics and OS media integration float
+   unscheduled.
 
 ## 9. Ecosystem context (from `../latent-mastering` and `../latent-mixing`)
 
 Findings from reading the sibling repos directly, kept here so they don't need re-deriving later:
 
-- **Both are closed-source/commercial** (proprietary `LICENSE` + `THIRD-PARTY-LICENSES.md`, permissive-license-only dependency policy). latentPlayer's own licensing model isn't decided yet — it's a separate open question, not assumed to inherit theirs, since the earlier README/CLAUDE.md history here doesn't commit either way.
+- **Both are closed-source/commercial** (proprietary `LICENSE` + `THIRD-PARTY-LICENSES.md`, permissive-license-only dependency policy). latentPlayer does **not** inherit that: it is open source under MIT (decision §8.7, `LICENSE` in the repo) — the one deliberate divergence from the siblings, and no conflict with them, since MIT lets the commercial apps reuse anything here.
 - **Monetization precedent (not yet a latentPlayer decision, just context):** both sibling apps settled on *web free permanently, desktop is the eventual paid product* — explicitly "no metering, quota, account, billing or entitlement work belongs in the web app." If latentPlayer follows the same shape, phase 1–3 (web + desktop, no accounts) cost nothing to build under that model either way; only a future paid-desktop-tier decision would need revisiting.
 - **Hosting pattern**: self-hosted Debian + Caddy (moved off Cloudflare Pages / dev-tunnel setups once real), each app at `app.latent<name>.com`, marketing content under the shared `latentbeats.com` umbrella (its own separate repo), each app's site cross-linking its siblings. latentPlayer would presumably follow the same shape (`app.latentplayer.com` + a `latentbeats.com/player/` section) when it reaches the equivalent phase — not a decision to make now, just the established convention to default to later.
 - **Shared feedback API**: both apps already POST to one `/api/feedback` endpoint (with a `source` field distinguishing which app) rather than each rolling its own. latentPlayer should plug into that same endpoint when it needs feedback collection, not build a third one.
