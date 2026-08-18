@@ -46,8 +46,11 @@ impl Mat4 {
     }
 
     /// Transforms a point, returning it divided through by w -- i.e. normalised
-    /// device coordinates when `self` is a view-projection.
-    #[cfg(test)]
+    /// device coordinates when `self` is a view-projection, and plain view
+    /// space when `self` is just a view matrix (whose w is always 1).
+    ///
+    /// Used by the vectorscope to fit its camera to its scene, as well as by
+    /// this module's own tests.
     pub fn project(&self, point: [f32; 3]) -> [f32; 3] {
         let mut out = [0.0f32; 4];
         for (r, value) in out.iter_mut().enumerate() {

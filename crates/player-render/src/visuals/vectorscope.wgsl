@@ -4,18 +4,15 @@
 
 struct Camera {
     view_proj: mat4x4<f32>,
+    // [figure_scale, depth, 0, 0] -- see vectorscope.rs. How large to draw a
+    // given amplitude, and how long to draw the fixed 120ms, are both display
+    // decisions; they arrive from Rust because the camera there is *fitted* to
+    // them, and a copy here that drifted would frame a different scene than
+    // this shader draws.
+    figure: vec4<f32>,
 };
 
 @group(0) @binding(0) var<uniform> camera: Camera;
-
-// Full-scale mono reaches sqrt(2) on the mid axis (trace.rs keeps the real
-// amplitudes), so this is what keeps a loud track inside the frame. How large
-// to draw the figure is a display decision, which is why it lives here and not
-// in the numbers.
-const FIGURE_SCALE: f32 = 0.6;
-
-// How far the 120ms of history reaches into the scene, in world units.
-const DEPTH: f32 = 2.0;
 
 struct VertexOutput {
     @builtin(position) clip_position: vec4<f32>,
@@ -30,9 +27,9 @@ fn vs_main(@location(0) position: vec3<f32>) -> VertexOutput {
     // with the newest sample nearest the viewer -- the trace grows towards you
     // and recedes as it ages, rather than the other way round.
     let world = vec3<f32>(
-        position.x * FIGURE_SCALE,
-        position.y * FIGURE_SCALE,
-        (0.5 - age) * DEPTH,
+        position.x * camera.figure.x,
+        position.y * camera.figure.x,
+        (0.5 - age) * camera.figure.y,
     );
     out.clip_position = camera.view_proj * vec4<f32>(world, 1.0);
     out.age = age;

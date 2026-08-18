@@ -696,6 +696,29 @@ fn set_visual(id: String, visualizer: tauri::State<SharedVisualizer>) -> Result<
 }
 
 /// Registers Esc for as long as the visualizer holds the screen.
+///
+/// **The handler does no work of its own, and that is not tidiness -- it is the
+/// difference between Esc working and the app hanging.** Found live 2026-08-18
+/// on the desktop shell: fullscreen worked, and Esc froze the whole application
+/// with no error in the log, every time.
+///
+/// The cause is structural, in `tauri-plugin-global-shortcut` 2.3.2, rather than
+/// a mistake to correct here. Its dispatcher looks the shortcut up in an
+/// `Arc<Mutex<HashMap>>` and calls the handler **while still holding that lock**
+/// (its `lib.rs:417` -- the guard is a temporary that lives to the end of the
+/// `if let`). `unregister` takes that same mutex (its `lib.rs:188`). So
+/// unregistering from inside a handler is a thread waiting for a lock it is
+/// already holding, and `std::sync::Mutex` is not reentrant. The same call also
+/// routes through the plugin's `run_main_thread!`, which blocks on a channel
+/// until the main thread runs the task -- so if the handler is *on* the main
+/// thread, it waits for itself a second way. Neither shows up as an error: the
+/// process just stops answering, which is exactly what was reported.
+///
+/// Handing the exit to a thread of its own answers both halves: the handler
+/// returns immediately, the dispatcher drops its lock, and the spawned thread's
+/// `unregister` then takes it uncontended and asks a main thread that is free
+/// again. It is the same shape as `VisualizerWindow::stop`, which may not run on
+/// the main thread for its own version of this reason.
 fn register_fullscreen_exit(app: &tauri::AppHandle) {
     let handle = app.clone();
     if let Err(e) =
@@ -704,7 +727,8 @@ fn register_fullscreen_exit(app: &tauri::AppHandle) {
                 // Both the press and the release arrive; acting on the press alone
                 // keeps one keystroke from being two exits.
                 if event.state() == ShortcutState::Pressed {
-                    leave_fullscreen(&handle);
+                    let handle = handle.clone();
+                    std::thread::spawn(move || leave_fullscreen(&handle));
                 }
             })
     {
@@ -720,6 +744,13 @@ fn register_fullscreen_exit(app: &tauri::AppHandle) {
 /// Idempotent on purpose: it is reached from the UI's toggle, from Esc itself,
 /// from the window losing focus and from hiding the visualizer, and any of
 /// those can arrive when the visualizer is already windowed.
+///
+/// **Never call this from inside a global-shortcut handler** -- see
+/// `register_fullscreen_exit` for the deadlock that causes and why the handler
+/// spawns a thread instead. Every other caller is fine: a command runs on the
+/// async runtime's pool, and the window-event handlers run on the main thread,
+/// where the plugin's main-thread hop resolves inline (`send_user_message`
+/// checks the thread id before using the proxy).
 fn leave_fullscreen(app: &tauri::AppHandle) {
     if let Some(window) = app.get_window(VISUALIZER_LABEL) {
         if let Err(e) = window.set_fullscreen(false) {

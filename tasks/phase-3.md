@@ -409,3 +409,69 @@ both the automation browser and UI Automation, the identical limit the
 focus-loss exit and the gallery under real music are the live confirmation this
 milestone is waiting on**, and they are exactly what decision 4 said to check
 first.
+
+### Two bugs from the first live desktop run (2026-08-18)
+
+**Esc out of fullscreen froze the whole app.** Reported live, reproducible every
+time, with nothing in the log -- which is itself the clue: a hang, not a crash.
+The cause is structural in `tauri-plugin-global-shortcut` 2.3.2. Its dispatcher
+looks the shortcut up in an `Arc<Mutex<HashMap>>` and calls the handler **while
+holding that lock** (its `lib.rs:417`); `unregister` takes the same mutex (its
+`lib.rs:188`), and `std::sync::Mutex` is not reentrant. The same call also hops
+to the main thread and blocks on a channel until it runs, so a handler on the
+main thread waits for itself a second way. Either alone is a permanent freeze.
+The fix is that the handler now does *nothing* but spawn a thread to perform the
+exit: the dispatcher's lock is dropped as the handler returns, and the main
+thread is free by the time anything asks it for something. It is the same shape
+as `VisualizerWindow::stop`, which may not run on the main thread for its own
+version of this reason. The other three ways out were never affected -- a
+command runs on the async pool, and the window-event handlers run on the main
+thread, where the plugin's hop resolves inline.
+
+**The figure was a small part of a fullscreen window.** Also reported live: "80%
+of the screen full sized is just the panel's background". Investigated properly
+rather than tuned, and the answer came in three parts.
+
+The camera's field of view was a fixed 45 degrees, which framed a fixed *angle*
+regardless of the viewport. It is now *derived*: the projection opens exactly
+wide enough to hold the trace's own reachable extent at 90% of the frame, in
+whichever axis binds first. What is fitted is a **diamond**, not a box -- x is
+the side signal and y the mid, so |x| + |y| <= sqrt(2) and the corners of a
+square are positions no signal can occupy; framing them would have wasted a
+factor of sqrt(2). Those four vertices at each end of the ribbon are the eight
+corners of a convex solid, and a perspective projection maps a convex hull's
+extremes to its projected extremes, so fitting eight points fits every point
+between them. At the shapes M1 already measured this lands within a few pixels
+of the old 45 degrees -- which is the evidence that the old value was well
+chosen, not that the change did nothing: it now provably cannot clip at *any*
+window shape, including the taller-than-wide ones the fixed angle never
+considered, and the magic number is gone.
+
+Two other levers were tried, measured, and rejected -- both are written into the
+code so they are not tried again. Lengthening the ribbon on a wide viewport, so
+the spare room went to the time axis, made the picture **worse**: a longer
+ribbon reaches further towards the camera, the fit must then open wide enough to
+hold that near end, and everything behind it shrinks (the mono figure went from
+442px tall to 335px at 1280x720, with a lens-like exaggeration at the near end).
+Pulling the camera back flattens that perspective and does help -- from 57% to
+65% of the frame at a realistic distance -- but spends the sense of depth that is
+the point of a 3D scope for eight percentage points.
+
+What is left is the real answer, and it is arithmetic rather than a bug: **the
+frame is reserved for a full-scale signal, and music is not full-scale.** A
+full-scale mono tone fills 90% of the height by construction; a master peaking at
+-12 dBFS is a quarter of that, about 22%; at -18 dBFS, 11%. On a 1440p screen
+that is a small figure in a large dark field, exactly as reported, and no amount
+of camera work changes it. The standard answer on a hardware vectorscope is a
+**display gain**, which is a product decision rather than an implementation one
+-- so it is being put to the user rather than chosen here.
+
+Verified after both fixes: **14/14** natively and **17/17** in the browser
+again, with the figure fractionally *larger* than before the change (445px
+against 442px at 1280x720 natively, 443px in the browser), 240 tests passing
+(six new ones on the fit: that it fills the frame and cannot clip at eight
+window shapes from 320x320 to 3440x1440 and 600x900, that widening a window
+never shrinks the figure, that the ribbon's length no longer varies, that the
+uniform carries the numbers the fit was computed from, and that a degenerate
+viewport still yields a finite camera). The Esc fix needs a live re-run to
+confirm, since nothing here can press a key at a webview-less window.
