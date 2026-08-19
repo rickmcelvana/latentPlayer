@@ -8,7 +8,10 @@
 //! one line of registry rather than a change to either shell.
 
 mod bars;
+mod scale;
 mod vectorscope;
+mod waterfall;
 
 pub use bars::SpectrumBars;
 pub use vectorscope::Vectorscope;
+pub use waterfall::{SpectrogramWaterfall, HISTORY_SECONDS};

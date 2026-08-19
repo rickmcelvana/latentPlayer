@@ -213,6 +213,20 @@ crates/
                      `band_position`. Display gain reaches it as a decibel
                      offset, because a bar display is logarithmic where the
                      scope's is linear; one control, one meaning, two arithmetics.
+                     visuals/waterfall.rs is the third (Phase 3 M3): PLAN.md §4's
+                     spectrogram, and the first visual that *keeps* anything --
+                     six seconds of the same bands as a terrain, held in an
+                     R32Float ring of rows on the GPU and read in the vertex
+                     shader, so a frame costs one row and one index rather than
+                     one terrain. Rows advance on a clock (20/s) and never per
+                     frame, because the desktop redraws at 60Hz and a browser's
+                     animation callbacks run at whatever the display does. The
+                     texture holds dBFS *as measured* and the display window and
+                     gain are applied when it is drawn, so changing gain re-maps
+                     the whole history instead of leaving a seam. visuals/scale.rs
+                     is what the two spectrum visuals share -- the dB window, the
+                     band arithmetic, the octaves -- extracted in M3 on the rule
+                     `camera::fit` moved under: when there is a second caller.
                      trace.rs turns a window of played audio into
                      points (x side, y mid -- the goniometer's axes -- and z
                      their age), camera.rs is the perspective/look-at math with

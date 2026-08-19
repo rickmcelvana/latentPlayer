@@ -34,7 +34,9 @@
 use std::sync::atomic::{AtomicUsize, Ordering};
 
 use player_core::analysis::{band_centres, Meters};
-use player_render::{GainSetting, OffscreenRenderer, VisualFrame, VisualKind, TRACE_SECONDS};
+use player_render::{
+    GainSetting, OffscreenRenderer, VisualFrame, VisualKind, HISTORY_SECONDS, TRACE_SECONDS,
+};
 
 const WIDTH: u32 = 320;
 const HEIGHT: u32 = 320;
@@ -160,9 +162,14 @@ fn full_frame<'a>(samples: &'a [f32], spectrum: &'a Spectrum) -> VisualFrame<'a>
     frame(samples).with_spectrum(&spectrum.levels, &spectrum.centres)
 }
 
-/// A frame that advances the clock by `seconds` over a spectrum that is not
-/// moving -- for watching the peak caps come down.
-fn falling_frame<'a>(spectrum: &'a Spectrum, seconds: f32) -> VisualFrame<'a> {
+/// A frame that advances the clock by `seconds` over a given spectrum, with no
+/// samples in it.
+///
+/// Every claim about something that moves in *time* is made with this: the
+/// bars' caps falling (M2) and the waterfall's history scrolling (M3) are both
+/// checked by handing over a second in one piece and then in sixty, which is
+/// the difference between the two shells' redraw loops.
+fn timed_frame<'a>(spectrum: &'a Spectrum, seconds: f32) -> VisualFrame<'a> {
     let mut frame = full_frame(&[], spectrum);
     frame.elapsed_seconds = seconds;
     frame
@@ -185,6 +192,18 @@ impl Spectrum {
         Self {
             levels,
             centres: band_centres(RATE),
+        }
+    }
+
+    /// The same measurement against a different frequency axis -- every `step`
+    /// band of it. What the web shell's first play looks like from a visual's
+    /// side (nothing, then sixty-four bands), and what a change of output rate
+    /// would look like.
+    fn rebanded(source: &Spectrum, bands: usize) -> Self {
+        let step = (source.levels.len() / bands.max(1)).max(1);
+        Self {
+            levels: source.levels.iter().copied().step_by(step).collect(),
+            centres: source.centres.iter().copied().step_by(step).collect(),
         }
     }
 
@@ -363,7 +382,7 @@ fn check_the_spectrum_bars() {
     // the full-scale frame above, which is what put the caps up there.
     let quiet = Spectrum::flat(-120.0);
     let one_second = falling
-        .draw_to_pixels(&falling_frame(&quiet, 1.0))
+        .draw_to_pixels(&timed_frame(&quiet, 1.0))
         .expect("render a second of falling");
     let after_one = top_row(&one_second, BARS_WIDTH, BARS_HEIGHT).expect("a cap is still up");
     check(
@@ -378,11 +397,11 @@ fn check_the_spectrum_bars() {
         .expect("raise the caps");
     for _ in 0..60 {
         stepwise
-            .draw_to_pixels(&falling_frame(&quiet, 1.0 / 60.0))
+            .draw_to_pixels(&timed_frame(&quiet, 1.0 / 60.0))
             .expect("a 60Hz frame of falling");
     }
     let stepwise_pixels = stepwise
-        .draw_to_pixels(&falling_frame(&quiet, 0.0))
+        .draw_to_pixels(&timed_frame(&quiet, 0.0))
         .expect("read the caps back");
     let stepwise_top =
         top_row(&stepwise_pixels, BARS_WIDTH, BARS_HEIGHT).expect("a cap is still up at 60Hz");
@@ -391,6 +410,341 @@ fn check_the_spectrum_bars() {
         after_one.abs_diff(stepwise_top) <= 2,
         format!(
             "row {after_one} after one long frame against {stepwise_top} after sixty short ones"
+        ),
+    );
+}
+
+/// The waterfall is looked at in the same shape the bars are, and for the same
+/// reason: a spectrum runs across.
+const FALL_WIDTH: u32 = 640;
+const FALL_HEIGHT: u32 = 360;
+
+/// A waterfall renderer with no history at all.
+///
+/// The bars needed this because their peak caps outlive a frame; the waterfall
+/// needs it far more, since history is the entire visual. Every independent
+/// claim below starts from an empty terrain.
+fn waterfall_renderer() -> OffscreenRenderer {
+    pollster::block_on(OffscreenRenderer::new(
+        FALL_WIDTH,
+        FALL_HEIGHT,
+        VisualKind::SpectrogramWaterfall,
+    ))
+    .expect("offscreen renderer for the waterfall")
+}
+
+/// A pixel from the loud end of the colour ramp -- green-dominant, where the
+/// quiet end is violet (`waterfall.wgsl`'s `fs_surface`, the bars' own two
+/// colours).
+///
+/// This is how a ridge is found among the terrain it stands in. A brightness
+/// threshold could not: the whole surface is drawn, floor included, so
+/// "something is lit here" is true of every column. Being *loud* is the thing
+/// the history is supposed to remember.
+fn is_loud(pixel: &[u8]) -> bool {
+    pixel[1] > 70 && pixel[1] as i32 > pixel[0] as i32 + 25
+}
+
+/// Where the loud material is: how many pixels of it there are, and its centre
+/// of mass down and across the screen.
+struct Ridge {
+    count: usize,
+    centre_row: f32,
+    centre_column: f32,
+}
+
+fn ridge(pixels: &[u8], width: u32, height: u32) -> Option<Ridge> {
+    let (mut count, mut rows, mut columns) = (0usize, 0.0f64, 0.0f64);
+    for y in 0..height {
+        for x in 0..width {
+            let i = ((y * width + x) * 4) as usize;
+            if is_loud(&pixels[i..i + 4]) {
+                count += 1;
+                rows += y as f64;
+                columns += x as f64;
+            }
+        }
+    }
+    (count > 0).then(|| Ridge {
+        count,
+        centre_row: (rows / count as f64) as f32,
+        centre_column: (columns / count as f64) as f32,
+    })
+}
+
+/// Where the loudest thing on a spectrum display is, across the image.
+///
+/// The topmost *loud* pixel rather than the topmost lit one, which is what
+/// makes this the one measurement both spectrum visuals can be asked for: the
+/// waterfall draws a floor and octave rails that reach further up the screen
+/// than any ridge does, being further away. Averaged across the row it is found
+/// in, so a peak between two pixels does not land on whichever of them the
+/// rasteriser preferred.
+fn loud_peak_column(pixels: &[u8], width: u32, height: u32) -> Option<f32> {
+    for y in 0..height {
+        let (mut count, mut sum) = (0usize, 0.0f64);
+        for x in 0..width {
+            let i = ((y * width + x) * 4) as usize;
+            if is_loud(&pixels[i..i + 4]) {
+                count += 1;
+                sum += x as f64;
+            }
+        }
+        if count > 0 {
+            return Some((sum / count as f64) as f32);
+        }
+    }
+    None
+}
+
+/// A row of measured columns, for a check's own report.
+fn columns(xs: &[f32]) -> String {
+    xs.iter()
+        .map(|x| format!("{x:.0}"))
+        .collect::<Vec<_>>()
+        .join("/")
+}
+
+/// Plays `spectrum` at the visual for `seconds`, one 60Hz frame at a time --
+/// which is how the desktop shell feeds it, and how history actually
+/// accumulates.
+fn play(renderer: &mut OffscreenRenderer, spectrum: &Spectrum, seconds: f32) -> Vec<u8> {
+    let frames = (seconds / FRAME_SECONDS).round().max(1.0) as usize;
+    let mut pixels = Vec::new();
+    for _ in 0..frames {
+        pixels = renderer
+            .draw_to_pixels(&timed_frame(spectrum, FRAME_SECONDS))
+            .expect("a frame of the waterfall");
+    }
+    pixels
+}
+
+/// What only the spectrogram waterfall claims (Phase 3 M3).
+fn check_the_spectrogram_waterfall() {
+    println!(
+        "\n{} -- its own claims:",
+        VisualKind::SpectrogramWaterfall.name()
+    );
+
+    // Decision 21, and M2 decision 10's rule: nothing measured is nothing
+    // drawn. Not a flat floor stretching into the distance, which would be a
+    // picture of six seconds of silence that was never listened to.
+    let unmeasured = waterfall_renderer()
+        .draw_to_pixels(&frame(&tone(1000.0, 1.0)))
+        .expect("render audio with no spectrum");
+    let lit = measure_at(&unmeasured, FALL_WIDTH, FALL_HEIGHT).count;
+    check(
+        "audio with nothing measured yet draws nothing at all",
+        lit == 0,
+        format!("{lit} lit pixels"),
+    );
+
+    // The axis. Both tones go through the real analyser, and both visuals place
+    // their bands with `scale::slot_centre` -- so this is the same claim the
+    // bars make, checked against the same tones, in a scene with a different
+    // camera in front of it.
+    let low = tone(80.0, 1.0);
+    let low_spectrum = Spectrum::of(&low, 2);
+    let high = tone(6000.0, 1.0);
+    let high_spectrum = Spectrum::of(&high, 2);
+    let low_pixels = play(&mut waterfall_renderer(), &low_spectrum, 0.5);
+    let high_pixels = play(&mut waterfall_renderer(), &high_spectrum, 0.5);
+    let low_ridge = ridge(&low_pixels, FALL_WIDTH, FALL_HEIGHT).expect("a low tone draws a ridge");
+    let high_ridge =
+        ridge(&high_pixels, FALL_WIDTH, FALL_HEIGHT).expect("a high tone draws a ridge");
+    check(
+        "a tone raises a ridge on the side of the display its frequency belongs to",
+        low_ridge.centre_column < FALL_WIDTH as f32 / 2.0
+            && high_ridge.centre_column > FALL_WIDTH as f32 / 2.0,
+        format!(
+            "80Hz at x={:.0}, 6kHz at x={:.0}, of {FALL_WIDTH}",
+            low_ridge.centre_column, high_ridge.centre_column
+        ),
+    );
+
+    // And the two spectrum visuals agree about where a tone belongs.
+    //
+    // Not to the pixel, and not even in proportion: each scene is seen from its
+    // own three-quarter view, and an off-axis camera does not map world x to
+    // screen x linearly -- the far side of a display is compressed against the
+    // near side, by different amounts in two different scenes. What has to
+    // agree, and what a person actually reads, is the *order*: four tones an
+    // octave-and-a-bit apart have to march left to right in both, because both
+    // place a band with `scale::slot_centre` off the same measured axis.
+    let ladder = [80.0f32, 400.0, 2000.0, 6000.0];
+    let mut on_bars = Vec::new();
+    let mut on_waterfall = Vec::new();
+    for hz in ladder {
+        let samples = tone(hz, 1.0);
+        let spectrum = Spectrum::of(&samples, 2);
+        let bars_pixels = bars_renderer()
+            .draw_to_pixels(&full_frame(&samples, &spectrum))
+            .expect("the bars, one tone of the ladder");
+        on_bars.push(loud_peak_column(&bars_pixels, BARS_WIDTH, BARS_HEIGHT).expect("a bar"));
+        // The waterfall's newest measurement, at its near edge: one row of
+        // history draws the profile of that row and nothing else.
+        let fall_pixels = waterfall_renderer()
+            .draw_to_pixels(&timed_frame(&spectrum, FRAME_SECONDS))
+            .expect("the waterfall, one tone of the ladder");
+        on_waterfall
+            .push(loud_peak_column(&fall_pixels, FALL_WIDTH, FALL_HEIGHT).expect("a profile"));
+    }
+    let rising = |xs: &[f32]| xs.windows(2).all(|pair| pair[0] < pair[1]);
+    check(
+        "the bars and the waterfall put a rising set of tones in the same order",
+        rising(&on_bars) && rising(&on_waterfall),
+        format!(
+            "{ladder:?} Hz at {} on the bars and {} on the waterfall",
+            columns(&on_bars),
+            columns(&on_waterfall)
+        ),
+    );
+
+    // The claim no visual in this project could make before M3: what was played
+    // is still on screen after it stops. A second of tone, then a second of
+    // silence -- the ridge has to survive it, and to have moved away.
+    let silence = Spectrum::flat(-120.0);
+    let mut recording = waterfall_renderer();
+    let fresh = play(&mut recording, &low_spectrum, 1.0);
+    let fresh_ridge = ridge(&fresh, FALL_WIDTH, FALL_HEIGHT).expect("the tone draws");
+    let after = play(&mut recording, &silence, 1.0);
+    let aged = ridge(&after, FALL_WIDTH, FALL_HEIGHT);
+    check(
+        "a ridge outlives the sound that made it",
+        aged.is_some(),
+        match &aged {
+            Some(r) => format!("{} loud pixels a second after the tone stopped", r.count),
+            None => "nothing left a second after the tone stopped".into(),
+        },
+    );
+    let aged = aged.expect("a ridge a second later");
+    check(
+        "and has travelled away from the viewer",
+        aged.centre_row < fresh_ridge.centre_row,
+        format!(
+            "centre at row {:.0}, having been at row {:.0}",
+            aged.centre_row, fresh_ridge.centre_row
+        ),
+    );
+
+    // Decision 17: the history scrolls on a clock, so the same second of
+    // silence has to leave the ridge in the same place whether it arrived as
+    // sixty frames or as one. This is the check that would have caught a row
+    // per frame -- the mistake that scrolls at 60Hz on the desktop and at
+    // whatever the display does on the web.
+    let mut in_one_go = waterfall_renderer();
+    play(&mut in_one_go, &low_spectrum, 1.0);
+    let long_frame = in_one_go
+        .draw_to_pixels(&timed_frame(&silence, 1.0))
+        .expect("one long frame of silence");
+    let long_ridge = ridge(&long_frame, FALL_WIDTH, FALL_HEIGHT).expect("a ridge after one frame");
+    check(
+        "the history scrolls at the same rate whatever the frame rate",
+        (long_ridge.centre_row - aged.centre_row).abs() <= 2.0,
+        format!(
+            "centre at row {:.0} after one long frame against {:.0} after sixty short ones",
+            long_ridge.centre_row, aged.centre_row
+        ),
+    );
+
+    // The ring wraps rather than wrapping *around*: the tone is still there
+    // partway through the history and gone past the end of it, and it has not
+    // reappeared at the front, which is what an off-by-one in the ring's
+    // arithmetic would draw. Bracketed from both sides rather than checked
+    // against the constant, so the web half can make exactly this claim without
+    // being told the number.
+    let mut forgetting = waterfall_renderer();
+    play(&mut forgetting, &low_spectrum, 0.5);
+    let midway = play(&mut forgetting, &silence, 3.0);
+    let remembered = ridge(&midway, FALL_WIDTH, FALL_HEIGHT);
+    let later = play(&mut forgetting, &silence, 5.0);
+    let forgotten = ridge(&later, FALL_WIDTH, FALL_HEIGHT);
+    check(
+        "history is as long as it claims to be, and no longer",
+        remembered.is_some() && forgotten.is_none(),
+        format!(
+            "{} loud pixels 3s after the tone, {} at 8s ({HISTORY_SECONDS}s of history)",
+            remembered.map_or(0, |r| r.count),
+            forgotten.map_or(0, |r| r.count)
+        ),
+    );
+
+    // Decision 18: the texture holds dBFS as measured, and the display window
+    // and gain are applied when it is drawn. So turning gain up re-maps rows
+    // written long before the setting changed -- a frozen history, drawn twice
+    // at two gains, has to draw two different pictures. If the levels had been
+    // normalised on the way in, these two would be identical.
+    let quiet: Vec<f32> = tone(80.0, 1.0).iter().map(|s| s * 0.02).collect();
+    let quiet_spectrum = Spectrum::of(&quiet, 2);
+    let mut gained = waterfall_renderer();
+    play(&mut gained, &quiet_spectrum, 1.0);
+    let at_unity = gained
+        .draw_to_pixels(&timed_frame(&quiet_spectrum, 0.0))
+        .expect("the terrain at unity");
+    gained.set_gain(GainSetting::Fixed(4.0));
+    let at_four = gained
+        .draw_to_pixels(&timed_frame(&quiet_spectrum, 0.0))
+        .expect("the same terrain, magnified");
+    // Measured in loud material rather than in the terrain's silhouette: the
+    // surface covers its whole floor, so the topmost lit pixel is the far edge
+    // of the floor plane and stays where it is whatever the levels do.
+    let unity_loud = ridge(&at_unity, FALL_WIDTH, FALL_HEIGHT).map_or(0, |r| r.count);
+    let four_loud = ridge(&at_four, FALL_WIDTH, FALL_HEIGHT).map_or(0, |r| r.count);
+    check(
+        "display gain lifts the whole terrain, history included",
+        four_loud > unity_loud,
+        format!(
+            "{four_loud} loud pixels at x4 against {unity_loud} at unity, over a history that gained no rows"
+        ),
+    );
+    gained.set_gain(GainSetting::Fixed(1.0));
+
+    // Decision 21 again, at the other end: a feed that goes empty mid-session
+    // -- the web shell between tracks -- freezes the terrain rather than
+    // scrolling six seconds of real history out behind a wall of silence that
+    // was never measured.
+    let mut interrupted = waterfall_renderer();
+    play(&mut interrupted, &low_spectrum, 1.0);
+    let first = interrupted
+        .draw_to_pixels(&frame(&[]))
+        .expect("an empty feed after some history");
+    let second = interrupted.draw_to_pixels(&frame(&[])).expect("and again");
+    let held = measure_at(&first, FALL_WIDTH, FALL_HEIGHT).count;
+    check(
+        "a feed that stops holds the terrain still instead of scrolling",
+        first == second && held > 100,
+        format!(
+            "{} of {} bytes differ across two empty frames, over {held} lit pixels",
+            first.iter().zip(&second).filter(|(a, b)| a != b).count(),
+            first.len()
+        ),
+    );
+
+    // Decision 22: the one thing that does clear the history is the frequency
+    // axis moving under it, because rows measured against a different axis are
+    // not comparable to the ones replacing them. Thirty-two bands after
+    // sixty-four is a rebuild of the mesh and an empty terrain, not a panic and
+    // not a terrain half in each layout.
+    let mut relaid = waterfall_renderer();
+    play(&mut relaid, &low_spectrum, 1.0);
+    let narrow = Spectrum::rebanded(&low_spectrum, 32);
+    let relaid_pixels = relaid
+        .draw_to_pixels(&timed_frame(&narrow, FRAME_SECONDS))
+        .expect("a different band count");
+    let from_scratch = waterfall_renderer()
+        .draw_to_pixels(&timed_frame(&narrow, FRAME_SECONDS))
+        .expect("the same feed into a new renderer");
+    check(
+        "a change of band count starts the history again",
+        relaid_pixels == from_scratch,
+        format!(
+            "{} of {} bytes differ from a renderer that never saw the old axis",
+            relaid_pixels
+                .iter()
+                .zip(&from_scratch)
+                .filter(|(a, b)| a != b)
+                .count(),
+            from_scratch.len()
         ),
     );
 }
@@ -799,7 +1153,9 @@ Display gain:"
 }
 
 fn main() {
-    println!("offscreen: {WIDTH}x{HEIGHT}, {TRACE_SECONDS}s of history at {RATE} Hz");
+    println!(
+        "offscreen: {WIDTH}x{HEIGHT}, {RATE} Hz -- {TRACE_SECONDS}s of trace,          {HISTORY_SECONDS}s of spectrogram"
+    );
     println!(
         "gain: {}",
         GainSetting::ALL
@@ -823,6 +1179,7 @@ fn main() {
     }
     check_the_vectorscope();
     check_the_spectrum_bars();
+    check_the_spectrogram_waterfall();
     check_display_gain();
 
     let checks = CHECKS.load(Ordering::Relaxed);

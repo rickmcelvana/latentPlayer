@@ -33,6 +33,9 @@ pub use error::RenderError;
 pub use gain::GainSetting;
 pub use trace::{window_samples, TRACE_POINTS, TRACE_SECONDS};
 pub use visual::{BoxedVisual, Gpu, Visual, VisualFrame, VisualKind};
+// How long the waterfall remembers -- a figure both smokes report, the way
+// `TRACE_SECONDS` is reported for the vectorscope.
+pub use visuals::HISTORY_SECONDS;
 
 pub struct Renderer {
     surface: wgpu::Surface<'static>,

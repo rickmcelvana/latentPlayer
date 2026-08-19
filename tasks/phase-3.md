@@ -859,7 +859,7 @@ Two things this closes beyond the milestone itself:
 
 M3 (spectrogram waterfall) is next.
 
-## M3 -- Spectrogram waterfall: planned 2026-08-19
+## M3 -- Spectrogram waterfall: built 2026-08-19, awaiting the live look
 
 The spectrum's *history* as a scrolling 3D terrain: the same bands the bars
 draw, one row per moment, running away from the viewer. PLAN.md section 4's
@@ -1063,3 +1063,122 @@ rather than obviously.
 - **No compute shaders** (decision 16) -- M6's ground, checked there.
 - **No chromatic band layout** -- still M2 decision 14's deferred `player-core`
   work, and the waterfall inherits the deferral rather than reopening it.
+
+### What landed
+
+**The assertion held exactly.** Every file this milestone changed is inside
+`player-render` -- `visual.rs`'s registry, the new `visuals/waterfall.rs` and
+`waterfall.wgsl`, the extracted `visuals/scale.rs`, and its own smoke -- with one
+file outside it: `app/src/visualizerSmoke.ts`, which is the web *check*, not the
+web shell. No `src-tauri`, no `player-rt-wasm`, no UI, no command, no binding, no
+persisted setting, no new frame field, no new meter. Both galleries listed the
+third visual with nothing edited, for the second milestone running, which is
+what turns M1's seam from a claim into a property.
+
+**`visuals/waterfall.rs` + `waterfall.wgsl`.** The history is an `R32Float`
+texture, `MAX_BANDS` by `ROWS`, written one row at a time and read in the
+**vertex** shader with `textureLoad` -- so a frame costs one row and one integer
+(`head`), and there is no vertex buffer of heights to keep in step with it. The
+terrain's mesh is nothing but an index buffer: `vertex_index` *is* the grid
+position, band across and age down. Rows advance on a clock at 20 a second over
+120 rows, which is six seconds; the leftover time is carried, so sixty frames of
+a sixtieth move the history exactly as far as one frame of a whole second, and a
+machine resumed from sleep arrives at a new terrain in one frame rather than
+writing every row it slept through.
+
+**The near edge earns its own pipeline.** A skirt drops the newest row's profile
+to the floor, because a terrain without one is a sheet with a paper edge at the
+front. It also turned out to be why the *first* measurement of a session draws
+anything at all: a surface needs two rows before it has a triangle, and the
+skirt needs one.
+
+**`visuals/scale.rs`**, extracted the moment there was a second caller -- the
+same rule `camera::fit` moved under in M2. `RANGE_DB`, `MAX_BANDS`,
+`OCTAVE_C_HZ`, `slot_centre`, `normalise` and `gain_db` are now one axis for both
+spectrum visuals, with the bars' two display tests moved beside them and a third
+added: that the band arithmetic is centred and runs left to right, which is what
+makes "the same tone is in the same place in both" one function rather than two
+that agree today.
+
+### Four things found while building
+
+**The camera was inherited and was wrong.** The bars' three-quarter view (an eye
+0.6 to the left) came across with the rest of the scene, and in a scene with real
+depth it *skews the frequency axis*: the near-left corner is much closer than the
+near-right one, so the low end of the spectrum is compressed against the high
+end. Measured rather than felt -- an 80Hz tone landed at x=226 of 640 where a
+6kHz tone landed at 442, offsets of -94 and +122 from centre for two tones that
+should be roughly symmetric about it. Centring the camera made them -107 and
++101. This is the one thing here that no check would have caught, because every
+check would still have passed: the ridge was on the correct side, in the correct
+order, at the correct height. It was found by drawing the picture and looking at
+it.
+
+**The octave rails are invisible under a terrain.** The bars' marks lie on the
+floor and read between the bars; a terrain covers its own floor completely, so
+the same marks are hidden everywhere. They became a **ruler in front of the near
+edge** instead -- which is what a waterfall wants anyway -- and the overhang was
+measured up from 0.07 to 0.18 of the depth by counting rail-coloured pixels in a
+real frame until there were enough of them to read.
+
+**All three of the first failures were the checks, not the visual.** Worth
+recording together, because the pattern is the same one M2 hit and the cost of
+getting it wrong is a "fix" to working code:
+
+- *"the bars and the waterfall put the same tone in the same place"* is *false*,
+  and not because of a bug. Each scene has its own camera, and a perspective
+  camera does not map world x to screen x linearly, so the two displays cannot
+  agree on a pixel or even on a proportion. What they can agree on -- and what a
+  person switching between them actually reads -- is the **order**, so the check
+  became a ladder of four tones that must march left to right in both.
+- *"display gain lifts the terrain"* measured the topmost lit pixel, which on a
+  terrain is the far edge of the **floor** -- and no gain moves the floor. It
+  now counts loud material, over a history that gained no rows, which is the
+  claim decision 18 actually makes: the stored measurement is re-mapped, not the
+  new rows.
+- *"a change of band count clears the history"* asserted a pixel count under an
+  arbitrary threshold. It now asserts byte-equality with a renderer that never
+  saw the old axis, which is both stronger and self-evidently right.
+
+**A cleared texture is a wall of full scale.** Zero is 0 dBFS, so the empty
+history is written to a floor value at construction and on every clear rather
+than left zeroed. Named here because it is the kind of thing that would have
+drawn correctly for six seconds and then been blamed on the ring.
+
+### Verified
+
+**48/48** natively (`cargo run -p player-render --example visual_smoke`) and
+**54/54** in a real browser at `/visualizer.html` -- the same claims plus the
+extra ones only the web half can make. Every structural figure agrees to the
+pixel:
+
+| claim | native | web |
+| --- | --- | --- |
+| an 80Hz ridge / a 6kHz ridge at x= | 213 / 421 | 213 / 421 |
+| the four-tone ladder, on the waterfall | 207/295/377/433 | 207/295/377/432 |
+| the ridge's centre one second on, from | row 205, from 249 | row 205, from 249 |
+| the same second in sixty frames | row 205 | row 205 |
+| loud pixels at 3s / at 8s | 1984 / 0 | 1965 / 0 |
+| loud pixels at x4 / at unity | 3663 / 1487 | 3639 / 1479 |
+| a frozen terrain, twice | 0 bytes differ | 0 bytes differ |
+| after the axis moved, against a fresh renderer | 0 bytes differ | 0 bytes differ |
+
+The area figures differ by well under a percent (4067 against 4033 loud pixels)
+because they count anti-aliased edges either side of a colour threshold, and the
+two backends resolve multisampling their own way; every figure that is a
+*position* is identical.
+
+Also green: `cargo fmt --check`, `cargo clippy --workspace --all-targets -D
+warnings`, the full suite (**263 tests**, up from 258 -- eight new ones on the
+waterfall's fit, its time axis, the clock, the index prefix and the uniform, and
+one new on the shared band arithmetic), `npm run wasm`, `npx tsc -b`, `npm run
+build`.
+
+**What is not verified, and why**: how it looks with real music, on both shells.
+The pixel checks say the axis runs the right way, that history survives and
+recedes at the right rate, that it forgets on time and that gain re-maps what is
+already stored -- none of which is the same as it being good to watch. Two things
+to look for that no readback reaches: whether six seconds is the right amount of
+past, and whether the terrain stays legible on dense material or turns to fog. A
+waterfall fails gradually rather than obviously, which is the failure mode most
+worth a person's eye.

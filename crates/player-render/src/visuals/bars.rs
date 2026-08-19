@@ -10,11 +10,14 @@
 //! Three display decisions, each recorded in `tasks/phase-3.md` because each
 //! could reasonably have gone the other way:
 //!
-//! - the dB window is this visual's, not the meter's ([`RANGE_DB`], decision 13);
+//! - the dB window is this display's, not the meter's ([`RANGE_DB`], decision 13);
 //! - display gain is a decibel offset here rather than a multiplier ([`gain_db`],
 //!   decision 12);
 //! - the peak caps are display state, timed in seconds, not a new meter
 //!   ([`PEAK_FALL_DB_PER_SECOND`], decision 11).
+//!
+//! The first two moved to [`super::scale`] in M3, when the waterfall wanted
+//! them verbatim: one axis for both spectrum visuals, checked in one place.
 
 use wgpu::util::DeviceExt;
 
@@ -23,6 +26,8 @@ use crate::attachments::{
 };
 use crate::camera::{self, Mat4};
 use crate::visual::{Gpu, Visual, VisualFrame};
+
+use super::scale::{gain_db, normalise, slot_centre, MAX_BANDS, OCTAVE_C_HZ, RANGE_DB};
 
 /// Where the camera sits, looking at the middle of the row. Slightly left of
 /// centre and above, which is the classic three-quarter view of a bar chart:
@@ -60,14 +65,6 @@ const BAR_FILL: f32 = 0.72;
 /// it.
 const FILL: f32 = 0.9;
 
-/// The dB the bottom of the display means. **Not** `spectrum::FLOOR_DB`, which
-/// is -120 because that is where a *measurement* should stop; a bar drawn on a
-/// -120..0 axis spends more than half its height on material below the noise
-/// floor of any real source, so every bar looks tall and nothing reads
-/// (decision 13). The top is 0 dBFS: full scale fills the frame, exactly as it
-/// does for the vectorscope.
-const RANGE_DB: f32 = 72.0;
-
 /// How fast a peak cap falls, in dB per second.
 ///
 /// Slower than the analyser's own 30dB/s release (`player-core::spectrum`), and
@@ -80,17 +77,6 @@ const PEAK_FALL_DB_PER_SECOND: f32 = 12.0;
 
 /// How thick a cap is drawn, as a fraction of full scale.
 const CAP_THICKNESS: f32 = 0.014;
-
-/// The most bands this will draw. `analysis::BAND_COUNT` is 64 and the buffers
-/// are sized once at construction; this is the headroom, not an expectation.
-const MAX_BANDS: usize = 256;
-
-/// The C's, in Hz -- equal temperament, A4 = 440. The octave marks (decision
-/// 14): the reference an eye needs to read a log axis, placed by *frequency*
-/// through the frame's own band centres rather than by an assumed band layout.
-const OCTAVE_C_HZ: [f32; 10] = [
-    32.703, 65.406, 130.813, 261.626, 523.251, 1046.502, 2093.005, 4186.009, 8372.018, 16744.036,
-];
 
 /// The uniform, as the shader sees it.
 #[repr(C)]
@@ -545,37 +531,6 @@ impl Visual for SpectrumBars {
     }
 }
 
-/// Where a band's slot sits across the display, -0.5 to 0.5.
-///
-/// `index` is fractional so an octave mark can land between two bands, which is
-/// where most of them do: the C's are frequencies, and the bands are a display
-/// grid that has no reason to line up with them.
-fn slot_centre(index: f32, bands: usize) -> f32 {
-    (index + 0.5) / bands.max(1) as f32 - 0.5
-}
-
-/// A dBFS level as a height, 0 at [`RANGE_DB`] below full scale and 1 at it.
-fn normalise(level_db: f32, offset_db: f32) -> f32 {
-    if !level_db.is_finite() {
-        return 0.0;
-    }
-    ((level_db + offset_db) / RANGE_DB + 1.0).clamp(0.0, 1.0)
-}
-
-/// Display gain, as this visual applies it: **decibels** (decision 12).
-///
-/// `frame.gain` is an amplitude multiplier because the vectorscope draws
-/// amplitudes; a bar display is logarithmic, so x2 is +6dB here. Ignoring gain
-/// instead would leave one control doing something in one visual and nothing in
-/// the next, which is worse for a person than either behaviour alone.
-fn gain_db(gain: f32) -> f32 {
-    if gain.is_finite() && gain > 0.0 {
-        20.0 * gain.log10()
-    } else {
-        0.0
-    }
-}
-
 /// Indices in [`unit_box`]: six faces, two triangles each.
 const BOX_INDICES: u32 = 36;
 
@@ -785,38 +740,5 @@ mod tests {
             );
             assert!((slot_centre(0.0, bands) - half_bar) >= -0.5);
         }
-    }
-
-    #[test]
-    fn the_display_floor_is_the_visuals_own_and_not_the_meters() {
-        // Decision 13: -72dB is the bottom of the picture. A level at the
-        // meter's -120 floor draws no bar at all rather than a short one.
-        // `player-core::spectrum::FLOOR_DB`, which this display deliberately
-        // does not use as its own bottom.
-        assert_eq!(normalise(-120.0, 0.0), 0.0);
-        assert_eq!(normalise(-RANGE_DB, 0.0), 0.0);
-        assert_eq!(normalise(0.0, 0.0), 1.0);
-        // Halfway up the display is halfway down the range, which is what makes
-        // the axis readable rather than merely monotonic.
-        assert!((normalise(-RANGE_DB / 2.0, 0.0) - 0.5).abs() < 1e-6);
-        // Above full scale is still the top: a bar cannot leave the frame.
-        assert_eq!(normalise(6.0, 0.0), 1.0);
-    }
-
-    #[test]
-    fn display_gain_is_decibels_here() {
-        // Decision 12: the multiplier the vectorscope magnifies by is an
-        // offset on a logarithmic axis -- x2 is +6dB, x8 is +18dB.
-        assert!((gain_db(2.0) - 6.0206).abs() < 1e-3);
-        assert!((gain_db(8.0) - 18.0618).abs() < 1e-3);
-        assert_eq!(gain_db(1.0), 0.0);
-        // A gain of zero or worse is not a silent display, it is a bug
-        // upstream; unity is the safe reading of it.
-        assert_eq!(gain_db(0.0), 0.0);
-        assert_eq!(gain_db(f32::NAN), 0.0);
-        // And it moves the bars the way a person would expect.
-        let quiet = normalise(-24.0, 0.0);
-        let lifted = normalise(-24.0, gain_db(2.0));
-        assert!((lifted - quiet - 6.0206 / RANGE_DB).abs() < 1e-3);
     }
 }

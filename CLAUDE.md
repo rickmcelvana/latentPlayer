@@ -328,6 +328,44 @@ three-quarter camera, the -72dB window, the 12dB/s caps, the octave marks) are
 settled by observation rather than only by argument, and M3's waterfall inherits
 them as a starting point rather than as open questions.
 
+**Phase 3 M3 is built and awaiting the live look** (2026-08-19): the spectrogram
+waterfall, and the first visual that *keeps* anything. M2 grew the feed by two
+slices; M3 grew nothing -- the levels, their axis and the elapsed time were
+already there, so the whole milestone landed inside `player-render` (the registry,
+`visuals/waterfall.rs` + `waterfall.wgsl`, the extracted `visuals/scale.rs`) with
+one file outside it: the web *check*. No shell, no UI, no binding, no command, no
+new meter, and both galleries listed the third visual with nothing edited -- the
+second milestone running, which is what turns M1's seam from a claim into a
+property.
+The history is an **R32Float ring of rows read in the vertex shader**
+(`textureLoad`, no sampler, no vertex buffer of heights: `vertex_index` *is* the
+grid position), so a frame costs one row and one `head`. Rows advance on a
+**clock** -- 20 a second over 120 rows, six seconds -- never per frame, because
+the desktop redraws at 60Hz and a browser's animation callbacks run at whatever
+the display does; the leftover time is carried, so sixty frames of a sixtieth
+move the history exactly as far as one frame of a whole second. The texture holds
+**dBFS as measured**, with the -72..0 window and the display gain applied in the
+shader, so turning gain up re-maps rows written long before the setting changed
+rather than leaving a seam. A seek is drawn as the discontinuity it is: nothing
+resets the history, and the host was not asked for a signal that would.
+Two things came out of building it. The bars' three-quarter camera was inherited
+and was **wrong in a scene with depth** -- an off-axis eye compresses the low end
+of the spectrum against the high end, which measured as an 80Hz tone at -94px
+from centre against a 6kHz tone at +101px... and no check would ever have caught
+it, because the ridge was on the right side, in the right order, at the right
+height. It was found by drawing the picture and looking at it. And the octave
+marks are **invisible under a terrain** (a terrain covers its own floor), so they
+became a ruler in front of the near edge, lengthened until there were enough
+rail-coloured pixels in a real frame to read.
+Verified: **48/48** `cargo run -p player-render --example visual_smoke` and
+**54/54** at `/visualizer.html`, agreeing to the pixel on every figure that is a
+*position* (the ridge at x=213 and 421 on both, its centre at row 205 on both,
+zero bytes differing on both frozen-terrain checks) and to under a percent on the
+figures that count anti-aliased area; 263 tests, clippy and fmt clean on both
+targets. **What it waits on is a person watching it with real music on both
+shells** -- whether six seconds is the right amount of past, and whether the
+terrain stays legible on dense material rather than turning to fog.
+
 The certificate answer changed a finding into a fix: ureq defaults to
 webpki-roots, a bundle compiled into the binary, under which installing a
 self-hosted server's CA in the OS store does nothing -- so the obvious advice

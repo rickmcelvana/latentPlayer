@@ -128,8 +128,8 @@ impl<'a> VisualFrame<'a> {
     /// a linear interpolation between two centres an octave apart would put the
     /// midpoint a long way from where a person reading the display expects it.
     /// Lives here rather than in a visual because every visual that draws a
-    /// frequency landmark needs exactly this, and two of them are already
-    /// planned (the bars' octaves, the waterfall's).
+    /// frequency landmark needs exactly this, and two of them now use it (the
+    /// bars' octave marks, the waterfall's rails).
     pub fn band_position(&self, hz: f32) -> Option<f32> {
         let centres = self.band_centres;
         if centres.len() < 2 || !hz.is_finite() || hz <= 0.0 {
@@ -228,11 +228,18 @@ pub enum VisualKind {
     /// PLAN.md section 4's second built-in (Phase 3 M2): the metering
     /// spectrum's own bands as instanced 3D bars.
     SpectrumBars,
+    /// PLAN.md section 4's third built-in (Phase 3 M3): the same bands kept,
+    /// as a scrolling terrain -- the first visual with history of its own.
+    SpectrogramWaterfall,
 }
 
 impl VisualKind {
     /// Every visual, in the order the gallery offers them.
-    pub const ALL: &'static [VisualKind] = &[VisualKind::Vectorscope, VisualKind::SpectrumBars];
+    pub const ALL: &'static [VisualKind] = &[
+        VisualKind::Vectorscope,
+        VisualKind::SpectrumBars,
+        VisualKind::SpectrogramWaterfall,
+    ];
 
     /// What the gallery opens at for anyone who has never chosen.
     pub const DEFAULT: VisualKind = VisualKind::Vectorscope;
@@ -241,6 +248,7 @@ impl VisualKind {
         match self {
             VisualKind::Vectorscope => "vectorscope",
             VisualKind::SpectrumBars => "spectrum-bars",
+            VisualKind::SpectrogramWaterfall => "spectrogram-waterfall",
         }
     }
 
@@ -248,6 +256,7 @@ impl VisualKind {
         match self {
             VisualKind::Vectorscope => "3D vectorscope",
             VisualKind::SpectrumBars => "Spectrum bars",
+            VisualKind::SpectrogramWaterfall => "Spectrogram waterfall",
         }
     }
 
@@ -258,6 +267,9 @@ impl VisualKind {
             }
             VisualKind::SpectrumBars => {
                 "The analyser's own bands as 3D bars, with peaks that fall and the octaves marked."
+            }
+            VisualKind::SpectrogramWaterfall => {
+                "The last six seconds of the spectrum as a terrain, newest at the front."
             }
         }
     }
@@ -279,6 +291,9 @@ impl VisualKind {
             VisualKind::SpectrumBars => {
                 Box::new(crate::visuals::SpectrumBars::new(gpu, width, height))
             }
+            VisualKind::SpectrogramWaterfall => Box::new(
+                crate::visuals::SpectrogramWaterfall::new(gpu, width, height),
+            ),
         }
     }
 }

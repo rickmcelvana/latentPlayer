@@ -377,6 +377,307 @@ async function checkTheSpectrumBars(): Promise<void> {
   );
 }
 
+/// The waterfall is looked at in the same shape the bars are, and the same
+/// shape the native check uses -- so the two report comparable pixel figures.
+const FALL_WIDTH = 640;
+const FALL_HEIGHT = 360;
+
+/// A waterfall renderer with no history at all, on a canvas of its own.
+///
+/// The bars needed a fresh renderer because their caps outlive a frame; this
+/// needs one far more, since history is the whole visual.
+async function waterfallRenderer(): Promise<{
+  renderer: WasmRenderer;
+  surface: HTMLCanvasElement;
+}> {
+  const surface = extraCanvas(FALL_WIDTH, FALL_HEIGHT);
+  const renderer = await WasmRenderer.create(
+    surface,
+    surface.width,
+    surface.height,
+    "spectrogram-waterfall",
+  );
+  return { renderer, surface };
+}
+
+/// A pixel from the loud end of the colour ramp -- green-dominant, where the
+/// quiet end is violet.
+///
+/// How a ridge is found among the terrain it stands in. A brightness threshold
+/// could not: the whole surface is drawn, floor included, so "something is lit
+/// here" is true of every column.
+function isLoud(px: Uint8ClampedArray, i: number): boolean {
+  return px[i + 1] > 70 && px[i + 1] > px[i] + 25;
+}
+
+/// Where the loud material is: how much of it there is, and its centre of mass
+/// down and across the image.
+function ridge(
+  target: HTMLCanvasElement,
+): { count: number; centreRow: number; centreColumn: number } | null {
+  const px = pixels(target);
+  let count = 0;
+  let rows = 0;
+  let columns = 0;
+  for (let y = 0; y < target.height; y++) {
+    for (let x = 0; x < target.width; x++) {
+      const i = (y * target.width + x) * 4;
+      if (isLoud(px, i)) {
+        count++;
+        rows += y;
+        columns += x;
+      }
+    }
+  }
+  return count > 0 ? { count, centreRow: rows / count, centreColumn: columns / count } : null;
+}
+
+/// Where the loudest thing on a spectrum display is, across the image.
+///
+/// The topmost *loud* pixel rather than the topmost lit one, which is what
+/// makes this the one measurement both spectrum visuals can be asked for: the
+/// waterfall draws a floor and octave rails that reach further up the screen
+/// than any ridge does, being further away.
+function loudPeakColumn(target: HTMLCanvasElement): number | null {
+  const px = pixels(target);
+  for (let y = 0; y < target.height; y++) {
+    let count = 0;
+    let sum = 0;
+    for (let x = 0; x < target.width; x++) {
+      const i = (y * target.width + x) * 4;
+      if (isLoud(px, i)) {
+        count++;
+        sum += x;
+      }
+    }
+    if (count > 0) return sum / count;
+  }
+  return null;
+}
+
+/// A row of measured columns, for a check's own report.
+function columns(xs: number[]): string {
+  return xs.map((x) => x.toFixed(0)).join("/");
+}
+
+/// The same measurement against a different frequency axis -- every `step` band
+/// of it. What this shell's first play looks like from a visual's side
+/// (nothing, then sixty-four bands).
+function rebanded(source: SpectrumFeed, bands: number): SpectrumFeed {
+  const step = Math.max(1, Math.floor(source.levels.length / Math.max(1, bands)));
+  const levels: number[] = [];
+  const centres: number[] = [];
+  for (let i = 0; i < source.levels.length; i += step) {
+    levels.push(source.levels[i]);
+    centres.push(source.centres[i]);
+  }
+  return { levels: new Float32Array(levels), centres: new Float32Array(centres) };
+}
+
+/// Plays a spectrum at the visual for `seconds`, one 60Hz frame at a time --
+/// which is how this shell's animation callbacks feed it, and how history
+/// actually accumulates.
+function play(renderer: WasmRenderer, spectrum: SpectrumFeed, seconds: number): void {
+  const frames = Math.max(1, Math.round(seconds / FRAME_SECONDS));
+  for (let n = 0; n < frames; n++) {
+    renderer.draw_frame(
+      NO_SPECTRUM,
+      2,
+      RATE,
+      FRAME_SECONDS,
+      spectrum.levels,
+      spectrum.centres,
+    );
+  }
+}
+
+/// What only the spectrogram waterfall claims (Phase 3 M3) -- the same claims
+/// the native example makes, in the same order.
+async function checkTheSpectrogramWaterfall(): Promise<void> {
+  log("\nSpectrogram waterfall -- its own claims:");
+
+  // Decision 21, and M2 decision 10's rule: nothing measured is nothing drawn.
+  // Not a flat floor stretching into the distance, which would be a picture of
+  // six seconds of silence that was never listened to.
+  {
+    const { renderer, surface } = await waterfallRenderer();
+    renderer.draw_frame(tone(1000, 1), 2, RATE, FRAME_SECONDS, NO_SPECTRUM, NO_SPECTRUM);
+    check(
+      "audio with nothing measured yet draws nothing at all",
+      measure(surface).lit === 0,
+      `${measure(surface).lit} lit pixels`,
+    );
+  }
+
+  const low = tone(80, 1);
+  const lowSpectrum = spectrumOf(low, 2);
+  const high = tone(6000, 1);
+  const highSpectrum = spectrumOf(high, 2);
+
+  const lowShot = await waterfallRenderer();
+  play(lowShot.renderer, lowSpectrum, 0.5);
+  const lowRidge = ridge(lowShot.surface);
+  const highShot = await waterfallRenderer();
+  play(highShot.renderer, highSpectrum, 0.5);
+  const highRidge = ridge(highShot.surface);
+  check(
+    "a tone raises a ridge on the side of the display its frequency belongs to",
+    lowRidge !== null &&
+      highRidge !== null &&
+      lowRidge.centreColumn < FALL_WIDTH / 2 &&
+      highRidge.centreColumn > FALL_WIDTH / 2,
+    `80Hz at x=${lowRidge?.centreColumn.toFixed(0)}, 6kHz at x=${highRidge?.centreColumn.toFixed(0)}, of ${FALL_WIDTH}`,
+  );
+
+  // And the two spectrum visuals agree about where a tone belongs.
+  //
+  // Not to the pixel, and not even in proportion: each scene is seen from its
+  // own three-quarter view, and an off-axis camera does not map world x to
+  // screen x linearly. What has to agree, and what a person actually reads, is
+  // the *order* -- four tones have to march left to right in both, because both
+  // place a band with `scale::slot_centre` off the same measured axis.
+  const ladder = [80, 400, 2000, 6000];
+  const onBars: number[] = [];
+  const onWaterfall: number[] = [];
+  for (const hz of ladder) {
+    const samples = tone(hz, 1);
+    const spectrum = spectrumOf(samples, 2);
+    const bars = await barsRenderer();
+    bars.renderer.draw_frame(samples, 2, RATE, FRAME_SECONDS, spectrum.levels, spectrum.centres);
+    onBars.push(loudPeakColumn(bars.surface) ?? -1);
+    // The waterfall's newest measurement, at its near edge: one row of history
+    // draws the profile of that row and nothing else.
+    const fall = await waterfallRenderer();
+    fall.renderer.draw_frame(
+      NO_SPECTRUM,
+      2,
+      RATE,
+      FRAME_SECONDS,
+      spectrum.levels,
+      spectrum.centres,
+    );
+    onWaterfall.push(loudPeakColumn(fall.surface) ?? -1);
+  }
+  const rising = (xs: number[]) => xs.every((x, i) => i === 0 || xs[i - 1] < x);
+  check(
+    "the bars and the waterfall put a rising set of tones in the same order",
+    rising(onBars) && rising(onWaterfall),
+    `${ladder.join(", ")} Hz at ${columns(onBars)} on the bars and ${columns(onWaterfall)} on the waterfall`,
+  );
+
+  // The claim no visual in this project could make before M3: what was played
+  // is still on screen after it stops.
+  const silence = flatSpectrum(-120);
+  const recording = await waterfallRenderer();
+  play(recording.renderer, lowSpectrum, 1.0);
+  const freshRidge = ridge(recording.surface);
+  play(recording.renderer, silence, 1.0);
+  const aged = ridge(recording.surface);
+  check(
+    "a ridge outlives the sound that made it",
+    aged !== null,
+    aged === null
+      ? "nothing left a second after the tone stopped"
+      : `${aged.count} loud pixels a second after the tone stopped`,
+  );
+  check(
+    "and has travelled away from the viewer",
+    aged !== null && freshRidge !== null && aged.centreRow < freshRidge.centreRow,
+    `centre at row ${aged?.centreRow.toFixed(0)}, having been at row ${freshRidge?.centreRow.toFixed(0)}`,
+  );
+
+  // Decision 17: the history scrolls on a clock, so the same second of silence
+  // has to leave the ridge in the same place whether it arrived as sixty frames
+  // or as one. This is the check that would have caught a row per frame -- the
+  // mistake that scrolls at whatever this display's refresh rate happens to be.
+  const inOneGo = await waterfallRenderer();
+  play(inOneGo.renderer, lowSpectrum, 1.0);
+  inOneGo.renderer.draw_frame(NO_SPECTRUM, 2, RATE, 1.0, silence.levels, silence.centres);
+  const longFrame = ridge(inOneGo.surface);
+  check(
+    "the history scrolls at the same rate whatever the frame rate",
+    longFrame !== null && aged !== null && Math.abs(longFrame.centreRow - aged.centreRow) <= 2,
+    `centre at row ${longFrame?.centreRow.toFixed(0)} after one long frame against ${aged?.centreRow.toFixed(0)} after sixty short ones`,
+  );
+
+  // The ring wraps rather than wrapping *around*: the tone is still there
+  // partway through the history and gone past the end of it, and it has not
+  // reappeared at the front, which is what an off-by-one in the ring's
+  // arithmetic would draw.
+  const forgetting = await waterfallRenderer();
+  play(forgetting.renderer, lowSpectrum, 0.5);
+  play(forgetting.renderer, silence, 3.0);
+  const remembered = ridge(forgetting.surface);
+  play(forgetting.renderer, silence, 5.0);
+  const forgotten = ridge(forgetting.surface);
+  check(
+    "history is as long as it claims to be, and no longer",
+    remembered !== null && forgotten === null,
+    `${remembered?.count ?? 0} loud pixels 3s after the tone, ${forgotten?.count ?? 0} at 8s`,
+  );
+
+  // Decision 18: the texture holds dBFS as measured, and the display window and
+  // gain are applied when it is drawn. So turning gain up re-maps rows written
+  // long before the setting changed -- a frozen history, drawn twice at two
+  // gains, has to draw two different pictures. Had the levels been normalised
+  // on the way in, these two would be identical.
+  const quiet = tone(80, 1, 0.016);
+  const quietSpectrum = spectrumOf(quiet, 2);
+  const gained = await waterfallRenderer();
+  play(gained.renderer, quietSpectrum, 1.0);
+  gained.renderer.draw_frame(NO_SPECTRUM, 2, RATE, 0, quietSpectrum.levels, quietSpectrum.centres);
+  const unityLoud = ridge(gained.surface)?.count ?? 0;
+  gained.renderer.setGain("4");
+  gained.renderer.draw_frame(NO_SPECTRUM, 2, RATE, 0, quietSpectrum.levels, quietSpectrum.centres);
+  const fourLoud = ridge(gained.surface)?.count ?? 0;
+  gained.renderer.setGain("1");
+  check(
+    "display gain lifts the whole terrain, history included",
+    fourLoud > unityLoud,
+    `${fourLoud} loud pixels at x4 against ${unityLoud} at unity, over a history that gained no rows`,
+  );
+
+  // Decision 21 again, at the other end: a feed that goes empty mid-session --
+  // this shell between tracks -- freezes the terrain rather than scrolling six
+  // seconds of real history out behind a wall of silence nobody measured.
+  const interrupted = await waterfallRenderer();
+  play(interrupted.renderer, lowSpectrum, 1.0);
+  interrupted.renderer.draw_frame(NO_SPECTRUM, 2, RATE, FRAME_SECONDS, NO_SPECTRUM, NO_SPECTRUM);
+  const first = pixels(interrupted.surface);
+  interrupted.renderer.draw_frame(NO_SPECTRUM, 2, RATE, FRAME_SECONDS, NO_SPECTRUM, NO_SPECTRUM);
+  const second = pixels(interrupted.surface);
+  let differing = 0;
+  for (let i = 0; i < first.length; i++) if (first[i] !== second[i]) differing++;
+  const held = measure(interrupted.surface).lit;
+  check(
+    "a feed that stops holds the terrain still instead of scrolling",
+    differing === 0 && held > 100,
+    `${differing} of ${first.length} bytes differ across two empty frames, over ${held} lit pixels`,
+  );
+
+  // Decision 22: the one thing that does clear the history is the frequency
+  // axis moving under it, because rows measured against a different axis are
+  // not comparable to the ones replacing them. What it draws afterwards is what
+  // a renderer that never saw the old axis draws.
+  const relaid = await waterfallRenderer();
+  play(relaid.renderer, lowSpectrum, 1.0);
+  const narrow = rebanded(lowSpectrum, 32);
+  relaid.renderer.draw_frame(NO_SPECTRUM, 2, RATE, FRAME_SECONDS, narrow.levels, narrow.centres);
+  const relaidPixels = pixels(relaid.surface);
+  const scratch = await waterfallRenderer();
+  scratch.renderer.draw_frame(NO_SPECTRUM, 2, RATE, FRAME_SECONDS, narrow.levels, narrow.centres);
+  const scratchPixels = pixels(scratch.surface);
+  let apart = 0;
+  for (let i = 0; i < relaidPixels.length; i++) {
+    if (relaidPixels[i] !== scratchPixels[i]) apart++;
+  }
+  check(
+    "a change of band count starts the history again",
+    apart === 0,
+    `${apart} of ${relaidPixels.length} bytes differ from a renderer that never saw the old axis`,
+  );
+}
+
 /// The contract the *host* depends on, asked of every visual in the registry --
 /// the same four claims the native check makes, in the same order.
 async function checkTheHostContract(entry: VisualInfo): Promise<void> {
@@ -715,6 +1016,7 @@ async function run(): Promise<void> {
   }
   await checkTheVectorscope();
   await checkTheSpectrumBars();
+  await checkTheSpectrogramWaterfall();
   await checkDisplayGain();
 
   log(
