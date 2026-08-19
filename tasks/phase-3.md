@@ -858,3 +858,208 @@ Two things this closes beyond the milestone itself:
   smokes now report identical pixel figures where they used to differ by one.
 
 M3 (spectrogram waterfall) is next.
+
+## M3 -- Spectrogram waterfall: planned 2026-08-19
+
+The spectrum's *history* as a scrolling 3D terrain: the same bands the bars
+draw, one row per moment, running away from the viewer. PLAN.md section 4's
+third built-in, and the milestone that exercises the clause of the `Visual`
+contract M2 left alone -- **a visual that keeps something between frames, on the
+GPU**. M2's peak caps are internal state in the small (a handful of floats on
+the CPU, rebuilt into the instance buffer every frame anyway); the waterfall's
+history is state that would be absurd to rebuild per frame, which is the case
+the trait has never been asked to carry.
+
+M2's assertion was that the host survives a visual whose input is analysis, with
+one pre-authorised exception: the feed grew by two slices. **M3's assertion is
+stricter, because it has no exception to claim.** Everything the waterfall needs
+is already in `VisualFrame` -- the levels, their axis, and the elapsed time it
+scrolls by. So the whole milestone should land inside `player-render`: one new
+module, one new shader, one arm each in the registry's five matches, and two
+smokes. No new frame field, no new command, no new binding, no new UI control,
+no new persisted setting, no new meter, and no edit to either shell. If
+something outside the crate has to move, that is a finding about the host and it
+gets written down here rather than quietly absorbed.
+
+### Decisions
+
+**16. The history is a ring of rows in a GPU texture, and the scroll is a
+uniform.** A single `R32Float` texture, `MAX_BANDS` wide by `ROWS` tall, written
+one row at a time with `write_texture` and read in the *vertex* shader by
+`textureLoad`; a `head` index in the uniform says which row is newest, and
+advancing time therefore costs one integer, not a copy. The mesh is a static
+grid of `bands x ROWS` vertices whose height is the texel it loads.
+
+The alternatives, and why not: rebuilding a vertex or instance buffer of every
+cell each frame is CPU work proportional to the history, which defeats the point
+of keeping history at all; keeping the rows on the CPU and re-uploading the
+whole texture per frame is the same cost wearing a different hat; and a
+`textureSample` with a sampler would raise a filtering question the geometry
+does not have -- each vertex sits exactly on one texel, so `textureLoad` is both
+exact and cheaper. No compute shader: a ring written by the queue needs none,
+and M6 is where this workspace checks WebGPU compute on both shells (the phase's
+own risk list) rather than discovering it here.
+
+**17. Rows advance on a clock, never per frame.** `ROW_HZ` rows a second, `ROWS`
+of them: **30/s over 180 rows, six seconds of history**. The visual accumulates
+`frame.elapsed_seconds` and emits whole intervals, so the terrain scrolls at the
+same speed on both shells.
+
+This is not a refinement -- it is the difference between working and not. The
+desktop redraw thread sleeps 16ms; the web's is `requestAnimationFrame`, which
+runs at 120Hz on a high-refresh display and is throttled to a crawl when the tab
+is hidden. A row per frame would scroll twice as fast on one person's monitor as
+another's, and six seconds of history would mean three. It is the discipline the
+peak caps and the automatic gain's release are already held to (M2 decision 11),
+and it is what lets the smoke prove the scroll rate by drawing the same second
+as sixty short frames and as one long one.
+
+Catch-up is capped at `ROWS` intervals in a single frame: a gap longer than the
+history is a whole new terrain, and a laptop resumed after an hour should not
+loop a hundred thousand times to arrive there. The rows a stall does emit repeat
+the levels in hand, which draws the stall as the flat stretch it was.
+
+**18. The texture holds dBFS as measured; the display window and the gain are
+applied when it is drawn.** The row written is the analyser's own numbers. The
+mapping to height -- `RANGE_DB` below full scale at the floor, 0 dBFS at the
+top, plus display gain as a decibel offset (M2 decisions 12 and 13, unchanged
+and shared) -- happens in the vertex shader, against uniforms.
+
+The cheap way round is to normalise on the way in and store 0..1. It is wrong
+for one reason that shows immediately: turning display gain up would then shift
+only the rows written after the change, leaving a visible seam across a terrain
+that is supposed to be one continuous measurement. Storing what was measured
+also keeps the stored thing honest under decision 2 -- history is a record of
+the analysis, not of a display setting that happened to be in force.
+
+**19. The axes are the bars' axes, with time added.** Frequency runs left to
+right (the same camera side, for the same reason M2 gives), level is height,
+and time runs **into the screen with the newest row at the front**. Colour is
+the bars' violet-to-green ramp by level, and the octave marks carry over as
+rails running along the time axis, placed through `VisualFrame::band_position`
+exactly as the bars place theirs.
+
+None of that is decoration. A person switching from the bars to the waterfall
+should see the same picture with its past behind it, because it *is* the same
+array -- the gallery reading as one instrument with several faces rather than
+three demos that happen to ship together is worth more than any per-visual
+styling idea, and it costs nothing to decide now and something to retrofit
+later. It also gives the smoke a claim no single visual could make: the same
+tone lights the same x in both visuals.
+
+The one place the waterfall deliberately differs is the surface between bands.
+The bars are sixty-four separate solids because a bar chart's gaps are what make
+it readable; the terrain puts one vertex per band and lets the surface
+interpolate between centres, because a spectrogram is a continuous spectrum that
+was sampled, and drawing it as sixty-four walls would assert an edge at every
+band boundary that the analysis does not have.
+
+**20. Nothing resets the history, and the host is not asked for a signal that
+would.** A seek, a track change or a gapless hand-off puts a discontinuity in
+the terrain. That discontinuity is the truth about what was played, drawn.
+
+The alternative wants a new `VisualFrame` field meaning "the continuity broke",
+filled by both shells off the transport, so that one visual can clear a texture.
+That is host surface -- the thing M1 spent a milestone bounding -- bought for a
+cosmetic gain. The meters reset on a broken listen because a *measurement*
+across a seek is wrong (Phase 1 M5); a picture of the last six seconds of output
+across a seek is not wrong, it is a picture of a seek. If the live look says
+otherwise, it becomes a host feature at M5, which is adding frame fields anyway.
+
+**21. An empty feed freezes the terrain; it does not scroll silence into it.**
+Before any row exists, the waterfall draws nothing at all -- M2 decision 10's
+rule, and for its reason: an empty `levels` means *nothing has measured*, which
+is a different picture from silence. If the levels go empty mid-run (the web's
+shared buffer between tracks) the terrain holds still rather than pushing a wall
+of floor rows through six seconds of real history.
+
+Measured silence is not this case and does scroll: a track that ends leaves the
+analyser reporting its floor, the rows record that, and the gap between tracks
+becomes visible. That is the display doing its job.
+
+**22. The band count may change underneath it, and that is the one thing that
+does clear the history.** The texture is allocated once at `MAX_BANDS` (256, the
+bars' headroom, against `analysis::BAND_COUNT`'s 64) and only `levels.len()`
+columns are written and drawn; a change in that length rebuilds the grid mesh,
+the same `built_for` pattern the bars use. It also clears the rows, because rows
+measured against a different frequency axis are not comparable to the ones
+replacing them -- keeping them would draw two different spectra as one terrain.
+The web's first play (empty, then 64) is exactly this transition and is why it
+is designed rather than discovered.
+
+### Shape of the work
+
+- **`visuals/waterfall.rs` + `waterfall.wgsl`** -- the ring texture and its head
+  index, the grid mesh built for the current band count, the terrain pipeline
+  (indexed triangles, height and colour from `textureLoad`) and the rails
+  pipeline (lines, the bars' octave marks swept along time). Depth and 4x MSAA
+  from `attachments`, cleared to `attachments::background(format)`, shader
+  through `attachments::shader_source` so the colour conversion is the shared
+  one M2 landed.
+- **`VisualKind::SpectrogramWaterfall`** -- one arm each in `ALL`, `id`
+  (`"spectrogram-waterfall"`), `name`, `description` and `create`. Both shells'
+  galleries, commands, bindings and smokes pick it up with no edit. That
+  happened once already in M2; happening twice is what turns it from a
+  coincidence into a property of the design.
+- **`camera::fit`'s third caller.** The scene's hull is a fixed box -- `SPAN`
+  across, `HEIGHT` up, the history's depth back -- so the projection is derived
+  from the scene at every window shape, and there is no field of view to be
+  wrong in fullscreen. Nothing about the fit depends on the music or the band
+  count, exactly as the bars' does not.
+- **The scale, shared rather than copied.** `normalise`, `gain_db`, `RANGE_DB`
+  and `OCTAVE_C_HZ` are wanted verbatim by a second visual now. They move to one
+  place the moment the second copy would be a copy -- two visuals holding
+  private opinions about what -72 dBFS means is precisely the disagreement
+  `player-core` exists to prevent one crate up. Same move `camera::fit` was in
+  M2: extraction when there is a second caller, not before.
+- **Nothing outside `player-render`.** Named again because it is the assertion.
+
+### What "verified" has to mean here
+
+The host contract's five per-kind checks (empty feed, background, live feed,
+mid-run switch, resize) apply the moment the kind is registered. Then the
+waterfall's own claims, natively in `visual_smoke` and mirrored figure for
+figure at `/visualizer.html`:
+
+- a tone lights a ridge at the x its band belongs to -- and **at the same x the
+  bars light for the same tone**, which is the first check in this project that
+  holds two visuals to each other;
+- **the ridge is still there after the tone stops**, and has travelled a known
+  distance for a known elapsed time -- the history claim, and the only one that
+  could not have been made before this milestone;
+- that distance is the same when the second is drawn as sixty short frames and
+  as one long one (decision 17), which is the check that would have caught a row
+  per frame;
+- after more than the history's own length, the ridge is gone -- the ring wrapped
+  and did not wrap *around* into the front, which is the classic ring-buffer bug
+  and would draw as the past reappearing in the future;
+- turning display gain up moves the whole terrain, old rows included, with no
+  seam at the row where the setting changed (decision 18);
+- an empty feed draws nothing, and a feed that goes empty mid-run draws the same
+  pixels twice rather than scrolling (decision 21);
+- a band count that changes (32 to 64) rebuilds and clears without panicking
+  (decision 22);
+- the figure fills the frame and cannot clip, at the same eight window shapes
+  the vectorscope's and the bars' fits are pinned at.
+
+And the half no readback reaches: **a person watching it move with real music on
+both shells.** Two things to look for beyond "does it look good", because they
+are the ones the numbers cannot answer: whether six seconds is the right amount
+of past (long enough to see a phrase, short enough that the front is not
+crushed), and whether the terrain reads at a glance or turns to mush on dense
+material -- a waterfall's failure mode is a fog, and it fails that way gradually
+rather than obviously.
+
+### What this milestone will not do
+
+- **No settings** -- no scroll rate, history length, colour map or smoothing
+  control. M2 decision 15 stands: the host has no per-visual settings mechanism
+  and inventing one here would be designing M8's parameter system in a corner of
+  M3. The constants are chosen, written down with their reasons, and revised
+  after the live look if the look says so.
+- **No text or labels** -- the octave rails are geometry, as the bars' marks are.
+- **No new frame field, no shell edit, no new meter.** The assertion.
+- **No reset-on-seek plumbing** (decision 20).
+- **No compute shaders** (decision 16) -- M6's ground, checked there.
+- **No chromatic band layout** -- still M2 decision 14's deferred `player-core`
+  work, and the waterfall inherits the deferral rather than reopening it.
