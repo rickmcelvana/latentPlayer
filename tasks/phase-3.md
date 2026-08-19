@@ -1214,3 +1214,203 @@ needed the host to change: M2 grew the feed by two slices, M3 grew nothing at
 all, and neither touched a shell. M4 (oscilloscope tunnel) is next, and is the
 one that exercises the clause both spectrum visuals left alone -- camera motion,
 which M1 deliberately left to the visual.
+
+## M4 -- Oscilloscope tunnel: planned 2026-08-19
+
+PLAN.md section 4's "modern Winamp oscilloscope": the waveform swept along a
+camera path, drawn as a tube the eye travels down. The last of the three
+built-ins, and the one that exercises the clause of the `Visual` contract the
+other two left alone -- **a camera that moves**. M1 decided that the host owns
+the surface, the feed, selection and fullscreen and that a visual owns its
+scene; a camera is part of a scene, so it has always been the visual's, and
+nothing so far has taken the host up on it. The vectorscope, the bars and the
+waterfall all look *at* a fixed box from a fixed eye.
+
+This one is inside its scene, which turns two of this crate's habits upside
+down and is the reason the milestone is worth its own decisions rather than
+being "the vectorscope with a different cross-section".
+
+Its input is the vectorscope's: the same `VisualFrame::samples`, the same window
+the tap already hands over. So M3's assertion applies again and for the third
+time -- **nothing outside `player-render` should move**: no new frame field, no
+command, no binding, no UI, no persisted setting, no new meter. If that breaks,
+it is a finding about the host and it gets written down here.
+
+### Decisions
+
+**23. The tunnel keeps its own history, on M3's mechanism.** The feed is
+`TRACE_SECONDS` of audio -- 120ms, sized by `trace::window_samples`, which both
+shells ask their tap for. That is a fine ribbon and far too short a tube. So the
+tunnel keeps rings the way the waterfall keeps rows: a GPU-resident ring buffer,
+written one cross-section per clock tick, read in the vertex shader.
+
+The alternative -- asking the host for a longer window -- is precisely the change
+this milestone must not make. `TRACE_SECONDS` is the vectorscope's own design
+(an eighth note at 120bpm, long enough to have shape and short enough not to
+smear), both shells size their tap slice by it, and lengthening it for one
+visual would lengthen the ribbon for another and touch two shells to do it.
+History that belongs to one visual lives in that visual. M3 settled that.
+
+Which means the second caller has arrived for the mechanism itself -- a texture
+ring, a `head`, a clock with carried remainder, a clear on the axis changing. If
+the tunnel's use is the same shape as the waterfall's, it moves to
+`visuals/history.rs` under exactly the rule `camera::fit` and `visuals::scale`
+moved under: when there is a second caller, not before. If it turns out *not* to
+be the same shape -- a ring is a closed loop of amplitudes where a row is an open
+axis of levels -- then it does not move, and that is recorded rather than forced.
+
+**24. `camera::fit` is not used here, and the reason is the milestone.** The fit
+answers "how narrow a projection holds this hull at 90% of the frame" -- a
+question about a scene you look *at*, from outside it, with corners that can
+leave the frame. Inside a tube there are no corners and nothing to clip: the
+scene surrounds the eye, and the failure mode is the opposite one, seeing *past*
+the scene at the edges of a wide window.
+
+So the arithmetic inverts. The field of view is chosen, and the **scene is fitted
+to the camera**: the tube's radius, and how far ahead of the eye it extends, are
+derived so that the wall subtends more than the frame's half-diagonal at every
+aspect ratio this app can be given -- a 480px panel and a 21:9 fullscreen alike.
+That is the same promise M1's fit makes ("provably cannot clip at any window
+shape") turned inside out, and it is checkable the same way: as a claim about
+angles, in a unit test, and as a claim about pixels, in the smoke.
+
+**25. The path is a pure function of ring index.** Where the tunnel goes -- its
+bends -- is `path(index)`, evaluated for the geometry and evaluated again at a
+fractional index for the camera. Not stored per ring, and not integrated frame
+by frame.
+
+Two things follow, both of them the point. The camera and the tube **cannot
+disagree** about where the tunnel is, because there is one function and no state
+between them; an integrated camera would drift out through the wall after a few
+thousand frames of rounding. And the bends are attached to the *history* rather
+than to the clock, so a bend arrives when the audio that made it does and stays
+where it was: the tube is stable in the world rather than swimming.
+
+**26. The camera chases the present.** It sits a fixed distance behind the newest
+ring -- the whole history's length -- and advances at exactly the rate rings are
+created, so the picture is stable: new rings appear at the far end, the eye flies
+toward them, and old rings pass behind it and expire.
+
+Ahead is therefore *newer*, behind is older. The alternative reading (the newest
+ring at the eye, the past stretching away ahead) is the one the vectorscope and
+the waterfall use, and it fails here for a reason worth writing down: flying
+forward into it means flying into the past, and every ring the eye is about to
+reach is one it has already passed the moment it was drawn. Chasing the present
+is the reading that makes forward motion mean something.
+
+Speed is therefore not a free parameter. It is the ring rate times the ring
+spacing, in seconds, which is what makes the desktop's 60Hz redraw and a
+browser's animation callbacks fly at the same speed -- decision 17's discipline,
+inherited rather than restated.
+
+**27. Motion comes from time and from what is already measured.** The camera's
+forward speed is the clock; any sway or roll is a function of elapsed time and of
+quantities already in the frame. Nothing here detects anything.
+
+That is not modesty, it is decision 2 and the phase's own ordering. A tunnel that
+surges on a beat is a good idea and it needs a beat detector, which is M5's whole
+milestone -- cross-target, in `player-core`, checked against synthesized click
+tracks with known answers. Building half of one inside a visual to make the
+camera lurch would be M5 done badly, in the wrong crate, with no way for the
+studio side of the app to see the same number. M6's scenes are where these
+uniforms drive motion, and they get to do it with a beat that was actually
+measured.
+
+**28. The wall may never reach the axis.** A ring's radius is a base plus the
+waveform times display gain, clamped so it can never fall below a fraction of
+the base. Full scale at x8 would otherwise close the tube around the eye, which
+draws as a screenful of flat colour and reads as a bug.
+
+Display gain is an **amplitude multiplier** here, not a decibel offset: this
+visual draws samples, so it is the vectorscope's category (M2 decision 12 drew
+that line, and it holds because this is the other side of it). `scale::gain_db`
+is for the two spectrum displays and is not wanted here.
+
+**29. Mid drives the radius; side twists the ring.** The waveform mapped around
+the circle is the mid signal -- what both channels agree on -- and the side
+signal rotates each ring slightly as it is laid down, so a wide mix corkscrews
+and a mono one runs straight. The goniometer's own two quantities, which the
+vectorscope already draws as its axes, doing here what they mean.
+
+The alternative, left on the table deliberately: left around one half of the ring
+and right around the other, which is more literal and reads worse -- a mono
+signal would draw a mirror-symmetric tube and every stereo one an asymmetric
+lump, where the mid/side reading gives a shape that is *about* the stereo field
+rather than a picture of two channels stacked.
+
+**30. Nothing outside `player-render`.** Third milestone, same assertion. The
+feed already carries everything this visual reads.
+
+### Shape of the work
+
+- **`visuals/tunnel.rs` + `tunnel.wgsl`** -- the ring history, the path, the
+  camera that rides it, and the tube's mesh. As with the waterfall, the mesh is
+  an index buffer and `vertex_index` arithmetic: a vertex is (ring, angle), its
+  radius comes from the history texture, and its world position comes from
+  `path`. No vertex buffer of geometry, and one row of writes per tick.
+- **`VisualKind::OscilloscopeTunnel`** -- one arm each in `ALL`, `id`
+  (`"oscilloscope-tunnel"`), `name`, `description` and `create`. Both galleries
+  pick it up with no edit, for the third time.
+- **The path and the camera, in one place.** `path(index) -> point` plus its
+  tangent, with the camera a `look_at` from `path(now)` toward `path(now +
+  lead)`. This is the one piece of new *math* in the milestone, and it is pure,
+  so it is unit-testable without a GPU -- which is where most of its checks
+  belong.
+- **`visuals/history.rs`, if decision 23's second caller is real.** Decided by
+  building the tunnel's ring first and then looking at the two side by side, not
+  by predicting it here.
+- **Nothing else.** Named again because it is the assertion.
+
+### What "verified" has to mean here
+
+The host contract's five per-kind checks apply the moment the kind is registered.
+Then the tunnel's own claims, natively in `visual_smoke` and mirrored figure for
+figure at `/visualizer.html`:
+
+- **the eye is always inside the tube** -- the distance from `path(now)` to the
+  camera is zero by construction, but the *wall* is at a radius that the
+  waveform moves, so the real claim is decision 28's: at full scale, at every
+  gain setting, the smallest radius any ring can reach is still comfortably
+  outside the near plane. A unit test, in radii, over the whole range of inputs;
+- **the frame is enclosed** -- no background pixels at any of the eight window
+  shapes the other two visuals' fits are pinned at. This is decision 24's pixel
+  half, and it is the check that would catch a 21:9 fullscreen showing the
+  outside of the tube at the corners;
+- **a louder passage widens the tube's modulation**, monotonically, across three
+  amplitudes -- the tunnel's version of "taller means louder", and the check that
+  says the display is about the audio at all;
+- **the tunnel advances on a clock**: a second of travel drawn as sixty frames
+  and as one leaves the same ring at the same place, the check M3's rows already
+  answer for and which every timed visual now inherits;
+- **history forgets on time** -- a ring made by a burst is gone after the
+  tunnel's own length, bracketed from both sides the way M3's is, so neither
+  shell needs to be told the constant;
+- **an empty feed draws nothing**, and a feed that stops holds the tube still
+  rather than laying silent rings -- decision 21's rule, which is now the
+  house rule for a visual with history;
+- **the path is stable**: two renders of the same history at the same time are
+  byte-identical, and the camera at ring *n* is where the tube's ring *n* is
+  (decision 25, as arithmetic rather than as pixels).
+
+And the half no readback reaches: **a person watching it move with real music on
+both shells**, with two things to look for that the numbers cannot answer.
+Whether the speed and the bends are *comfortable* -- a tunnel is the first visual
+in this app that can make someone feel unwell, and the honest place to find that
+out is a person watching it, not a pixel count. And whether the waveform is still
+legible as a waveform once it is wrapped around a circle and flown through, or
+whether it reads as generic sci-fi motion with the music incidental to it.
+
+### What this milestone will not do
+
+- **No beat-reactive motion** (decision 27) -- M5 measures the beat, M6 drives
+  scenes with it.
+- **No new analysis, frame field, meter, command, binding or UI** (decision 30).
+- **No settings** -- speed, radius, bend and colour are chosen constants with
+  their reasons written down, revised after the live look if the look says so.
+  The host still has no per-visual settings mechanism and M4 is not the place to
+  invent one.
+- **No `camera::fit`** (decision 24), and no change to it: the two visuals that
+  use it are correct and this one asks a different question.
+- **No compute shaders and no particles** -- M6's ground, checked there.
+- **No second sample window** -- `TRACE_SECONDS` stays what the vectorscope made
+  it (decision 23).
