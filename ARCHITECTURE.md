@@ -227,6 +227,24 @@ crates/
                      is what the two spectrum visuals share -- the dB window, the
                      band arithmetic, the octaves -- extracted in M3 on the rule
                      `camera::fit` moved under: when there is a second caller.
+                     visuals/tunnel.rs is the fourth (Phase 3 M4): PLAN.md §4's
+                     oscilloscope tunnel, and the first visual whose **camera
+                     moves** -- the vectorscope's own sample window wrapped into
+                     rings, 60 a second over four seconds, laid along a path the
+                     eye flies down at the rate the rings arrive. Two of this
+                     crate's habits invert there. `camera::fit` is not used: it
+                     frames a scene seen from outside, and this one surrounds the
+                     eye, so the field of view is chosen and the *scene* is
+                     fitted to it (`encloses` -- the tube must be longer than
+                     `radius / tan(corner)`, checked as angles and as border
+                     pixels). And the path is a pure function of ring index
+                     evaluated in Rust for the camera *and* for the geometry, so
+                     the eye cannot drift out through the wall it is flying down.
+                     visuals/history.rs is the GPU ring both M3 and M4 keep their
+                     past in -- the texture, the head, and `RowClock`, the
+                     arithmetic that makes a 60Hz redraw thread and a 144Hz
+                     browser advance a history by the same amount. What a row
+                     *means* stays the visual's.
                      trace.rs turns a window of played audio into
                      points (x side, y mid -- the goniometer's axes -- and z
                      their age), camera.rs is the perspective/look-at math with

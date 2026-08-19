@@ -35,7 +35,7 @@ pub use trace::{window_samples, TRACE_POINTS, TRACE_SECONDS};
 pub use visual::{BoxedVisual, Gpu, Visual, VisualFrame, VisualKind};
 // How long the waterfall remembers -- a figure both smokes report, the way
 // `TRACE_SECONDS` is reported for the vectorscope.
-pub use visuals::HISTORY_SECONDS;
+pub use visuals::{HISTORY_SECONDS, TUNNEL_SECONDS};
 
 pub struct Renderer {
     surface: wgpu::Surface<'static>,

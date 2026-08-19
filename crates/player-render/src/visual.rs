@@ -231,6 +231,9 @@ pub enum VisualKind {
     /// PLAN.md section 4's third built-in (Phase 3 M3): the same bands kept,
     /// as a scrolling terrain -- the first visual with history of its own.
     SpectrogramWaterfall,
+    /// PLAN.md section 4's fourth built-in (Phase 3 M4): the waveform swept
+    /// along a path -- the first visual whose camera moves.
+    OscilloscopeTunnel,
 }
 
 impl VisualKind {
@@ -239,6 +242,7 @@ impl VisualKind {
         VisualKind::Vectorscope,
         VisualKind::SpectrumBars,
         VisualKind::SpectrogramWaterfall,
+        VisualKind::OscilloscopeTunnel,
     ];
 
     /// What the gallery opens at for anyone who has never chosen.
@@ -249,6 +253,7 @@ impl VisualKind {
             VisualKind::Vectorscope => "vectorscope",
             VisualKind::SpectrumBars => "spectrum-bars",
             VisualKind::SpectrogramWaterfall => "spectrogram-waterfall",
+            VisualKind::OscilloscopeTunnel => "oscilloscope-tunnel",
         }
     }
 
@@ -257,6 +262,7 @@ impl VisualKind {
             VisualKind::Vectorscope => "3D vectorscope",
             VisualKind::SpectrumBars => "Spectrum bars",
             VisualKind::SpectrogramWaterfall => "Spectrogram waterfall",
+            VisualKind::OscilloscopeTunnel => "Oscilloscope tunnel",
         }
     }
 
@@ -270,6 +276,9 @@ impl VisualKind {
             }
             VisualKind::SpectrogramWaterfall => {
                 "The last six seconds of the spectrum as a terrain, newest at the front."
+            }
+            VisualKind::OscilloscopeTunnel => {
+                "The waveform wrapped into rings and flown through, newest furthest ahead."
             }
         }
     }
@@ -294,6 +303,9 @@ impl VisualKind {
             VisualKind::SpectrogramWaterfall => Box::new(
                 crate::visuals::SpectrogramWaterfall::new(gpu, width, height),
             ),
+            VisualKind::OscilloscopeTunnel => {
+                Box::new(crate::visuals::OscilloscopeTunnel::new(gpu, width, height))
+            }
         }
     }
 }

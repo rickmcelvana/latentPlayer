@@ -678,6 +678,226 @@ async function checkTheSpectrogramWaterfall(): Promise<void> {
   );
 }
 
+/// The tunnel is looked at in the same shape the other two are, and the same
+/// shape the native check uses.
+const TUBE_WIDTH = 640;
+const TUBE_HEIGHT = 360;
+
+/// A tunnel renderer with no history at all, on a canvas of its own.
+async function tunnelRenderer(
+  width: number,
+  height: number,
+): Promise<{ renderer: WasmRenderer; surface: HTMLCanvasElement }> {
+  const surface = extraCanvas(width, height);
+  const renderer = await WasmRenderer.create(
+    surface,
+    surface.width,
+    surface.height,
+    "oscilloscope-tunnel",
+  );
+  return { renderer, surface };
+}
+
+/// Flies the tunnel for `seconds` on a 60Hz feed -- which is how this shell's
+/// animation callbacks feed it, and how the tube actually accumulates.
+function fly(renderer: WasmRenderer, samples: Float32Array, seconds: number): void {
+  const frames = Math.max(1, Math.round(seconds / FRAME_SECONDS));
+  for (let n = 0; n < frames; n++) {
+    renderer.draw_frame(samples, 2, RATE, FRAME_SECONDS, NO_SPECTRUM, NO_SPECTRUM);
+  }
+}
+
+/// Measured silence: samples that were played and were zero, which is a
+/// different thing from an empty window (nothing played at all) and has to draw
+/// differently -- rings at rest rather than no rings.
+function silence(): Float32Array {
+  return new Float32Array(tone(1, 1).length);
+}
+
+/// How many pixels in the frame's outer border are background rather than
+/// tunnel wall -- the pixel half of decision 24.
+///
+/// The border and not the whole image, deliberately: the middle of the frame is
+/// the opening at the far end of the tube, which fades to the background by
+/// design. What may never happen is seeing *past* the tube at the edges.
+function borderHoles(target: HTMLCanvasElement): number {
+  const px = pixels(target);
+  const band = Math.max(2, Math.floor(Math.min(target.width, target.height) / 16));
+  let holes = 0;
+  for (let y = 0; y < target.height; y++) {
+    for (let x = 0; x < target.width; x++) {
+      const edge =
+        x < band || y < band || x + band >= target.width || y + band >= target.height;
+      if (!edge) continue;
+      const i = (y * target.width + x) * 4;
+      if (!(px[i] > 40 || px[i + 1] > 40 || px[i + 2] > 40)) holes += 1;
+    }
+  }
+  return holes;
+}
+
+/// How far up the colour ramp the picture sits, on average: the mean amount by
+/// which green leads red across everything lit.
+///
+/// The tunnel's "how loud is this" measurement. Counting *loud* pixels cannot
+/// answer it at quiet levels -- a third of full scale lands halfway up a
+/// violet-to-green ramp, where neither colour is dominant -- and greenness is
+/// continuous where a threshold is a step.
+function rampPosition(target: HTMLCanvasElement): number {
+  const px = pixels(target);
+  let sum = 0;
+  let count = 0;
+  for (let i = 0; i < px.length; i += 4) {
+    if (px[i] > 40 || px[i + 1] > 40 || px[i + 2] > 40) {
+      sum += px[i + 1] - px[i];
+      count += 1;
+    }
+  }
+  return count === 0 ? 0 : sum / count;
+}
+
+/// What only the oscilloscope tunnel claims (Phase 3 M4) -- the same claims the
+/// native example makes, in the same order.
+async function checkTheOscilloscopeTunnel(): Promise<void> {
+  log("\nOscilloscope tunnel -- its own claims:");
+
+  // Nothing played is nothing drawn -- the vectorscope's answer to an empty
+  // window, which this visual reads the same feed as.
+  {
+    const { renderer, surface } = await tunnelRenderer(TUBE_WIDTH, TUBE_HEIGHT);
+    renderer.draw_frame(new Float32Array(0), 2, RATE, FRAME_SECONDS, NO_SPECTRUM, NO_SPECTRUM);
+    check(
+      "nothing played draws nothing at all",
+      measure(surface).lit === 0,
+      `${measure(surface).lit} lit pixels`,
+    );
+  }
+
+  // Decision 24, in pixels: the tube encloses the frame. A tube too short for a
+  // window's corners is the failure this catches, so it is asked at the same
+  // shapes the other three visuals' cameras are pinned at.
+  const signal = tone(220, 0.6);
+  const shapes: [number, number][] = [
+    [320, 320],
+    [480, 480],
+    [800, 600],
+    [1280, 720],
+    [1920, 1080],
+    [3440, 1440],
+    [600, 900],
+  ];
+  let worst = { holes: 0, shape: shapes[0] };
+  for (const shape of shapes) {
+    const { renderer, surface } = await tunnelRenderer(shape[0], shape[1]);
+    fly(renderer, signal, 0.2);
+    const holes = borderHoles(surface);
+    if (holes >= worst.holes) worst = { holes, shape };
+  }
+  check(
+    "the tube encloses the frame at every window shape",
+    worst.holes === 0,
+    `${worst.holes} background pixels in the border across ${shapes.length} shapes, worst at ${worst.shape[0]}x${worst.shape[1]}`,
+  );
+
+  // Level, which is what makes this a display of the audio rather than a
+  // screensaver: a louder passage pushes the wall further, and the colour ramp
+  // says so.
+  const levels: number[] = [];
+  for (const amplitude of [1.0, 0.3, 0.05]) {
+    const samples = tone(220, 0.6, 0.8 * amplitude);
+    const { renderer, surface } = await tunnelRenderer(TUBE_WIDTH, TUBE_HEIGHT);
+    fly(renderer, samples, 0.3);
+    levels.push(rampPosition(surface));
+  }
+  check(
+    "a louder passage pushes the wall further",
+    levels[0] > levels[1] && levels[1] > levels[2],
+    `${levels[0].toFixed(1)}, ${levels[1].toFixed(1)}, ${levels[2].toFixed(1)} up the colour ramp at full scale, a third and a twentieth`,
+  );
+
+  // Decision 17's discipline, inherited through the shared ring: the tunnel
+  // flies at the same speed whatever the frame rate -- which on this shell is
+  // whatever the display happens to run at.
+  const quiet = silence();
+  const stepwise = await tunnelRenderer(TUBE_WIDTH, TUBE_HEIGHT);
+  fly(stepwise.renderer, signal, 0.2);
+  fly(stepwise.renderer, quiet, 1.0);
+  const stepwiseRidge = ridge(stepwise.surface)?.centreRow ?? 0;
+  const oneGo = await tunnelRenderer(TUBE_WIDTH, TUBE_HEIGHT);
+  fly(oneGo.renderer, signal, 0.2);
+  oneGo.renderer.draw_frame(quiet, 2, RATE, 1.0, NO_SPECTRUM, NO_SPECTRUM);
+  const onceRidge = ridge(oneGo.surface)?.centreRow ?? 0;
+  check(
+    "the tunnel flies at the same speed whatever the frame rate",
+    Math.abs(stepwiseRidge - onceRidge) <= 2,
+    `the loud rings are centred on row ${onceRidge.toFixed(0)} after one long frame against ${stepwiseRidge.toFixed(0)} after sixty short ones`,
+  );
+
+  // The tube is exactly as long as it says: a burst is still in it partway
+  // along and gone past the end, and it has not reappeared at the near end,
+  // which is what an off-by-one in the ring would draw.
+  const passing = await tunnelRenderer(TUBE_WIDTH, TUBE_HEIGHT);
+  fly(passing.renderer, signal, 0.3);
+  fly(passing.renderer, quiet, 2.0);
+  const stillThere = ridge(passing.surface)?.count ?? 0;
+  fly(passing.renderer, quiet, 4.0);
+  const gone = ridge(passing.surface)?.count ?? 0;
+  check(
+    "the tunnel is as long as it says it is, and no longer",
+    stillThere > 0 && gone === 0,
+    `${stillThere} loud pixels 2s after the burst, ${gone} at 6s`,
+  );
+
+  // Decision 21's rule, the house rule for a visual with history: a feed that
+  // stops holds the tube still rather than flying on through rings nobody
+  // played.
+  const interrupted = await tunnelRenderer(TUBE_WIDTH, TUBE_HEIGHT);
+  fly(interrupted.renderer, signal, 0.5);
+  interrupted.renderer.draw_frame(
+    new Float32Array(0),
+    2,
+    RATE,
+    FRAME_SECONDS,
+    NO_SPECTRUM,
+    NO_SPECTRUM,
+  );
+  const first = pixels(interrupted.surface);
+  interrupted.renderer.draw_frame(
+    new Float32Array(0),
+    2,
+    RATE,
+    FRAME_SECONDS,
+    NO_SPECTRUM,
+    NO_SPECTRUM,
+  );
+  const second = pixels(interrupted.surface);
+  let differing = 0;
+  for (let i = 0; i < first.length; i++) if (first[i] !== second[i]) differing += 1;
+  const held = measure(interrupted.surface).lit;
+  check(
+    "a feed that stops holds the tunnel still instead of flying on",
+    differing === 0 && held > 100,
+    `${differing} of ${first.length} bytes differ across two empty frames, over ${held} lit pixels`,
+  );
+
+  // Decision 28: display gain is a multiplier here, and the clamp that keeps
+  // the wall off the eye survives it. At x8 on a full-scale signal the wall
+  // must push visibly further *and* still leave a tunnel to look down.
+  const gained = await tunnelRenderer(TUBE_WIDTH, TUBE_HEIGHT);
+  fly(gained.renderer, signal, 0.3);
+  const unityLoud = ridge(gained.surface)?.count ?? 0;
+  gained.renderer.setGain("8");
+  fly(gained.renderer, signal, 0.3);
+  const eightLoud = ridge(gained.surface)?.count ?? 0;
+  const downTheTunnel = TUBE_WIDTH * TUBE_HEIGHT - measure(gained.surface).lit;
+  gained.renderer.setGain("1");
+  check(
+    "gain widens the wall without closing the tube on the eye",
+    eightLoud > unityLoud && downTheTunnel > 0,
+    `${eightLoud} loud pixels at x8 against ${unityLoud} at unity, with ${downTheTunnel} of ${TUBE_WIDTH * TUBE_HEIGHT} pixels still down the tunnel`,
+  );
+}
+
 /// The contract the *host* depends on, asked of every visual in the registry --
 /// the same four claims the native check makes, in the same order.
 async function checkTheHostContract(entry: VisualInfo): Promise<void> {
@@ -717,18 +937,32 @@ async function checkTheHostContract(entry: VisualInfo): Promise<void> {
   drawSignal(renderer);
   const lit = measure(surface);
   check("audio draws something", lit.lit > 100, `${lit.lit} lit pixels`);
-  const fresh = pixels(surface);
 
   // A switch has to leave the renderer exactly as a fresh one would: the whole
   // of decision 5 is that swapping the scene changes nothing else, and the
   // failure this catches -- a pipeline or attachment left over from the
   // previous visual -- would look fine for the first visual and wrong for the
   // second.
+  //
+  // Both sides get a renderer that has drawn *nothing* before this frame, which
+  // matters from M3 onwards: a visual with history is not expected to draw the
+  // same picture after one frame as after three, so comparing against a
+  // renderer that has already been drawn to would be comparing two histories
+  // rather than two renderers.
   const other = extraCanvas(320, 320);
   const switched = await WasmRenderer.create(other, other.width, other.height, defaultVisual());
   switched.setVisual(entry.id);
   drawSignal(switched);
   const after = pixels(other);
+  const untouched = extraCanvas(320, 320);
+  const built = await WasmRenderer.create(
+    untouched,
+    untouched.width,
+    untouched.height,
+    entry.id,
+  );
+  drawSignal(built);
+  const fresh = pixels(untouched);
   let differing = 0;
   for (let i = 0; i < after.length; i++) if (after[i] !== fresh[i]) differing += 1;
   check(
@@ -1017,6 +1251,7 @@ async function run(): Promise<void> {
   await checkTheVectorscope();
   await checkTheSpectrumBars();
   await checkTheSpectrogramWaterfall();
+  await checkTheOscilloscopeTunnel();
   await checkDisplayGain();
 
   log(

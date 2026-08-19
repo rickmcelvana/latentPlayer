@@ -34,6 +34,7 @@ use crate::attachments::{
 use crate::camera::{self, Mat4};
 use crate::visual::{Gpu, Visual, VisualFrame};
 
+use super::history::RingHistory;
 use super::scale::{gain_db, slot_centre, MAX_BANDS, OCTAVE_C_HZ, RANGE_DB};
 
 /// Where the camera sits, looking at the middle of the terrain. Higher than the
@@ -75,9 +76,6 @@ const ROWS: usize = 120;
 /// recognise; the two constants above are how it is reached.
 pub const HISTORY_SECONDS: f32 = ROWS as f32 / ROW_HZ;
 
-/// Seconds between rows.
-const ROW_SECONDS: f32 = 1.0 / ROW_HZ;
-
 /// What an unwritten texel means: far below the display window, so a row that
 /// has never been measured lies flat on the floor rather than standing at full
 /// scale, which is what a zeroed texture would mean on a dBFS axis.
@@ -118,8 +116,10 @@ pub struct SpectrogramWaterfall {
     rail_pipeline: wgpu::RenderPipeline,
     scene_buffer: wgpu::Buffer,
     /// The history itself: dBFS, one texel per band per row, written one row at
-    /// a time and never read back (decision 16).
-    history: wgpu::Texture,
+    /// a time and never read back (decision 16). The ring and its clock moved to
+    /// [`RingHistory`] in M4, when the tunnel became the second visual to want
+    /// exactly them.
+    history: RingHistory,
     bind_group: wgpu::BindGroup,
     /// The terrain's triangles, in age order from the front, so that drawing
     /// only the rows that exist is a draw count rather than a second buffer.
@@ -128,19 +128,10 @@ pub struct SpectrogramWaterfall {
     rails: Vec<RailVertex>,
     msaa_view: wgpu::TextureView,
     depth_view: wgpu::TextureView,
-    /// One row of dBFS, reused: a row is written as the full texture width so
-    /// its size never depends on the band count.
-    row: Vec<f32>,
     /// How many bands the mesh and the history are currently for. Zero until
     /// something has been measured, which is also what makes an empty feed draw
     /// nothing at all.
     bands: usize,
-    /// Which texture row holds the newest measurement.
-    head: usize,
-    /// How many rows have been written since the last clear, capped at [`ROWS`].
-    filled: usize,
-    /// Time carried over towards the next row.
-    pending: f32,
     /// The band count and frequency axis the mesh and rails were built for.
     built_for: Option<(usize, f32, f32)>,
     width: u32,
@@ -170,21 +161,15 @@ impl SpectrogramWaterfall {
         // R32Float and `textureLoad`: the stored value is a dB figure, not a
         // colour, and nothing about it should be filtered, normalised or
         // clamped to 0..1 on the way through the GPU.
-        let history = device.create_texture(&wgpu::TextureDescriptor {
-            label: Some("waterfall-history"),
-            size: wgpu::Extent3d {
-                width: MAX_BANDS as u32,
-                height: ROWS as u32,
-                depth_or_array_layers: 1,
-            },
-            mip_level_count: 1,
-            sample_count: 1,
-            dimension: wgpu::TextureDimension::D2,
-            format: wgpu::TextureFormat::R32Float,
-            usage: wgpu::TextureUsages::TEXTURE_BINDING | wgpu::TextureUsages::COPY_DST,
-            view_formats: &[],
-        });
-        let history_view = history.create_view(&wgpu::TextureViewDescriptor::default());
+        let history = RingHistory::new(
+            device,
+            "waterfall-history",
+            wgpu::TextureFormat::R32Float,
+            MAX_BANDS,
+            ROWS,
+            ROW_HZ,
+            SILENT_DB,
+        );
 
         let bind_group_layout = device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
             label: Some("waterfall-layout"),
@@ -224,7 +209,7 @@ impl SpectrogramWaterfall {
                 },
                 wgpu::BindGroupEntry {
                     binding: 1,
-                    resource: wgpu::BindingResource::TextureView(&history_view),
+                    resource: wgpu::BindingResource::TextureView(history.view()),
                 },
             ],
         });
@@ -370,109 +355,31 @@ impl SpectrogramWaterfall {
             rails: Vec::with_capacity(OCTAVE_C_HZ.len() * 2),
             msaa_view,
             depth_view,
-            row: vec![SILENT_DB; MAX_BANDS],
             bands: 0,
-            head: ROWS - 1,
-            filled: 0,
-            pending: 0.0,
             built_for: None,
             width,
             height,
             srgb,
         };
-        visual.clear_history(queue);
+        visual.history.clear(queue);
         visual
     }
 
-    /// Empties the history.
-    ///
-    /// Every texel goes to [`SILENT_DB`], not to zero: zero *is* 0 dBFS, so a
-    /// cleared texture read as levels would be a wall of full scale rather than
-    /// an absence.
-    fn clear_history(&mut self, queue: &wgpu::Queue) {
-        let blank = vec![SILENT_DB; MAX_BANDS * ROWS];
-        queue.write_texture(
-            wgpu::TexelCopyTextureInfo {
-                texture: &self.history,
-                mip_level: 0,
-                origin: wgpu::Origin3d::ZERO,
-                aspect: wgpu::TextureAspect::All,
-            },
-            bytemuck::cast_slice(&blank),
-            wgpu::TexelCopyBufferLayout {
-                offset: 0,
-                bytes_per_row: Some((MAX_BANDS * 4) as u32),
-                rows_per_image: Some(ROWS as u32),
-            },
-            wgpu::Extent3d {
-                width: MAX_BANDS as u32,
-                height: ROWS as u32,
-                depth_or_array_layers: 1,
-            },
-        );
-        self.head = ROWS - 1;
-        self.filled = 0;
-        self.pending = 0.0;
-    }
-
-    /// Writes one measurement as the newest row.
-    ///
-    /// Always the full texture width, padded with [`SILENT_DB`] past the band
-    /// count: a row is then 1024 bytes however many bands there are, which is
-    /// both a multiple of the 256-byte alignment every copy rule in WebGPU
-    /// cares about and one less thing that changes when the band count does.
-    fn push_row(&mut self, queue: &wgpu::Queue, levels: &[f32], bands: usize) {
-        self.row.fill(SILENT_DB);
-        for (slot, level) in self.row[..bands].iter_mut().zip(levels) {
-            // A stored NaN would come out of `textureLoad` and into a clamp
-            // whose answer is nobody's business to rely on. The floor is the
-            // honest reading of a level that is not a number.
-            *slot = if level.is_finite() { *level } else { SILENT_DB };
-        }
-        self.head = (self.head + 1) % ROWS;
-        self.filled = (self.filled + 1).min(ROWS);
-        queue.write_texture(
-            wgpu::TexelCopyTextureInfo {
-                texture: &self.history,
-                mip_level: 0,
-                origin: wgpu::Origin3d {
-                    x: 0,
-                    y: self.head as u32,
-                    z: 0,
-                },
-                aspect: wgpu::TextureAspect::All,
-            },
-            bytemuck::cast_slice(&self.row),
-            wgpu::TexelCopyBufferLayout {
-                offset: 0,
-                bytes_per_row: Some((MAX_BANDS * 4) as u32),
-                rows_per_image: Some(1),
-            },
-            wgpu::Extent3d {
-                width: MAX_BANDS as u32,
-                height: 1,
-                depth_or_array_layers: 1,
-            },
-        );
-    }
-
     /// Moves the history on by however many whole rows this frame's elapsed
-    /// time is worth (decision 17).
+    /// time is worth (decision 17, now [`RingHistory`]'s own arithmetic).
     ///
     /// The first measurement of a session is written at once rather than up to
     /// a row's worth of time later: there is no history for it to be out of
     /// step with, and a visual that showed nothing for the first frames of
     /// playback would look broken rather than empty.
     fn advance(&mut self, queue: &wgpu::Queue, frame: &VisualFrame, bands: usize) {
-        if self.filled == 0 {
-            self.push_row(queue, frame.levels, bands);
-            self.pending = 0.0;
+        let row = &frame.levels[..bands];
+        if self.history.filled() == 0 {
+            self.history.push(queue, row);
             return;
         }
-        let (rows, rest) = rows_due(self.pending + frame.elapsed_seconds.max(0.0));
-        self.pending = rest;
-        for _ in 0..rows {
-            self.push_row(queue, frame.levels, bands);
+        for _ in 0..self.history.rows_due(frame.elapsed_seconds) {
+            self.history.push(queue, row);
         }
     }
 
@@ -501,7 +408,7 @@ impl SpectrogramWaterfall {
             self.bands = bands;
             self.index_buffer = Some(build_indices(gpu.device, bands));
         }
-        self.clear_history(gpu.queue);
+        self.history.clear(gpu.queue);
 
         self.rails.clear();
         for hz in OCTAVE_C_HZ {
@@ -570,7 +477,7 @@ impl Visual for SpectrogramWaterfall {
         // than scrolling silence into six seconds of real history. Nothing
         // advanced above, so this frame draws exactly what the last one did.
 
-        if self.filled > 0 {
+        if self.history.filled() > 0 {
             // Rewritten every frame rather than on change: `head` moves with
             // the history and `gain` moves with the setting, and a uniform this
             // size is cheaper to write than to reason about.
@@ -582,7 +489,7 @@ impl Visual for SpectrogramWaterfall {
                     self.height,
                     self.srgb,
                     self.bands,
-                    self.head,
+                    self.history.head(),
                     frame.gain,
                 )),
             );
@@ -618,7 +525,7 @@ impl Visual for SpectrogramWaterfall {
             // Nothing measured yet is nothing drawn -- not a flat floor, which
             // would be a picture of silence (decision 21, M2 decision 10's
             // rule).
-            if self.filled > 0 && self.bands >= 2 {
+            if self.history.filled() > 0 && self.bands >= 2 {
                 pass.set_bind_group(0, &self.bind_group, &[]);
                 if !self.rails.is_empty() {
                     pass.set_pipeline(&self.rail_pipeline);
@@ -630,11 +537,12 @@ impl Visual for SpectrogramWaterfall {
                 pass.set_pipeline(&self.skirt_pipeline);
                 pass.draw(0..(self.bands * 2) as u32, 0..1);
 
-                if let (Some(indices), true) = (self.index_buffer.as_ref(), self.filled >= 2) {
+                let filled = self.history.filled();
+                if let (Some(indices), true) = (self.index_buffer.as_ref(), filled >= 2) {
                     // The indices run in age order from the front, so the rows
                     // that exist are a prefix of them: how much history there
                     // is becomes a draw count rather than a second buffer.
-                    let count = ((self.filled - 1) * (self.bands - 1) * 6) as u32;
+                    let count = ((filled - 1) * (self.bands - 1) * 6) as u32;
                     pass.set_pipeline(&self.terrain_pipeline);
                     pass.set_index_buffer(indices.slice(..), wgpu::IndexFormat::Uint32);
                     pass.draw_indexed(0..count, 0, 0..1);
@@ -643,28 +551,6 @@ impl Visual for SpectrogramWaterfall {
         }
         encoder.finish()
     }
-}
-
-/// How many whole rows a run of seconds is worth, and what is left over
-/// towards the next one (decision 17).
-///
-/// The leftover is what makes this a clock rather than a frame counter: sixty
-/// frames of a sixtieth of a second have to move the history exactly as far as
-/// one frame of a whole second, or the terrain scrolls at the redraw rate --
-/// which is 60Hz on the desktop and whatever the display does on the web.
-///
-/// The cap is the other half. A gap longer than the history is a whole new
-/// terrain, and a machine resumed from sleep should arrive there in one frame
-/// rather than by writing every row it slept through.
-fn rows_due(pending: f32) -> (usize, f32) {
-    if !pending.is_finite() || pending < ROW_SECONDS {
-        return (0, pending.max(0.0));
-    }
-    let whole = (pending / ROW_SECONDS).floor();
-    (
-        whole.min(ROWS as f32) as usize,
-        pending - whole * ROW_SECONDS,
-    )
 }
 
 /// The terrain's triangles, in **age order from the front**.
@@ -850,35 +736,7 @@ mod tests {
     #[test]
     fn the_history_is_as_long_as_it_says_it_is() {
         assert!((HISTORY_SECONDS - 6.0).abs() < 1e-6);
-        assert!((ROWS as f32 * ROW_SECONDS - HISTORY_SECONDS).abs() < 1e-4);
-    }
-
-    #[test]
-    fn rows_advance_on_the_clock_and_not_on_frames() {
-        // Decision 17, as arithmetic. One long frame:
-        let (rows, rest) = rows_due(1.0);
-        assert_eq!(rows, ROW_HZ as usize);
-        assert!(rest.abs() < 1e-4, "a whole second left {rest} over");
-
-        // ...and the same second in sixty short ones, which is the difference
-        // between the two shells' redraw loops.
-        let (mut total, mut pending) = (0usize, 0.0f32);
-        for _ in 0..60 {
-            let (rows, rest) = rows_due(pending + 1.0 / 60.0);
-            total += rows;
-            pending = rest;
-        }
-        assert_eq!(total, ROW_HZ as usize, "sixty frames moved {total} rows");
-
-        // A frame shorter than a row moves nothing and keeps the remainder,
-        // which is what stops a fast display from rounding time away.
-        let (none, kept) = rows_due(ROW_SECONDS / 4.0);
-        assert_eq!(none, 0);
-        assert!((kept - ROW_SECONDS / 4.0).abs() < 1e-6);
-
-        // And a machine that was asleep arrives at a whole new terrain in one
-        // frame rather than writing every row it slept through.
-        assert_eq!(rows_due(600.0).0, ROWS);
+        assert!((ROWS as f32 / ROW_HZ - HISTORY_SECONDS).abs() < 1e-4);
     }
 
     #[test]

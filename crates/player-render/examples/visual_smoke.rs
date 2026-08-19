@@ -36,6 +36,7 @@ use std::sync::atomic::{AtomicUsize, Ordering};
 use player_core::analysis::{band_centres, Meters};
 use player_render::{
     GainSetting, OffscreenRenderer, VisualFrame, VisualKind, HISTORY_SECONDS, TRACE_SECONDS,
+    TUNNEL_SECONDS,
 };
 
 const WIDTH: u32 = 320;
@@ -749,6 +750,256 @@ fn check_the_spectrogram_waterfall() {
     );
 }
 
+/// The tunnel is looked at in the same shape the other two are, so the three
+/// report comparable pixel figures.
+const TUBE_WIDTH: u32 = 640;
+const TUBE_HEIGHT: u32 = 360;
+
+/// A tunnel renderer with no history at all. Every independent claim starts
+/// from an empty tube, for the reason the bars and the waterfall each needed
+/// their own: history is state, and state left over from the last shot is what
+/// the next one would end up measuring.
+fn tunnel_renderer(width: u32, height: u32) -> OffscreenRenderer {
+    pollster::block_on(OffscreenRenderer::new(
+        width,
+        height,
+        VisualKind::OscilloscopeTunnel,
+    ))
+    .expect("offscreen renderer for the tunnel")
+}
+
+/// Flies the tunnel for `seconds` on a 60Hz feed of `samples` -- which is how
+/// the desktop shell feeds it, and how the tube actually accumulates.
+fn fly(renderer: &mut OffscreenRenderer, samples: &[f32], seconds: f32) -> Vec<u8> {
+    let frames = (seconds / FRAME_SECONDS).round().max(1.0) as usize;
+    let mut pixels = Vec::new();
+    for _ in 0..frames {
+        pixels = renderer
+            .draw_to_pixels(&frame(samples))
+            .expect("a frame of the tunnel");
+    }
+    pixels
+}
+
+/// Measured silence: a window of samples that were played and were zero, which
+/// is a different thing from an empty window (nothing played at all) and has to
+/// draw differently -- rings at rest rather than no rings.
+fn silence() -> Vec<f32> {
+    vec![0.0; tone(1.0, 1.0).len()]
+}
+
+/// How many pixels in the frame's outer border are background rather than
+/// tunnel wall.
+///
+/// The pixel half of decision 24. Deliberately the border and not the whole
+/// image: the middle of the frame is the opening at the far end of the tube,
+/// which fades to the background *by design* (`tunnel.wgsl`'s fog) and is the
+/// one place a hole is not a hole. What may never happen is seeing past the
+/// tube at the edges, which is what a wide window would do to a tube too short
+/// for its corners.
+fn border_holes(pixels: &[u8], width: u32, height: u32) -> usize {
+    let band = (width.min(height) / 16).max(2);
+    let mut holes = 0;
+    for y in 0..height {
+        for x in 0..width {
+            let edge = x < band || y < band || x + band >= width || y + band >= height;
+            if !edge {
+                continue;
+            }
+            let i = ((y * width + x) * 4) as usize;
+            if !is_trace(&pixels[i..i + 4]) {
+                holes += 1;
+            }
+        }
+    }
+    holes
+}
+
+/// How far up the colour ramp the picture sits, on average: the mean amount by
+/// which green leads red across everything lit.
+///
+/// The tunnel's "how loud is this" measurement, and it exists because counting
+/// *loud* pixels cannot answer the question at quiet levels -- a third of full
+/// scale lands halfway up a violet-to-green ramp, where neither colour is
+/// dominant and a threshold reports nothing at all. Greenness is continuous
+/// where a threshold is a step, and the wall's displacement is what drives it.
+fn ramp_position(pixels: &[u8], width: u32, height: u32) -> f32 {
+    let (mut sum, mut count) = (0i64, 0usize);
+    for y in 0..height {
+        for x in 0..width {
+            let i = ((y * width + x) * 4) as usize;
+            if is_trace(&pixels[i..i + 4]) {
+                sum += pixels[i + 1] as i64 - pixels[i] as i64;
+                count += 1;
+            }
+        }
+    }
+    if count == 0 {
+        return 0.0;
+    }
+    sum as f32 / count as f32
+}
+
+/// What only the oscilloscope tunnel claims (Phase 3 M4).
+fn check_the_oscilloscope_tunnel() {
+    println!(
+        "\n{} -- its own claims:",
+        VisualKind::OscilloscopeTunnel.name()
+    );
+
+    // Nothing played is nothing drawn -- the vectorscope's answer to an empty
+    // window, which this visual reads the same feed as.
+    let unplayed = tunnel_renderer(TUBE_WIDTH, TUBE_HEIGHT)
+        .draw_to_pixels(&frame(&[]))
+        .expect("render an empty feed");
+    let lit = measure_at(&unplayed, TUBE_WIDTH, TUBE_HEIGHT).count;
+    check(
+        "nothing played draws nothing at all",
+        lit == 0,
+        format!("{lit} lit pixels"),
+    );
+
+    // Decision 24, in pixels: the tube encloses the frame. A short tube in a
+    // wide window is the failure this catches, so it is asked at the same eight
+    // shapes the other three visuals' cameras are pinned at.
+    let signal = tone(220.0, 0.6);
+    let shapes = [
+        (320, 320),
+        (480, 480),
+        (800, 600),
+        (1280, 720),
+        (1920, 1080),
+        (3440, 1440),
+        (600, 900),
+    ];
+    let mut worst = (0usize, shapes[0]);
+    for (width, height) in shapes {
+        let mut renderer = tunnel_renderer(width, height);
+        let pixels = fly(&mut renderer, &signal, 0.2);
+        let holes = border_holes(&pixels, width, height);
+        if holes >= worst.0 {
+            worst = (holes, (width, height));
+        }
+    }
+    check(
+        "the tube encloses the frame at every window shape",
+        worst.0 == 0,
+        format!(
+            "{} background pixels in the border across {} shapes, worst at {}x{}",
+            worst.0,
+            shapes.len(),
+            worst.1 .0,
+            worst.1 .1
+        ),
+    );
+
+    // Level, which is what makes this a display of the audio rather than a
+    // screensaver: a louder passage pushes the wall further, and the colour
+    // ramp says so.
+    let levels: Vec<f32> = [1.0f32, 0.3, 0.05]
+        .iter()
+        .map(|amplitude| {
+            let samples: Vec<f32> = tone(220.0, 0.6).iter().map(|s| s * amplitude).collect();
+            let mut renderer = tunnel_renderer(TUBE_WIDTH, TUBE_HEIGHT);
+            let pixels = fly(&mut renderer, &samples, 0.3);
+            ramp_position(&pixels, TUBE_WIDTH, TUBE_HEIGHT)
+        })
+        .collect();
+    check(
+        "a louder passage pushes the wall further",
+        levels[0] > levels[1] && levels[1] > levels[2],
+        format!(
+            "{:.1}, {:.1}, {:.1} up the colour ramp at full scale, a third and a twentieth",
+            levels[0], levels[1], levels[2]
+        ),
+    );
+
+    // Decision 17's discipline, inherited through `RingHistory`: the tunnel
+    // flies at the same speed whatever the frame rate. The same second of
+    // silence after the same burst has to leave the tube in the same place
+    // drawn as sixty frames or as one.
+    let quiet = silence();
+    let mut stepwise = tunnel_renderer(TUBE_WIDTH, TUBE_HEIGHT);
+    fly(&mut stepwise, &signal, 0.2);
+    let sixty = fly(&mut stepwise, &quiet, 1.0);
+    let mut one_go = tunnel_renderer(TUBE_WIDTH, TUBE_HEIGHT);
+    fly(&mut one_go, &signal, 0.2);
+    let mut long = frame(&quiet);
+    long.elapsed_seconds = 1.0;
+    let once = one_go
+        .draw_to_pixels(&long)
+        .expect("one long frame of flight");
+    let stepwise_ridge = ridge(&sixty, TUBE_WIDTH, TUBE_HEIGHT).map_or(0.0, |r| r.centre_row);
+    let once_ridge = ridge(&once, TUBE_WIDTH, TUBE_HEIGHT).map_or(0.0, |r| r.centre_row);
+    check(
+        "the tunnel flies at the same speed whatever the frame rate",
+        (stepwise_ridge - once_ridge).abs() <= 2.0,
+        format!(
+            "the loud rings are centred on row {once_ridge:.0} after one long frame against {stepwise_ridge:.0} after sixty short ones"
+        ),
+    );
+
+    // The tube is exactly as long as it says: a burst is still in it partway
+    // along and gone past the end, and it has not reappeared at the near end,
+    // which is what an off-by-one in the ring would draw. Bracketed from both
+    // sides rather than against the constant, so the web half can make the same
+    // claim without being told the number.
+    let mut passing = tunnel_renderer(TUBE_WIDTH, TUBE_HEIGHT);
+    fly(&mut passing, &signal, 0.3);
+    let midway = fly(&mut passing, &quiet, 2.0);
+    let still_there = ridge(&midway, TUBE_WIDTH, TUBE_HEIGHT).map_or(0, |r| r.count);
+    let later = fly(&mut passing, &quiet, 4.0);
+    let gone = ridge(&later, TUBE_WIDTH, TUBE_HEIGHT).map_or(0, |r| r.count);
+    check(
+        "the tunnel is as long as it says it is, and no longer",
+        still_there > 0 && gone == 0,
+        format!("{still_there} loud pixels 2s after the burst, {gone} at 6s"),
+    );
+
+    // Decision 21's rule, which is now the house rule for a visual with
+    // history: a feed that stops holds the tube still rather than flying on
+    // through rings nobody played.
+    let mut interrupted = tunnel_renderer(TUBE_WIDTH, TUBE_HEIGHT);
+    fly(&mut interrupted, &signal, 0.5);
+    let first = interrupted
+        .draw_to_pixels(&frame(&[]))
+        .expect("an empty feed after some flight");
+    let second = interrupted.draw_to_pixels(&frame(&[])).expect("and again");
+    let held = measure_at(&first, TUBE_WIDTH, TUBE_HEIGHT).count;
+    check(
+        "a feed that stops holds the tunnel still instead of flying on",
+        first == second && held > 100,
+        format!(
+            "{} of {} bytes differ across two empty frames, over {held} lit pixels",
+            first.iter().zip(&second).filter(|(a, b)| a != b).count(),
+            first.len()
+        ),
+    );
+
+    // Decision 28: display gain is a multiplier here, and the clamp that keeps
+    // the wall off the eye survives it. At x8 on a full-scale signal the wall
+    // must push visibly further *and* still leave a tunnel to look down --
+    // a closed tube is a screenful of flat colour, which reads as a bug.
+    let loud = tone(220.0, 0.6);
+    let mut gained = tunnel_renderer(TUBE_WIDTH, TUBE_HEIGHT);
+    let unity = fly(&mut gained, &loud, 0.3);
+    let unity_loud = ridge(&unity, TUBE_WIDTH, TUBE_HEIGHT).map_or(0, |r| r.count);
+    gained.set_gain(GainSetting::Fixed(8.0));
+    let eight = fly(&mut gained, &loud, 0.3);
+    let eight_loud = ridge(&eight, TUBE_WIDTH, TUBE_HEIGHT).map_or(0, |r| r.count);
+    let opening = measure_at(&eight, TUBE_WIDTH, TUBE_HEIGHT);
+    check(
+        "gain widens the wall without closing the tube on the eye",
+        eight_loud > unity_loud && opening.count < (TUBE_WIDTH * TUBE_HEIGHT) as usize,
+        format!(
+            "{eight_loud} loud pixels at x8 against {unity_loud} at unity, with {} of {} pixels still down the tunnel",
+            (TUBE_WIDTH * TUBE_HEIGHT) as usize - opening.count,
+            TUBE_WIDTH * TUBE_HEIGHT
+        ),
+    );
+    gained.set_gain(GainSetting::Fixed(1.0));
+}
+
 /// The contract the *host* depends on, asked of every registered visual.
 ///
 /// Deliberately weak about what a visual draws -- that is the visual's own
@@ -813,6 +1064,12 @@ fn check_the_host_contract(kind: VisualKind) {
     // the failure this catches -- a pipeline or attachment left over from the
     // previous visual -- would look fine for the first visual and wrong for
     // the second.
+    //
+    // Both sides get a renderer that has drawn *nothing* before this frame,
+    // which matters from M3 onwards: a visual with history is not expected to
+    // draw the same picture after one frame as after three, so comparing a
+    // switched renderer against one that has already been drawn to would be
+    // comparing two histories rather than two renderers.
     let mut switched =
         pollster::block_on(OffscreenRenderer::new(WIDTH, HEIGHT, VisualKind::DEFAULT))
             .expect("offscreen renderer to switch");
@@ -820,7 +1077,8 @@ fn check_the_host_contract(kind: VisualKind) {
     let after = switched
         .draw_to_pixels(&full_frame(&signal, &spectrum))
         .expect("render after a switch");
-    let fresh = renderer
+    let fresh = pollster::block_on(OffscreenRenderer::new(WIDTH, HEIGHT, kind))
+        .expect("offscreen renderer built as this kind")
         .draw_to_pixels(&full_frame(&signal, &spectrum))
         .expect("render without a switch");
     check(
@@ -1154,7 +1412,7 @@ Display gain:"
 
 fn main() {
     println!(
-        "offscreen: {WIDTH}x{HEIGHT}, {RATE} Hz -- {TRACE_SECONDS}s of trace,          {HISTORY_SECONDS}s of spectrogram"
+        "offscreen: {WIDTH}x{HEIGHT}, {RATE} Hz -- {TRACE_SECONDS}s of trace,          {HISTORY_SECONDS}s of spectrogram, {TUNNEL_SECONDS}s of tunnel"
     );
     println!(
         "gain: {}",
@@ -1180,6 +1438,7 @@ fn main() {
     check_the_vectorscope();
     check_the_spectrum_bars();
     check_the_spectrogram_waterfall();
+    check_the_oscilloscope_tunnel();
     check_display_gain();
 
     let checks = CHECKS.load(Ordering::Relaxed);

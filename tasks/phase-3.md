@@ -1215,7 +1215,7 @@ all, and neither touched a shell. M4 (oscilloscope tunnel) is next, and is the
 one that exercises the clause both spectrum visuals left alone -- camera motion,
 which M1 deliberately left to the visual.
 
-## M4 -- Oscilloscope tunnel: planned 2026-08-19
+## M4 -- Oscilloscope tunnel: built 2026-08-19, awaiting the live look
 
 PLAN.md section 4's "modern Winamp oscilloscope": the waveform swept along a
 camera path, drawn as a tube the eye travels down. The last of the three
@@ -1414,3 +1414,112 @@ whether it reads as generic sci-fi motion with the music incidental to it.
 - **No compute shaders and no particles** -- M6's ground, checked there.
 - **No second sample window** -- `TRACE_SECONDS` stays what the vectorscope made
   it (decision 23).
+
+### What landed
+
+**The assertion held for the third time.** Everything is inside `player-render`
+-- the registry, `visuals/tunnel.rs` + `tunnel.wgsl`, the extracted
+`visuals/history.rs` -- with one file outside it: `app/src/visualizerSmoke.ts`,
+the web *check* rather than the web shell. No `src-tauri`, no `player-rt-wasm`,
+no UI, no command, no new frame field, no new meter. Both galleries list the
+fourth visual with nothing edited.
+
+**`visuals/tunnel.rs` + `tunnel.wgsl`.** Rings of the waveform, 60 a second over
+240 rings -- four seconds of tube -- laid along a curve the eye flies down at
+3.6 units a second, which is `RING_HZ * RING_SPACING` rather than a dial of its
+own. A ring is the tap's whole 120ms window wrapped into a circle and decimated
+to 96 points, so two consecutive rings share most of their shape and the overlap
+is what draws the ridges running along the tube. Mid displaces the wall, side
+twists each point around its ring.
+
+**`visuals/history.rs`, the extraction decision 23 held open.** It was real: the
+tunnel wanted the waterfall's ring buffer exactly, so `RingHistory` now owns the
+texture, the head, the clear and the `fill`, and `RowClock` owns the arithmetic
+that makes a 60Hz redraw thread and a 144Hz browser draw the same history. The
+waterfall moved onto it with all 48 of its checks unchanged, which is what makes
+this an extraction rather than a rewrite. What a row *means* stayed with each
+visual, which is the line that made the extraction safe: dBFS per band in one,
+`[mid, side]` per point in the other.
+
+**The camera, and what it is not.** `camera::fit` is untouched and unused here.
+The tube's enclosure is a different claim with different arithmetic
+(`encloses`): inside a straight tube a ray at angle `theta` from the axis meets
+the wall at `radius / tan(theta)`, so the corners are wall as long as the tube is
+longer than `radius / tan(corner)` -- and the *middle* is the opening, by design,
+fading to the background rather than showing a hole. A wide window is the easy
+case; a tall one is the hard one. That is checked as angles in a unit test, as a
+`debug_assert` where the projection is built, and as border pixels at seven
+window shapes in both smokes.
+
+### Four things found while building
+
+**The field of view was the surprise, not the path.** Inside a tube the field of
+view decides how much of the *near* wall is in frame, and at this crate's usual
+60 degrees the near wall sits outside the frustum entirely: what is left is the
+far half of the tunnel, which is small, slow and fogged, and reads as a gradient
+with a hole in it. 80 degrees now, chosen by drawing it and looking -- the same
+way M3's camera was.
+
+**A tube can bend out of its own sight.** The first path constants curved the
+tunnel by about a radius every hundred rings, which hides the far end behind the
+near wall: there is then no tunnel to look down, only a lit surface sliding past.
+So the cycle counts are a *curvature budget* rather than a taste, and they are
+written down as one. Also found by looking, and also invisible to every check --
+the enclosure check in particular was perfectly happy, because a tube that has
+bent out of sight encloses the frame beautifully.
+
+**Two rings of tunnel draw nothing at all.** A waterfall seen from the front
+shows its newest row immediately, which is why M3's skirt was enough. A tube is
+seen *end-on*: two rings of it are a hoop six hundredths of a unit long, subtending
+a ring of angles far outside the field of view. Either the first measurement
+fills the whole ring buffer or there are four seconds of black after pressing
+play. It fills it, and the opening shape is that first measurement repeated --
+replaced ring by ring as real history arrives.
+
+**The host contract's switch check was comparing two histories.** It rendered a
+switched-into visual against a renderer that had already drawn twice, which was
+fine for three stateless-enough visuals and wrong the moment a visual's picture
+depends on how many frames it has seen. It passed for the waterfall only because
+that visual's clock is slower than the frame rate, so the extra frames pushed no
+rows -- luck, not design. Both sides now start from a renderer that has drawn
+nothing, on both shells. The check still catches what it was written for: a
+pipeline or attachment left over from the previous visual.
+
+One decision was refined by building it. Decision 29 said the side signal
+"rotates each ring as it is laid down"; the built version twists each *point* by
+the side sample at that point. A per-ring twist would have been a statistic over
+the window -- a measurement -- and decision 2 says a visual does not measure. Per
+sample it is a geometric transform, exactly like the goniometer's own axes.
+
+### Verified
+
+**60/60** natively (`cargo run -p player-render --example visual_smoke`) and
+**67/67** in a real browser at `/visualizer.html`:
+
+| claim | native | web |
+| --- | --- | --- |
+| up the colour ramp at full scale / a third / a twentieth | 19.5 / -18.0 / -32.7 | 19.4 / -18.0 / -32.6 |
+| the loud rings' centre after a second, in one frame / in sixty | row 210 / 210 | row 211 / 211 |
+| loud pixels 2s after a burst / at 6s | 78514 / 0 | 78232 / 0 |
+| loud pixels at x8 / at unity | 214216 / 78134 | 213976 / 77808 |
+| pixels still down the tunnel at x8 | 1163 | 1256 |
+| background pixels in the border, across seven window shapes | 0 | 0 |
+| two frames of a stopped feed | 0 bytes differ | 0 bytes differ |
+
+The figures that are *positions* agree to a pixel; the ones that count
+anti-aliased area agree to well under a percent, for the reason M3's did -- two
+backends resolving multisampling their own way, either side of a colour
+threshold.
+
+Also green: `cargo fmt --check`, `cargo clippy --workspace --all-targets -D
+warnings`, the full suite (**276 tests**, up from 263 -- eight on the tunnel's
+enclosure, path, ring arithmetic and gain, three on the shared clock, and the
+waterfall's own unchanged), `npm run wasm`, `npx tsc -b`, `npm run build`.
+
+**What is not verified, and why**: how it *feels*. This is the first visual in
+the app that can make a person unwell, and the speed (3.6 units a second), the
+bend rate and the field of view are all comfort judgements that no readback
+reaches. The other open question is whether the waveform still reads as a
+waveform once it is wrapped around a circle and flown through, or whether it
+becomes generic motion with the music incidental to it. Both are for a person
+watching it with real music on both shells.

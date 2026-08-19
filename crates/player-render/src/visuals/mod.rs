@@ -8,10 +8,13 @@
 //! one line of registry rather than a change to either shell.
 
 mod bars;
+mod history;
 mod scale;
+mod tunnel;
 mod vectorscope;
 mod waterfall;
 
 pub use bars::SpectrumBars;
+pub use tunnel::{OscilloscopeTunnel, TUNNEL_SECONDS};
 pub use vectorscope::Vectorscope;
 pub use waterfall::{SpectrogramWaterfall, HISTORY_SECONDS};

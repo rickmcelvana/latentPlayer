@@ -372,6 +372,49 @@ only prove it arithmetically. The centred camera -- the change this milestone
 made by looking at the picture rather than by failing a check -- is confirmed on
 real music too.
 
+**Phase 3 M4 is built and awaiting the live look** (2026-08-19): the oscilloscope
+tunnel -- the waveform wrapped into rings and flown through, and the first visual
+whose **camera moves**. The milestone's assertion held for the third time:
+everything is inside `player-render` (the registry, `visuals/tunnel.rs` +
+`tunnel.wgsl`, the extracted `visuals/history.rs`) with one file outside it, the
+web *check*. No shell, no UI, no binding, no command, no new frame field, no new
+meter, and both galleries listed the fourth visual with nothing edited.
+Two of this crate's habits invert inside a tube. **`camera::fit` is not used**:
+it frames a scene seen from outside, with corners that can leave the frame, and
+here the scene surrounds the eye and the failure is seeing *past* it at the
+edges. So the field of view is chosen and the scene is fitted to it -- inside a
+straight tube a ray at angle `theta` meets the wall at `radius / tan(theta)`, so
+the corners are wall as long as the tube is longer than `radius / tan(corner)`,
+and the middle is the opening by design (it fades to the background rather than
+showing a hole). Checked as angles in a unit test, as a `debug_assert` where the
+projection is built, and as border pixels at seven window shapes on both shells.
+And **the path is a pure function of ring index**, evaluated in Rust for the
+camera *and* for the geometry it hands the shader, so the eye cannot drift out
+through the wall it is flying down. History is `visuals/history.rs` --
+M3's ring buffer, extracted here on the second caller, `RowClock` and all; the
+waterfall moved onto it with its 48 checks unchanged.
+Three things came out of building it, two of them invisible to every check. The
+**field of view** was the surprise: at this crate's usual 60 degrees the near
+wall sits outside the frustum entirely and the picture reads as a gradient with a
+hole in it. A **tube can bend out of its own sight** -- the first path constants
+curved it by a radius every hundred rings, hiding the far end behind the near
+wall, so the cycle counts are a curvature budget rather than a taste. Both were
+found by drawing the picture and looking at it. The third was a check: the host
+contract compared a switched-into visual against a renderer that had *already
+drawn twice*, which is comparing two histories rather than two renderers, and it
+passed for the waterfall only by luck of that visual's slower clock. Both shells
+now start both sides from a renderer that has drawn nothing.
+Verified: **60/60** `cargo run -p player-render --example visual_smoke` and
+**67/67** at `/visualizer.html`, agreeing to a pixel on every position (the loud
+rings centred on row 210 against 211, zero background pixels in the border across
+seven window shapes on both, zero bytes differing across two frames of a stopped
+feed on both) and to under a percent on the area counts; 276 tests, clippy and
+fmt clean on both targets. **What it waits on is a person watching it with real
+music on both shells** -- this is the first visual in the app that can make
+someone feel unwell, so the speed, the bend rate and the field of view are
+comfort judgements no readback reaches, and the other open question is whether
+the waveform still reads as a waveform once it is wrapped around a circle.
+
 The certificate answer changed a finding into a fix: ureq defaults to
 webpki-roots, a bundle compiled into the binary, under which installing a
 self-hosted server's CA in the OS store does nothing -- so the obvious advice
