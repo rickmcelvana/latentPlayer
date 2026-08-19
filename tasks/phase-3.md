@@ -559,7 +559,7 @@ for every surface format the shells can be handed.
 Verified after the fix: **21/21** natively, **25/25** in the browser, 252 tests,
 clippy and fmt clean on both targets.
 
-## M2 -- Spectrum bars: built, awaiting the live look on both shells (2026-08-18)
+## M2 -- Spectrum bars: done, user-confirmed 2026-08-19
 
 The first *second* citizen, and therefore the milestone that tests M1 rather
 than extends it. The vectorscope was moved behind the `Visual` trait; nothing
@@ -826,10 +826,35 @@ bars' fit, axis direction, slot arithmetic, display floor and decibel gain),
 `npm run wasm`, `npx tsc -b`, `npm run build`. And the gallery lists both visuals
 on both shells with no UI change, which was the milestone's real assertion.
 
-**What is not verified, and why**: how it *looks* with real music, on both
-shells. The pixel checks say the axis runs the right way, that taller means
+**What was not verified by any of that**: how it *looks* with real music, on
+both shells. The pixel checks say the axis runs the right way, that taller means
 louder, that the caps fall in seconds and that nothing clips at any window shape
 -- none of which is the same as it being good to watch. A spectrum analyser is
 the most familiar visual in the app and therefore the easiest to draw
-generically, so this is the milestone most likely to want the revision pass the
-phase already budgets. The live look is what M2 is waiting on.
+generically, so this was the milestone most likely to want the revision pass the
+phase budgets.
+
+### Closed (2026-08-19)
+
+**User-confirmed on both shells: "works as expected and looks good -- both
+shells. No reason for another pass."** So the revision pass this milestone
+budgeted for was not needed, and that is worth recording as more than a tick:
+the display constants M2 chose by argument are now settled by observation. The
+three-quarter camera, the -72..0 dBFS window, the 12dB/s caps and the octave
+marks stand as they are, and M3 inherits them as a starting point rather than as
+open questions -- which matters, because the waterfall is the same analysis on
+the same axis and should not look like a different application.
+
+Two things this closes beyond the milestone itself:
+
+- **The host is now used rather than only measured, twice.** M1 built the seam
+  and the vectorscope moved behind it; M2 is the first visual built *against*
+  it, and the answer is that the feed grew by two slices and nothing else
+  outside `player-render` changed. The design held. M3's one new demand on the
+  contract is GPU-resident history, which is the part M2 deliberately did not
+  exercise.
+- **The two shells agree on colour**, which they did not before this milestone
+  and nobody had noticed. Every visual from here gets that for free, and both
+  smokes now report identical pixel figures where they used to differ by one.
+
+M3 (spectrogram waterfall) is next.

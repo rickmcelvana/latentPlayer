@@ -290,7 +290,7 @@ shell (2026-08-18)**: fullscreen and Esc work, and Auto gain "looks right on rea
 music". `cargo run -p player-render --example visual_smoke` checks every visual
 in the registry; `/visualizer.html` is its web half.
 
-**Phase 3 M2 is built and awaiting the live look** (2026-08-18): spectrum bars,
+**Phase 3 M2 is done and user-confirmed on both shells** (2026-08-19): spectrum bars,
 the gallery's second citizen and the milestone that tests the host rather than
 extending it. Where the vectorscope draws raw samples geometrically, the bars
 draw **analysis** -- `player-core`'s own spectrum bands, the same array the
@@ -322,9 +322,11 @@ Verified: **33/33** `cargo run -p player-render --example visual_smoke` (which
 now runs the real `player-core` analyser, so a tone that lights a bar is measured
 by the same code the meters use) and **38/38** at `/visualizer.html`, agreeing
 exactly on every bars figure; 258 tests, clippy and fmt clean on both targets.
-**What it waits on is a person watching it with real music on both shells** --
-the pixels being right is the floor, not the bar, and a spectrum analyser is the
-easiest visual in the app to draw generically.
+**Confirmed live on both shells (2026-08-19): "works as expected and looks good",
+with no revision pass wanted** -- so the constants this milestone chose (the
+three-quarter camera, the -72dB window, the 12dB/s caps, the octave marks) are
+settled by observation rather than only by argument, and M3's waterfall inherits
+them as a starting point rather than as open questions.
 
 The certificate answer changed a finding into a fix: ureq defaults to
 webpki-roots, a bundle compiled into the binary, under which installing a
