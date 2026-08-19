@@ -372,7 +372,7 @@ only prove it arithmetically. The centred camera -- the change this milestone
 made by looking at the picture rather than by failing a check -- is confirmed on
 real music too.
 
-**Phase 3 M4 is built and awaiting the live look** (2026-08-19): the oscilloscope
+**Phase 3 M4 is done and user-confirmed on both shells** (2026-08-19): the oscilloscope
 tunnel -- the waveform wrapped into rings and flown through, and the first visual
 whose **camera moves**. The milestone's assertion held for the third time:
 everything is inside `player-render` (the registry, `visuals/tunnel.rs` +
@@ -409,11 +409,21 @@ Verified: **60/60** `cargo run -p player-render --example visual_smoke` and
 rings centred on row 210 against 211, zero background pixels in the border across
 seven window shapes on both, zero bytes differing across two frames of a stopped
 feed on both) and to under a percent on the area counts; 276 tests, clippy and
-fmt clean on both targets. **What it waits on is a person watching it with real
-music on both shells** -- this is the first visual in the app that can make
-someone feel unwell, so the speed, the bend rate and the field of view are
-comfort judgements no readback reaches, and the other open question is whether
-the waveform still reads as a waveform once it is wrapped around a circle.
+fmt clean on both targets. **Confirmed live on both shells (2026-08-19): "speed
+and bend rate look good, no uncomfortable feelings, looks good in both desktop
+and web"** -- which settles the one thing this milestone could not check for
+itself. A tunnel is the first visual here that can make a person unwell, and
+comfort is not a figure any readback produces; the speed (3.6 units a second,
+which is the ring rate times the ring spacing rather than a dial) and the
+curvature budget are now settled by observation. So are the two constants found
+by drawing the picture rather than by failing a check: the 80-degree field of
+view and the three-and-two bend cycles.
+
+**That closes PLAN.md section 4's built-in suite** -- vectorscope, bars,
+waterfall, tunnel -- all four user-confirmed on both shells, and the host
+unchanged by the last three. M5 (musical intelligence: onsets, beat tracking,
+spectral centroid as new `player-core` meters) is next, and is the first
+milestone in this phase whose work is analysis rather than rendering.
 
 The certificate answer changed a finding into a fix: ureq defaults to
 webpki-roots, a bundle compiled into the binary, under which installing a

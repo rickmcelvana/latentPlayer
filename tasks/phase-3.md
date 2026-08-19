@@ -1215,7 +1215,7 @@ all, and neither touched a shell. M4 (oscilloscope tunnel) is next, and is the
 one that exercises the clause both spectrum visuals left alone -- camera motion,
 which M1 deliberately left to the visual.
 
-## M4 -- Oscilloscope tunnel: built 2026-08-19, awaiting the live look
+## M4 -- Oscilloscope tunnel: done, user-confirmed 2026-08-19
 
 PLAN.md section 4's "modern Winamp oscilloscope": the waveform swept along a
 camera path, drawn as a tube the eye travels down. The last of the three
@@ -1516,10 +1516,41 @@ warnings`, the full suite (**276 tests**, up from 263 -- eight on the tunnel's
 enclosure, path, ring arithmetic and gain, three on the shared clock, and the
 waterfall's own unchanged), `npm run wasm`, `npx tsc -b`, `npm run build`.
 
-**What is not verified, and why**: how it *feels*. This is the first visual in
+**What the checks could not reach, and what the live look answered**: how it
+*feels*. This is the first visual in
 the app that can make a person unwell, and the speed (3.6 units a second), the
 bend rate and the field of view are all comfort judgements that no readback
 reaches. The other open question is whether the waveform still reads as a
 waveform once it is wrapped around a circle and flown through, or whether it
 becomes generic motion with the music incidental to it. Both are for a person
 watching it with real music on both shells.
+
+
+### Closed (2026-08-19)
+
+Confirmed live on both shells: *"Speed and bend rate look good. No uncomfortable
+feelings. Looks good in both desktop and web."*
+
+That answers the question this milestone was least able to ask itself. Every
+other visual here fails visibly when it is wrong; a tunnel fails in the viewer,
+and the only instrument for it is a person. Three things follow:
+
+- **The speed is right**, and it is not a free number -- it is `RING_HZ *
+  RING_SPACING`, so confirming it confirms the ring rate and the spacing
+  together. A later visual that flies anywhere has a figure to start from.
+- **The curvature budget is right.** It was chosen to keep the far end of the
+  tube in sight rather than for how it feels to fly, and those could easily have
+  wanted different numbers. They did not.
+- **The two constants found by looking are confirmed on real music**: the
+  80-degree field of view and the three-and-two bend cycles, neither of which any
+  check would have objected to.
+
+It also closes PLAN.md section 4's built-in suite. Four visuals, all
+user-confirmed on both shells, and the host has not changed since M1 -- M2 grew
+the feed by two slices, M3 and M4 grew nothing outside `player-render` at all.
+Three milestones built against a seam without moving it is the strongest
+statement available that the seam was drawn in the right place.
+
+M5 (musical intelligence) is next, and turns the phase around: its work is
+`player-core` analysis -- onsets, beat tracking, spectral centroid -- verified
+the analysis suite's way, against known answers rather than against pixels.
