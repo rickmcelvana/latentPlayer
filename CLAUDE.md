@@ -328,7 +328,7 @@ three-quarter camera, the -72dB window, the 12dB/s caps, the octave marks) are
 settled by observation rather than only by argument, and M3's waterfall inherits
 them as a starting point rather than as open questions.
 
-**Phase 3 M3 is built and awaiting the live look** (2026-08-19): the spectrogram
+**Phase 3 M3 is done and user-confirmed on both shells** (2026-08-19): the spectrogram
 waterfall, and the first visual that *keeps* anything. M2 grew the feed by two
 slices; M3 grew nothing -- the levels, their axis and the elapsed time were
 already there, so the whole milestone landed inside `player-render` (the registry,
@@ -362,9 +362,15 @@ Verified: **48/48** `cargo run -p player-render --example visual_smoke` and
 *position* (the ridge at x=213 and 421 on both, its centre at row 205 on both,
 zero bytes differing on both frozen-terrain checks) and to under a percent on the
 figures that count anti-aliased area; 263 tests, clippy and fmt clean on both
-targets. **What it waits on is a person watching it with real music on both
-shells** -- whether six seconds is the right amount of past, and whether the
-terrain stays legible on dense material rather than turning to fog.
+targets. **Confirmed live on both shells (2026-08-19): "six seconds looks good,
+it stays legible and no fog, waterfall falls as expected"** -- which settles the
+three things no readback could reach. Six seconds of past is the right amount,
+so a later time-axis visual inherits it rather than reopening it; the terrain
+survives dense material, which is a waterfall's one gradual failure mode; and
+the clock the rows advance on reads correctly to a person, where the smoke could
+only prove it arithmetically. The centred camera -- the change this milestone
+made by looking at the picture rather than by failing a check -- is confirmed on
+real music too.
 
 The certificate answer changed a finding into a fix: ureq defaults to
 webpki-roots, a bundle compiled into the binary, under which installing a

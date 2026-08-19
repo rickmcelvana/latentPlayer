@@ -859,7 +859,7 @@ Two things this closes beyond the milestone itself:
 
 M3 (spectrogram waterfall) is next.
 
-## M3 -- Spectrogram waterfall: built 2026-08-19, awaiting the live look
+## M3 -- Spectrogram waterfall: done, user-confirmed 2026-08-19
 
 The spectrum's *history* as a scrolling 3D terrain: the same bands the bars
 draw, one row per moment, running away from the viewer. PLAN.md section 4's
@@ -1174,7 +1174,8 @@ waterfall's fit, its time axis, the clock, the index prefix and the uniform, and
 one new on the shared band arithmetic), `npm run wasm`, `npx tsc -b`, `npm run
 build`.
 
-**What is not verified, and why**: how it looks with real music, on both shells.
+**What the checks could not reach, and what the live look answered**: how it
+looks with real music, on both shells.
 The pixel checks say the axis runs the right way, that history survives and
 recedes at the right rate, that it forgets on time and that gain re-maps what is
 already stored -- none of which is the same as it being good to watch. Two things
@@ -1182,3 +1183,34 @@ to look for that no readback reaches: whether six seconds is the right amount of
 past, and whether the terrain stays legible on dense material or turns to fog. A
 waterfall fails gradually rather than obviously, which is the failure mode most
 worth a person's eye.
+
+
+### Closed (2026-08-19)
+
+Confirmed live on both shells, in the words that closed it: *"Six seconds looks
+good. It stays legible and no fog. Waterfall falls as expected. All tests passed
+-- Desktop and web."*
+
+That answers all three of the questions the pixel checks were unable to ask:
+
+- **Six seconds is the right amount of past.** It was an argument (a row thinner
+  than a pixel is work that cannot be seen; a phrase is a few seconds long) and
+  is now an observation, so M4 and anything later with a time axis inherit it as
+  a starting point rather than as an open question.
+- **The terrain stays legible on dense material.** A waterfall's failure mode is
+  fog, and it arrives gradually rather than obviously -- which is exactly why it
+  had to be watched rather than measured. It did not arrive.
+- **The clock reads correctly to a person.** `rows_due` proves the arithmetic and
+  the two-frame-rate check proves the two shells agree; neither can say the fall
+  looks right. It does, on both.
+
+And it confirms the one change this milestone made by *looking* rather than by
+failing a check: the centred camera. The inherited three-quarter eye skewed the
+frequency axis in a scene with depth, no check would ever have caught it, and the
+fix is confirmed on real music now rather than only on two tones.
+
+Three milestones have now been built against M1's seam and none of them has
+needed the host to change: M2 grew the feed by two slices, M3 grew nothing at
+all, and neither touched a shell. M4 (oscilloscope tunnel) is next, and is the
+one that exercises the clause both spectrum visuals left alone -- camera motion,
+which M1 deliberately left to the visual.
