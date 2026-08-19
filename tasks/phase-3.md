@@ -1554,3 +1554,248 @@ statement available that the seam was drawn in the right place.
 M5 (musical intelligence) is next, and turns the phase around: its work is
 `player-core` analysis -- onsets, beat tracking, spectral centroid -- verified
 the analysis suite's way, against known answers rather than against pixels.
+
+## M5 -- Musical intelligence: planned 2026-08-19
+
+PLAN.md section 4's second modernization clause: "onset/beat detection, BPM
+tracking, spectral centroid, transient detection feeding shader uniforms --
+reacting to musical structure, not just raw amplitude." The phase's own ordering
+puts it here because M6's scenes need it, and decision 2 says where it has to
+live: **a visual computes no DSP, so a quantity a visual wants is added to
+`player-core`'s analysis first, cross-target, under the same drain-and-reset
+discipline as the meters.** M4's decision 27 already deferred a beat-reactive
+camera to exactly this milestone rather than building half a beat detector
+inside a visual.
+
+So this one turns the phase around. M2 to M4 were rendering milestones that
+moved nothing outside `player-render`; M5 moves nothing *inside* it except one
+chained addition to the frame. Its work is analysis, and it is verified the
+analysis suite's way -- against known answers, not against pixels. A synthesized
+120 BPM click track must read 120.0 on both shells, an onset must land within a
+stated tolerance of where it was synthesized, and material with no steady pulse
+must say so rather than report a confident wrong number.
+
+### Decisions
+
+**31. Musical intelligence is a meter, and it lands where the meters live.** New
+modules in `player-core`, composed into `Meters`, fed from the one drain in
+`analysis.rs::ingest`, reset on a broken listen exactly as loudness and
+correlation are (Phase 1 M5 decision 2 -- a seek, a lap, or a gapless hand-off).
+No new thread on either shell: the native analysis thread and the web worker
+already call `ingest`/`update`, and neither learns anything new. Nothing touches
+the audio callback (decision 9).
+
+Being a meter also settles what it measures without a further decision: the tap
+sits after the EQ and before the volume, so the tempo is the tempo of what the
+listener is played, and turning the volume down does not change it. The studio
+side reads the same numbers the visuals will, which is decision 2's whole point
+stated for a new quantity.
+
+**32. These are measurements over time, so they run on their own hop clock,
+driven by samples rather than by the caller's cadence.** `analysis.rs` already
+draws this line: the spectrum and the goniometer are *pictures of a window* read
+at whatever rate the display asks, while loudness and correlation are pushed
+every sample and hold their own state. Onset detection is firmly the second
+kind, and getting it wrong would be a cross-shell bug of the exact family this
+project keeps catching -- spectral flux measured between two drains is a
+different measurement on every drain, and the native thread drains every 16ms
+while the web worker drains on `requestAnimationFrame`. Two shells, two answers,
+out of one implementation.
+
+So the detector keeps its own short-time transform on a fixed grid: a window and
+a hop **derived from the output rate** (like the K-weighting's coefficients,
+Phase 1 M5) so the detection function runs at a fixed rate in *time*, and a
+44.1kHz device and a 48kHz device resolve tempo identically. An internal
+accumulator makes the caller's chunking irrelevant, and that is checkable rather
+than asserted: the same audio pushed in one call and one sample at a time must
+give identical figures.
+
+**33. The display spectrum is not reused, and the detector's transform is not
+published.** Reusing `SpectrumAnalyzer` looks like the thrifty choice and is the
+wrong one three times over: its window is 2048 frames of *display* resolution,
+its levels are 64 log bands with a 30dB/s release smoothing baked in, and it is
+computed when the display asks rather than on a fixed hop. Flux across smoothed,
+log-binned, irregularly-timed levels is not an onset detection function.
+
+The converse holds too: the detector's own bins stay inside it. Publishing a
+second spectrum would give the app two answers to "what does the music look
+like", which is the one thing the single-tap architecture exists to prevent
+(PLAN.md section 4). The cost of the second transform is the reason this needs
+saying rather than an argument against it -- roughly a hundred transforms a
+second of a 1024-frame window, next to the sixty of 2048 the display already
+runs.
+
+**34. Tempo is autocorrelation over the detection function, with harmonic
+weighting and an interpolated peak.** Causal and streaming: a window of recent
+detection function, autocorrelated over the lags that correspond to 60-200 BPM,
+scored with the sum of each lag's own harmonics and weighted by a preference for
+tempi near 120. Not dynamic programming over a whole track (offline, and this
+app has no whole track -- it has a stream), and not a bank of comb resonators
+(more state, the same answer, harder to check).
+
+Two things about it are load-bearing. **Octave errors are the known failure
+mode** -- a 120 BPM track reading 60 or 240 is what a naive tempo estimator does,
+and the harmonic sum plus the tempo prior is the mitigation, checked explicitly
+against a click track with an offbeat on every eighth. And **the lag grid cannot
+express 120.0**: at a 100Hz detection function the lags either side of 120 BPM
+are 120.0 and 117.6, so a peak reported as an integer lag is a meter that can
+only ever be approximately right. The peak is interpolated in the
+autocorrelation, and that is the difference between this milestone's stated
+standard -- a known answer -- and mere plausibility.
+
+**35. Beat phase is tracked, not re-derived every hop.** Once a tempo is
+established the phase advances on the analyser's own sample clock and is
+corrected *toward* observed onsets slowly, rather than re-estimated from scratch
+each hop. A visual then gets a phase that moves smoothly and keeps counting
+through a bar with nothing in it; the alternative jitters by a hop whenever a
+weak onset wins an alignment, which reads as a stutter in anything driven by it.
+
+The phase is published as a fraction of a beat, so a scene animates on it
+without knowing the tempo, and it is measured at the newest analysed sample --
+neither shell extrapolates it forward. If the live look says a pulse reads late,
+that is a finding worth a decision in M6 rather than a guess made here.
+
+**36. "Not established" is a value, and confidence rides beside the tempo.** A
+BPM of 0.0 means no tempo: warming up, silence, or material with no steady pulse.
+Not a NaN, for `FLOOR_LUFS`'s reason -- these numbers cross a JSON boundary on
+the desktop shell, where a non-finite float silently becomes `null`, and both
+shells have to report the same thing.
+
+Confidence is published because it is what makes the honest answer usable: a
+rubato piano piece should read low confidence rather than a firm wrong number,
+and a readout or a scene can then decide whether to believe the tempo. That
+makes "ambient material reports low confidence" a checkable claim rather than a
+disclaimer in a doc.
+
+**37. An onset is published as the strongest since the last drain; the
+continuous figure is published raw.** Two quantities, because they answer two
+questions. *Was there an onset* is an event, and a consumer polling slower than
+the ~10ms hop would miss most of them if it were a flag -- so what is published
+is the strength of the strongest onset since the previous drain, and a reader at
+frame rate cannot miss one. *How percussive is it right now* is the normalised
+detection function itself, published as measured, with any decay left to the
+display: M2 decision 11 put the bars' falling caps inside the visual for this
+reason, and a meter that smooths for one imagined frame rate is a meter two
+shells can disagree about.
+
+**38. A snapshot of its own, published under the same lock, in the same
+instant.** `MeterSnapshot` is loudness and phase; what the music is *doing* is a
+different question, and folding six musical figures into it would put a BPM in
+the type the LUFS readout consumes. So `MusicalSnapshot` is its own struct with
+its own `to_array` and field count -- and it is published in the same `Published`
+record under the same lock natively, and written in the same step on the web, so
+the two can never describe two moments. That is what Phase 1 M5 decision 4
+bought, and this must not spend it.
+
+The plumbing it adds is one of each thing, deliberately: one shared-buffer region
+(before the EQ block, whose alignment helper stays what protects it), one Tauri
+command, one wasm accessor, one function in `analysis.ts`, and their mirrored
+field maps. Any figure written twice in TypeScript is a figure the shells can
+disagree about.
+
+**39. `VisualFrame` grows by one chained addition, and no visual reads it yet.**
+`with_musical` beside `with_spectrum` -- which is the growth `visual.rs` named M5
+as the reason for when the frame was made a struct rather than an argument list.
+Both shells fill it where they already fill the spectrum. **The four confirmed
+visuals are untouched**: M6 is where scenes are driven by beats, with M6's
+decisions, and retrofitting a pulse onto the vectorscope here would be M6's work
+done without them.
+
+The loose end that leaves is named rather than hidden: the frame's new fields are
+carried but unread until M6, so what proves the numbers are real in M5 is the
+known-answer smokes on both shells and the readout below, not a picture.
+
+**40. The studio side gets the numbers too.** A small readout -- tempo,
+confidence, spectral centroid -- polled at the loudness panel's cadence rather
+than at frame rate, because these are digits you read rather than watch. The
+milestone brief already calls a BPM readout a feature for both audiences, and it
+is also the cheapest instrument available for the failure this milestone is most
+likely to have: a person who knows a track's tempo, watching the number, is a
+better octave-error detector than any synthesized fixture.
+
+### Shape of the work
+
+- **`onset.rs`** -- the fixed-hop transform and everything measured on its grid:
+  the mono sum, the windowed FFT, half-wave-rectified spectral flux as the
+  detection function, its adaptive normalisation and peak picking (a threshold
+  over a moving average, plus a refractory period so one hit is one onset), and
+  the spectral centroid, which lives here because it is measured from the same
+  bins on the same clock and would otherwise need a second transform to be
+  honest about *when* it is.
+- **`tempo.rs`** -- the detection function's history, the autocorrelation, the
+  harmonic scoring and the tempo prior, the interpolated peak, the confidence,
+  and decision 35's phase tracker. Pure arithmetic over a ring of floats: no FFT,
+  no device, and no clock but the sample count it is told about, so most of its
+  checks are unit tests with analytic answers.
+- **`analysis.rs`** -- `MusicalSnapshot`, `MUSICAL_FIELDS`, `silent()`, and the
+  wiring into `Meters::new`/`ingest`/`snapshot` and the discontinuity reset.
+- **`playback.rs`** -- `Published` gains the snapshot, and one accessor joins
+  `meters()`. The analysis loop itself does not change shape.
+- **The shells, a line each in three places** -- a `musical` command and the
+  redraw thread's `.with_musical(...)` natively; `WasmAnalyzer::musical()`, the
+  worker's publish, and `webVisualizer`'s frame on the web; the shared buffer's
+  new region and its field map in `audioSab.ts`.
+- **`analysis.ts` and the readout** -- one adapter function beside `meters()`,
+  and one component rendering it.
+- **The checks** -- `crates/player-core/examples/musical_smoke.rs` and
+  `app/musical.html` + `app/src/musicalSmoke.ts`, synthesising their own fixtures
+  the way the loudness pair does, so neither needs an argument or a file.
+
+### What "verified" has to mean here
+
+Known answers, on both shells, agreeing figure for figure -- the standard
+loudness was held to, because this is the same kind of claim. Plausibility is
+specifically what a beat tracker is good at faking.
+
+- **A 120 BPM click reads 120.0**, and a 90 BPM one reads 90.0, within a stated
+  tolerance and after a stated warm-up. Two tempi rather than one, because a
+  detector with a bug that reads its own prior instead of the audio passes the
+  first check.
+- **No octave error**: a 120 BPM click with an offbeat on every eighth still
+  reads 120 rather than 240, and a click at 70 does not read 140.
+- **An onset lands where it was synthesized**, within one hop plus one drain,
+  measured against impulses placed at exact times.
+- **Chunking cannot change the answer**: the same audio pushed whole and one
+  sample at a time gives identical figures. A unit test, and decision 32's real
+  content.
+- **The output rate cannot change the answer**: the same material at 44.1kHz and
+  48kHz reads the same tempo and the same centroid within tolerance.
+- **The centroid has an analytic answer**: a 1kHz sine reads 1kHz within a bin,
+  and band-limited white noise reads what its flat spectrum implies.
+- **Material with no steady pulse reports low confidence** rather than a
+  confident number -- the honest-failure check, and the one that keeps decision
+  36 from being decoration.
+- **A track hand-off restarts the estimate** rather than averaging across it: the
+  move the loudness smoke already makes for the integrated measurement, and for
+  the same reason -- a tempo spanning two records is a tempo nobody played.
+- **Both shells agree**, `/musical.html` against `musical_smoke`, figure for
+  figure. They run the same Rust, so a disagreement here is a plumbing bug, and
+  finding those is what the paired smokes are for.
+
+And the half no fixture reaches: **a person listening on both shells**, with the
+material this phase's brief already named -- something with a firm beat *and*
+something rubato or ambient, because a beat tracker verified only on
+four-on-the-floor is not verified. Three things to watch for that no synthesized
+click can answer. Whether the readout agrees with a track whose tempo the
+listener knows. Whether it *settles* on real music rather than flickering between
+tempi at every transition. And whether the beat reads as on time: the tap sees
+audio slightly before the device plays it, while the analysis lags by up to a
+drain, and those two errors point opposite ways -- if the net is visible, M6
+needs to know now rather than after its scenes are built on it.
+
+### What this milestone will not do
+
+- **No beat-reactive visual** (decision 39). M6 drives scenes with these
+  uniforms; the four confirmed visuals are not edited here.
+- **No key, chord, downbeat or structure detection.** Beat phase is where a beat
+  is, not where a bar is, and the section boundaries a scene might want are not
+  in PLAN.md section 4's list -- so they are not started by accident.
+- **No library-wide BPM.** Analysing whole files offline and storing a tempo per
+  track is a library feature with a schema, a scan cost and a migration; it
+  belongs to Phase 4's player-completeness work, not to a real-time meter.
+- **No beat-synced transport**, no tempo-matched crossfades, no time-stretching.
+  Nothing here reaches the DSP output path (decision 9).
+- **No second published spectrum** (decision 33), and no change to the display
+  spectrum's constants -- the four visuals confirmed on them stay confirmed.
+- **No new thread on either shell, and no compute shaders.** The drain that feeds
+  the meters feeds this; M6 is where WebGPU compute gets checked.
