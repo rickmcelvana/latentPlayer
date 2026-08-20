@@ -1983,3 +1983,254 @@ geometry-per-sample -- also this workspace's first compute shaders, whose WebGPU
 limits get checked at its start on both shells rather than assumed until its end.
 The frame fields M5 landed are carried but unread until then, which is the one
 loose end this milestone leaves on purpose.
+
+## M6 -- Particle / raymarched scenes: planned 2026-08-20
+
+PLAN.md section 4's fifth built-in, and the first of its five modernization
+clauses that needs both halves of this phase at once: "GPU-instanced particles
+and SDF raymarching driven by the musical-intelligence analysis below, not raw
+amplitude." M5 measured the music and published it; decision 39 deliberately
+left `VisualFrame::musical` carried but unread, because driving a scene with a
+beat is a set of decisions and M5 was not the milestone to make them. This is.
+
+It is also this workspace's first **compute shaders**, which the phase's risk
+list says get checked at the milestone's start rather than assumed until its
+end. That check is below, and it is already answered -- which is the difference
+between a risk and a fact.
+
+Three things ship: a particle field, a raymarched solid, and -- settled by the
+user rather than by argument -- M4's deferred beat-reactive camera, which had a
+standing claim on this milestone (decision 27) and is one figure in one existing
+visual rather than a retrofit of four.
+
+### Decisions
+
+**41. Compute's limits were checked before anything was built on them, and they
+were already in hand.** Both shells build their device with
+`wgpu::DeviceDescriptor::default()`, which requests `wgpu::Limits::default()` --
+the WebGPU specification's own baseline: 256 invocations per workgroup, 65535
+workgroups per dimension, 16KB of workgroup storage, 8 storage buffers per
+shader stage, and a 128MiB storage binding. That request has been succeeding on
+both shells since Phase 0, so compute is not a new capability to negotiate: it
+is one this project has been granted all along and has not yet spent. A dispatch
+of 65535 groups of 256 is 16.7 million particles, four orders of magnitude past
+what this milestone wants.
+
+The one limit that is genuinely not settled by that is **storage buffers in the
+vertex stage** -- the specification splits that out per stage, and compatibility
+mode grants zero of them. So the particle buffer is never bound to the vertex
+stage at all: it is created `STORAGE | VERTEX` and read as an **instance-step
+vertex buffer**, which is the oldest and most universally supported way to draw
+one quad per particle. The compute pass writes it as a storage buffer; the draw
+reads the same bytes as instance attributes. No limit anyone can vary is
+involved. The milestone's opening spike confirms the real numbers on both shells
+rather than trusting this paragraph.
+
+**42. The simulation is GPU state on a fixed timestep with a carried
+remainder.** A particle field is the first thing in this crate whose state is
+*advanced by arithmetic* rather than replaced by a measurement -- the waterfall
+and the tunnel keep history, but every row in it was written once and never
+touched again. State that integrates is state whose answer depends on how it was
+chunked, and this project has caught that family of bug twice already (M3's row
+clock, M5's hop clock). So the sim steps at a fixed 120Hz with the leftover time
+carried, driven by `RowClock` from `visuals/history.rs` -- its third caller,
+extracted in M4 for exactly this reason.
+
+The property that buys, stated as M3 stated it: **sixty frames of a sixtieth
+move the field exactly as far as one frame of a whole second.** The desktop
+redraws at 60Hz and a browser's animation callbacks run at whatever the display
+does, and neither may be visible in the motion.
+
+**43. An onset enters a visual only through an idempotent envelope -- never as
+an edge, never as an accumulator.** This is the decision the code would get
+wrong by default, and getting it wrong would be a cross-shell bug of the exact
+family this project keeps finding.
+
+`musical.onset` is not an event a visual receives. It is **the strength of the
+strongest onset since the last analysis drain, held in the published snapshot
+until the next drain replaces it** (M5 decision 37). The native analysis loop
+publishes every 16ms; the web worker publishes on its own cadence; the
+visualizer reads whatever is standing, at display rate. On a 60Hz display those
+line up roughly one-to-one, by luck. On a 120 or 144Hz display -- an ordinary
+laptop today -- the visualizer reads the same published onset on two or three
+consecutive frames, and a visual that spawned particles per frame it *saw* an
+onset would spawn two or three times as many on better hardware.
+
+So onsets are consumed exactly one way, in both new visuals and in nothing else:
+
+    energy = max(energy - decay * dt, onset)
+
+Reading the same onset twice is `max` applied twice, which changes nothing.
+Missing one is impossible, because the value is held rather than pulsed. The
+decay is in **seconds**, like the bars' falling caps (M2 decision 11), so the
+recovery is the same on every display. Emission, brightness and displacement are
+then functions of `energy`, and frame-rate independent by construction.
+
+The alternative -- publishing a monotonic onset counter so a consumer can diff
+it -- was considered and rejected: it is a change to `MusicalSnapshot`, the
+shared buffer's field map, a Tauri command, a wasm accessor and two mirrored
+field maps in TypeScript, to buy a property `max` already has for nothing.
+
+**44. Randomness is a pure function of index and generation, never stored
+state.** A particle's spawn position, velocity and lifetime come from hashing
+`(particle_index, generation)` in the shader -- so a particle is reproducible
+from its identity alone, both shells compute the same field from the same feed,
+and a check can assert a position rather than a histogram. No seed buffer, no
+host-side RNG, and nothing that makes the picture depend on how many frames
+happened to have been drawn before the check started looking.
+
+**45. Confidence gates the beat, in every visual that uses it.** A `bpm` of 0.0
+means no tempo, and low confidence means do not believe the one there is (M5
+decision 36). A scene that pulsed anyway would be exactly the "stylized
+visualizer faking reactivity" PLAN.md section 4 defines this suite against. So
+every beat-driven quantity is scaled by `beat_confidence`, and every visual has
+a defined no-tempo behaviour: it moves with onsets and levels, steadily, and
+asserts no pulse. That makes "ambient material reads as calm rather than
+twitchy" a claim a check can make and a person can confirm, rather than a hope.
+
+**46. The raymarched solid is a picture of the spectrum, not a demo.** Its
+surface is a sphere displaced by the analyser's **own bands** -- placed by real
+frequency through `VisualFrame::band_position`, the way the bars' octave marks
+and the waterfall's rails are -- pulsed on `beat_phase`, and coloured by
+`centroid_hz`. Not procedural noise with an amplitude multiplier bolted on.
+
+That choice is what keeps this visual inside decision 2 in spirit as well as in
+letter (noise satisfies "a visual computes no DSP" too), and it is what makes it
+checkable at all: a bass-heavy input has to change the silhouette in a stated
+direction, and a bright input has to move the hue. A scene whose shape came from
+a hash could only ever be checked for "something is there."
+
+**47. The raymarcher draws without multisampling, at a capped internal
+resolution -- and both are its own business, not the host's.** Each visual
+already builds its own depth and multisample attachments and resolves into the
+view the host hands it, so the sample count is not actually crate-wide state; it
+is a constant every visual has so far chosen to use. Four samples per pixel on a
+fullscreen raymarch is four times the fragment cost -- which *is* the whole cost
+of a raymarch -- to antialias geometric edges the scene does not have. Its edges
+come out of the distance field and are smoothed in the shader for free.
+
+The phase's risk list guessed that fullscreen cost would want "a render-scale
+option, which is a host feature." Building it says otherwise: a render scale
+that applied to the vectorscope would make its lines worse for no reason,
+because the vectorscope is not what a 4K surface is expensive for. The cost
+belongs to the visual, so the fix does -- the solid raymarches into its own
+texture, capped at a fixed width, and upscales. **Fixed rather than adaptive**:
+a quality level that responds to measured frame time is a picture that depends
+on what else the machine was doing, which is neither reproducible nor
+checkable. `attachments.rs`'s doc comment is corrected in passing -- the formats
+and the sample count are the host's business, but whether a given visual
+multisamples at all is the visual's.
+
+**48. The tunnel gets the beat as a bounded offset on the eye, never on the ring
+clock.** M4 deferred a beat-reactive camera to this milestone rather than
+building half a beat detector inside a visual (decision 27); the user's answer
+here is that the tunnel is the one existing visual that gets touched.
+
+The obvious implementation is wrong. The tunnel's rings are laid on a clock
+(`RING_HZ`, 60 a second) and its speed is that clock times the ring spacing, so
+"fly faster on the beat" by speeding the clock would change how many seconds of
+audio the tube holds and what each ring is a picture of -- the beat would be
+altering the measurement. Instead the beat moves **the eye along the path it was
+already on**:
+
+    eye = eye_parameter() - SURGE * confidence * (1 - cos(2 * PI * beat_phase)) / 2
+
+Bounded by `SURGE` rings, exactly zero at every beat instant, and continuous at
+the wrap -- so the eye eases back through the bar and arrives forward onto each
+beat. It cannot drift, and it can never outrun the history it is flying through.
+The average speed is unchanged, so the tunnel still holds and shows its stated
+four seconds.
+
+And the property that makes this safe to do to a user-confirmed visual: **with
+no tempo the expression is identically `eye_parameter()`**, so M4's sixty checks
+-- none of which feed a tempo -- must still pass byte for byte. They are the
+regression net, not a formality.
+
+**49. Nothing outside `player-render` changes, for the fourth milestone
+running.** Two lines of registry, four new files (`visuals/particles.rs` +
+`.wgsl`, `visuals/solid.rs` + `.wgsl`), one edit to `visuals/tunnel.rs`, and one
+file outside the crate: the web *check*. No command, no binding, no UI control,
+no persisted setting, no new meter -- and both galleries list two more visuals
+with nothing edited. M2 said that if building a visual required touching
+anything else, the host was designed wrong; M3 and M4 held it for a visual with
+history and a visual with a moving camera. M6 asks it of a visual with a compute
+pass and GPU-side state, which is the furthest the seam has been pushed.
+
+**50. Two visuals, one milestone, with a live look between them.** The particle
+field lands and is looked at on both shells before the solid is built, so the
+first compute-driven scene's constants -- emission, decay, drift, how a beat
+reads as motion -- are settled by observation before a second visual inherits
+them, the way M2's camera, window and cap rate were settled before M3 inherited
+them.
+
+### Shape of the work
+
+- **The spike, first, both shells.** A compute pipeline that does nothing
+  interesting -- dispatch, write a storage buffer, draw it as instances -- run
+  natively and in a real browser, reporting each adapter's actual limits against
+  decision 41's numbers. It either becomes the particle field's skeleton or is
+  thrown away; either way nothing else starts until it has run in Chrome.
+- **`visuals/particles.rs` + `particles.wgsl`.** The compute pass (spawn, age,
+  integrate), the instanced draw (one quad per particle, additive, no depth
+  write), `RowClock` at 120Hz, decision 43's envelope, decision 44's hash, and
+  decision 45's no-tempo behaviour.
+- **`visuals/solid.rs` + `solid.wgsl`.** A fullscreen triangle into an
+  internally-capped texture, an SDF sphere displaced by `levels` through
+  `band_position`, pulsed by `beat_phase` scaled by confidence, hued by
+  `centroid_hz`, and the upscale into the host's view.
+- **`visuals/tunnel.rs`.** Decision 48: one expression, one constant, and a unit
+  test that it vanishes without a tempo.
+- **`visual.rs`.** Two `VisualKind` entries with their ids, names and
+  descriptions -- the whole of what either shell learns about them.
+- **`attachments.rs`.** The doc correction decision 47 names.
+- **The checks.** New sections in `examples/visual_smoke.rs` and
+  `app/src/visualizerSmoke.ts`, plus the per-kind host contract loop picking up
+  two more kinds with no edit.
+
+### What "verified" has to mean here
+
+The three kinds this phase has used, plus one new claim class -- that a
+simulation is a simulation:
+
+- **The host contract, per kind, free**: silence draws nothing, audio draws
+  something, a resize is survived, a switch equals a fresh renderer. Two more
+  kinds, no edit here.
+- **The compute pass actually ran**: with the feed held still and no new audio,
+  the field must *change* between two frames -- the opposite of the tunnel's and
+  the waterfall's "a stopped feed is a frozen picture", and the only check in
+  this crate that asserts motion without input.
+- **Chunking is invisible** (decision 42): sixty frames of a sixtieth against one
+  frame of a whole second, asserted on pixels, the way M3 asserted its row clock.
+- **Onsets are idempotent** (decision 43): the same onset fed on N consecutive
+  frames must produce the same field as feeding it once and then zero. That is
+  the 144Hz display bug written as a check -- one that fails the naive
+  implementation and passes the decided one.
+- **The solid is a picture of the spectrum** (decision 46): a bass-heavy
+  spectrum against a treble-heavy one must move the silhouette in a stated
+  direction, and a centroid sweep must move the hue monotonically.
+- **The tunnel is unchanged without a tempo** (decision 48): M4's sixty checks,
+  byte for byte -- plus one new one, that a tempo does move the eye, and by no
+  more than the bound.
+- **Both shells, agreeing** to a pixel on positions and to under a percent on
+  areas, as M3 and M4 reported.
+- **A person watching it, twice**: after the particle field and after the solid.
+  These are the first visuals here where "correct" and "musical" are different
+  properties, and only one of the two reads back.
+
+### What this milestone will not do
+
+- **No post-processing chain.** Bloom would flatter both of these visuals, and it
+  is a host-level pass with its own decisions: what it composites, what it costs
+  at 4K, whether a preset may ask for it. That question belongs to M8's format,
+  and taking it here would answer it by accident.
+- **No adaptive quality** (decision 47's second half).
+- **No new analysis in `player-core`.** Everything both visuals need was
+  measured in M5. If one of them wants a quantity that does not exist, decision
+  2 says it becomes a meter first -- and that would be a finding worth writing
+  down, not a shortcut to take inside a shader.
+- **No retrofit of the vectorscope, bars or waterfall.** They are
+  user-confirmed. The tunnel is touched because M4 explicitly deferred a decision
+  to here, and that is the whole of the exception.
+- **No WebGL2 fallback** (decision 8), and no second implementation of anything
+  for a browser without compute: the web build already says plainly that it needs
+  WebGPU.
