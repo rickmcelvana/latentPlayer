@@ -12,6 +12,7 @@ pub mod error;
 #[cfg(not(target_arch = "wasm32"))]
 pub mod library;
 pub mod loudness;
+pub mod onset;
 pub mod phase;
 #[cfg(not(target_arch = "wasm32"))]
 pub mod playback;
@@ -29,6 +30,7 @@ pub mod stream;
 pub mod subsonic;
 pub mod tags;
 pub mod tap;
+pub mod tempo;
 
 pub use analysis::{MeterSnapshot, Meters, BAND_COUNT, FFT_SIZE, GONIOMETER_POINTS};
 pub use channels::{adapt_channels, ChannelShape};
