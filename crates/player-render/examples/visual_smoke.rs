@@ -1005,6 +1005,24 @@ fn check_the_oscilloscope_tunnel() {
 /// Deliberately weak about what a visual draws -- that is the visual's own
 /// business and its own checks below -- and strong about the four things the
 /// host would break on: an empty feed, a live feed, a resize, and a switch.
+/// Whether this visual reads `VisualFrame::musical` at all.
+///
+/// Stated here rather than in the registry because it is a claim about the
+/// *picture* rather than about the gallery -- neither shell has any use for it,
+/// and a visual may start or stop reading the beat without either of them
+/// learning a new fact about it. The web half carries the same list, and the
+/// two are held together by the figures they report.
+fn reads_musical(kind: VisualKind) -> bool {
+    match kind {
+        VisualKind::Vectorscope
+        | VisualKind::SpectrumBars
+        | VisualKind::SpectrogramWaterfall
+        | VisualKind::OscilloscopeTunnel => false,
+        VisualKind::ParticleField => true,
+        _ => false,
+    }
+}
+
 fn check_the_host_contract(kind: VisualKind) {
     println!("\n{} ({}):", kind.name(), kind.id());
     let mut renderer = pollster::block_on(OffscreenRenderer::new(WIDTH, HEIGHT, kind))
@@ -1091,10 +1109,11 @@ fn check_the_host_contract(kind: VisualKind) {
         ),
     );
 
-    // M5 put the musical figures in the feed and *no* visual reads them yet
-    // (decision 39) -- M6's scenes are where beats drive motion. So what can be
-    // checked here is that the addition is inert: the same frame with a tempo,
-    // a beat phase and an onset in it draws exactly what it drew without them.
+    // M5 put the musical figures in the feed and M6 is where scenes started
+    // reading them, so this is two claims in one: a visual that reads them must
+    // draw something different when they change, and every visual that does not
+    // must draw *exactly* what it drew without them. The second half is what
+    // stops a beat leaking into the four visuals confirmed before M6.
     // Two fresh renderers rather than two draws, for the switch check's reason.
     let beat = Musical {
         bpm: 128.0,
@@ -1112,16 +1131,20 @@ fn check_the_host_contract(kind: VisualKind) {
         .expect("offscreen renderer with musical figures")
         .draw_to_pixels(&full_frame(&signal, &spectrum).with_musical(beat))
         .expect("render with musical figures");
+    let changed = without
+        .iter()
+        .zip(&with_beat)
+        .filter(|(a, b)| a != b)
+        .count();
     check(
-        "the musical figures change nothing a visual does not read",
-        *without == with_beat,
+        if reads_musical(kind) {
+            "the musical figures change what this visual draws"
+        } else {
+            "the musical figures change nothing a visual does not read"
+        },
+        (changed > 0) == reads_musical(kind),
         format!(
-            "{} of {} bytes differ at {} BPM",
-            without
-                .iter()
-                .zip(&with_beat)
-                .filter(|(a, b)| a != b)
-                .count(),
+            "{changed} of {} bytes differ at {} BPM",
             without.len(),
             beat.bpm
         ),
@@ -1329,6 +1352,244 @@ fn check_the_vectorscope() {
     );
 }
 
+/// A renderer showing the particle field, at the usual size.
+fn particles_renderer() -> OffscreenRenderer {
+    pollster::block_on(OffscreenRenderer::new(
+        WIDTH,
+        HEIGHT,
+        VisualKind::ParticleField,
+    ))
+    .expect("offscreen renderer for the particle field")
+}
+
+/// What the music is doing, for a scene that reads it: a firm 120 BPM at
+/// `phase`, with `onset` as the strongest since the last drain.
+fn musical_at(phase: f32, onset: f32, centroid_hz: f32) -> Musical {
+    Musical {
+        bpm: 120.0,
+        beat_confidence: 0.9,
+        beat_phase: phase,
+        onset,
+        transient: 0.5,
+        centroid_hz,
+    }
+}
+
+/// Runs the field for `seconds` of 60Hz frames over a held feed, returning the
+/// last frame's pixels.
+///
+/// The beat and the onsets are synthesised the way the analysis would publish
+/// them: a tempo throughout, and an onset standing in the snapshot for the one
+/// frame after each beat -- which is what a drain publishes and holds (M5
+/// decision 37).
+fn spin(
+    renderer: &mut OffscreenRenderer,
+    samples: &[f32],
+    seconds: f32,
+    beats: bool,
+    centroid_hz: f32,
+) -> Vec<u8> {
+    let frames = (seconds / FRAME_SECONDS).round() as usize;
+    let mut pixels = Vec::new();
+    for n in 0..frames {
+        let elapsed = n as f32 * FRAME_SECONDS;
+        let musical = if beats {
+            let phase = (elapsed * 2.0).fract();
+            let onset = if phase < FRAME_SECONDS * 2.0 {
+                0.9
+            } else {
+                0.0
+            };
+            musical_at(phase, onset, centroid_hz)
+        } else {
+            Musical {
+                centroid_hz,
+                ..Musical::default()
+            }
+        };
+        pixels = renderer
+            .draw_to_pixels(&frame(samples).with_musical(musical))
+            .expect("render the particle field");
+    }
+    pixels
+}
+
+/// The mean colour of everything drawn, which is how a field of thousands of
+/// sparks is asked what colour it is.
+fn mean_colour(pixels: &[u8]) -> [f32; 3] {
+    let (mut sums, mut count) = ([0.0f32; 3], 0usize);
+    for pixel in pixels.chunks_exact(4) {
+        if !is_trace(pixel) {
+            continue;
+        }
+        count += 1;
+        for (sum, channel) in sums.iter_mut().zip(&pixel[..3]) {
+            *sum += f32::from(*channel);
+        }
+    }
+    let count = count.max(1) as f32;
+    [sums[0] / count, sums[1] / count, sums[2] / count]
+}
+
+/// What only the particle field claims (Phase 3 M6).
+fn check_the_particle_field() {
+    println!("\n{} -- its own claims:", VisualKind::ParticleField.name());
+    let signal = tone(220.0, 0.6);
+
+    // Nothing measured is nothing drawn, the answer every visual here gives an
+    // empty feed -- and for this one it also means the simulation never ran, so
+    // there is no field to age.
+    let mut renderer = particles_renderer();
+    let empty = measure(
+        &renderer
+            .draw_to_pixels(&frame(&[]))
+            .expect("render an empty feed"),
+    );
+    check(
+        "nothing played draws nothing",
+        empty.count == 0,
+        format!("{} lit pixels", empty.count),
+    );
+
+    // Silence is measured and draws nothing either, which is a different claim:
+    // the clock runs, the simulation steps, and no particle is spawned because
+    // there is nothing to spawn one for.
+    let mut renderer = particles_renderer();
+    let silent = measure(&spin(&mut renderer, &silence(), 1.0, false, 0.0));
+    check(
+        "silence runs the simulation and still draws nothing",
+        silent.count == 0,
+        format!("{} lit pixels after a second of silence", silent.count),
+    );
+
+    // Audio fills the field. The figure is a disc seen from above its own
+    // plane, so it is wider than it is tall -- which is also the check that the
+    // camera is where this visual thinks it is.
+    let mut renderer = particles_renderer();
+    let lit = measure(&spin(&mut renderer, &signal, 2.0, false, 1200.0));
+    let width = lit.max_x - lit.min_x + 1;
+    let height = lit.max_y - lit.min_y + 1;
+    check(
+        "audio fills a disc wider than it is tall",
+        lit.count > 2_000 && width > height,
+        format!(
+            "{} lit pixels, {width}px wide by {height}px tall",
+            lit.count
+        ),
+    );
+
+    // The compute pass ran. Nothing else in this crate asserts *motion without
+    // input*: the waterfall and the tunnel hold still when the feed does, and
+    // this one must not, because its state is advanced by arithmetic rather
+    // than replaced by a measurement.
+    let mut renderer = particles_renderer();
+    let _ = spin(&mut renderer, &signal, 1.0, false, 1200.0);
+    let before = renderer
+        .draw_to_pixels(&frame(&signal))
+        .expect("render a frame");
+    let after = renderer
+        .draw_to_pixels(&frame(&signal))
+        .expect("render the next frame");
+    let moved = before.iter().zip(&after).filter(|(a, b)| a != b).count();
+    check(
+        "the simulation advances on the same feed",
+        moved > 1_000,
+        format!("{moved} of {} bytes differ between two frames", after.len()),
+    );
+
+    // Decision 42: a second delivered in one piece and in sixty moves the field
+    // exactly as far. The failure this catches is a simulation stepped once per
+    // frame, which would run at the display's rate rather than at its own.
+    let mut whole = particles_renderer();
+    let mut split = particles_renderer();
+    let one_second = {
+        let mut frame = frame(&signal);
+        frame.elapsed_seconds = 1.0;
+        whole.draw_to_pixels(&frame).expect("render a whole second")
+    };
+    let sixtieths = {
+        let mut pixels = Vec::new();
+        for _ in 0..60 {
+            pixels = split
+                .draw_to_pixels(&frame(&signal))
+                .expect("render a sixtieth");
+        }
+        pixels
+    };
+    let differ = one_second
+        .iter()
+        .zip(&sixtieths)
+        .filter(|(a, b)| a != b)
+        .count();
+    check(
+        "a second in one frame moves the field as far as sixty frames of a sixtieth",
+        differ == 0,
+        format!("{differ} of {} bytes differ", one_second.len()),
+    );
+
+    // Decision 43, and the bug this milestone was most likely to ship. An onset
+    // is *held* in the published snapshot until the next analysis drain
+    // replaces it, so a 180Hz display reads the same onset three times where a
+    // 60Hz display reads it once. Spawning per frame that saw one would put
+    // three times as many particles on the better machine; spawning per second
+    // of simulated time cannot.
+    let mut once = particles_renderer();
+    let mut thrice = particles_renderer();
+    let burst = musical_at(0.5, 0.9, 1200.0);
+    let single = once
+        .draw_to_pixels(&frame(&signal).with_musical(burst))
+        .expect("render one frame with an onset");
+    let repeated = {
+        let mut pixels = Vec::new();
+        for _ in 0..3 {
+            let mut third = frame(&signal).with_musical(burst);
+            third.elapsed_seconds = FRAME_SECONDS / 3.0;
+            pixels = thrice
+                .draw_to_pixels(&third)
+                .expect("render a third of a frame with the same onset");
+        }
+        pixels
+    };
+    let differ = single.iter().zip(&repeated).filter(|(a, b)| a != b).count();
+    check(
+        "the same onset read three times throws what reading it once throws",
+        differ == 0,
+        format!("{differ} of {} bytes differ", single.len()),
+    );
+
+    // A beat is movement: the same audio with a tempo behind it pushes the
+    // field wider than the same audio without one. Decision 45 is the other
+    // half of this -- material with no tempo gets the second picture, not a
+    // pulse invented for it.
+    let mut with_beat = particles_renderer();
+    let mut without_beat = particles_renderer();
+    let beaten = measure(&spin(&mut with_beat, &signal, 3.0, true, 1200.0));
+    let steady = measure(&spin(&mut without_beat, &signal, 3.0, false, 1200.0));
+    let beaten_width = beaten.max_x - beaten.min_x + 1;
+    let steady_width = steady.max_x - steady.min_x + 1;
+    check(
+        "onsets and the beat throw the field wider than a steady tone does",
+        beaten_width > steady_width,
+        format!("{beaten_width}px wide with a beat, {steady_width}px without"),
+    );
+
+    // Decision 46's sibling: the colour is a measurement. A dark, bass-heavy
+    // moment is blue; a bright one is warm. Checked as the ratio of red to
+    // blue, because "which hue" is not a thing a pixel says on its own.
+    let mut dark = particles_renderer();
+    let mut bright = particles_renderer();
+    let low = mean_colour(&spin(&mut dark, &signal, 1.5, false, 120.0));
+    let high = mean_colour(&spin(&mut bright, &signal, 1.5, false, 6_000.0));
+    check(
+        "the spectral centroid colours the field",
+        low[2] > low[0] && high[0] > low[0],
+        format!(
+            "rgb({:.0}, {:.0}, {:.0}) at 120Hz against rgb({:.0}, {:.0}, {:.0}) at 6kHz",
+            low[0], low[1], low[2], high[0], high[1], high[2]
+        ),
+    );
+}
+
 /// Display gain (added 2026-08-18, after the first live fullscreen run).
 ///
 /// The complaint it answers is arithmetic rather than framing: the frame is sized
@@ -1475,6 +1736,7 @@ fn main() {
     check_the_spectrum_bars();
     check_the_spectrogram_waterfall();
     check_the_oscilloscope_tunnel();
+    check_the_particle_field();
     check_display_gain();
 
     let checks = CHECKS.load(Ordering::Relaxed);

@@ -42,35 +42,63 @@ pub struct RingHistory {
 /// part that can be checked as arithmetic -- which matters more than its four
 /// lines suggest: this is the rule that makes a 60Hz redraw thread and a
 /// 144Hz browser draw the same history.
+///
+/// Visible to the other visuals from M6 (decision 42), where it got a third
+/// caller with no ring behind it at all: a particle field's *simulation* steps
+/// on exactly this clock, for exactly this reason. What a step does is the
+/// caller's business; that sixty frames of a sixtieth take the same number of
+/// them as one frame of a whole second is this type's.
 #[derive(Debug)]
-struct RowClock {
-    seconds_per_row: f32,
+pub struct RowClock {
+    rows_per_second: f32,
+    /// Time carried towards the next row, counted **in rows** rather than in
+    /// seconds -- see [`Self::due`] for why that is the whole design.
     pending: f32,
+    /// The most steps one call may claim. A ring's length for a history (there
+    /// is no point rewriting a row that is about to be overwritten); a stall
+    /// budget for a simulation, which cannot skip work but should not spend a
+    /// minute catching up on a minute it spent suspended either.
     rows: usize,
 }
 
 impl RowClock {
-    fn new(rows_per_second: f32, rows: usize) -> Self {
+    pub fn new(rows_per_second: f32, rows: usize) -> Self {
         Self {
-            seconds_per_row: 1.0 / rows_per_second.max(f32::EPSILON),
+            rows_per_second: rows_per_second.max(f32::EPSILON),
             pending: 0.0,
             rows,
         }
     }
 
-    fn due(&mut self, elapsed: f32) -> usize {
-        let pending = self.pending + elapsed.max(0.0);
-        if !pending.is_finite() || pending < self.seconds_per_row {
-            self.pending = pending.max(0.0);
+    /// How many rows this much elapsed time is worth, carrying the remainder.
+    ///
+    /// The accumulator counts rows rather than seconds, and that is a fix
+    /// rather than a preference (M6, found by the particle field's own chunking
+    /// check). Counting seconds means dividing by `1.0 / rows_per_second`, and
+    /// in `f32` that reciprocal is a hair *larger* than the true interval -- so
+    /// a frame of exactly one second at 120Hz asked for 119 steps instead of
+    /// 120, and three frames of exactly a third of a sixtieth asked for one step
+    /// instead of two. Both are the boundary case, both are what a check
+    /// constructs deliberately, and one of them is what a browser tab that
+    /// stalled for a second actually hands over.
+    ///
+    /// Multiplying by the rate has no such wart at the round numbers a caller
+    /// is most likely to produce: 1.0 * 120.0 is exactly 120.0.
+    pub fn due(&mut self, elapsed: f32) -> usize {
+        let pending = self.pending + elapsed.max(0.0) * self.rows_per_second;
+        if !pending.is_finite() {
+            // A frame with no sensible duration advances nothing and leaves the
+            // carry where it was, rather than poisoning it.
             return 0;
         }
-        let whole = (pending / self.seconds_per_row).floor();
-        self.pending = pending - whole * self.seconds_per_row;
-        whole.min(self.rows as f32) as usize
+        let whole = pending.floor().max(0.0);
+        self.pending = pending - whole;
+        (whole as usize).min(self.rows)
     }
 
-    fn fraction(&self) -> f32 {
-        (self.pending / self.seconds_per_row).clamp(0.0, 1.0)
+    /// Time carried towards the next row, as a fraction of one.
+    pub fn fraction(&self) -> f32 {
+        self.pending.clamp(0.0, 1.0)
     }
 }
 
@@ -281,6 +309,34 @@ impl RingHistory {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// The boundary cases M6 found the hard way, when the particle field's own
+    /// chunking check failed on a clock two visuals had already shipped with.
+    ///
+    /// Every figure here is an exact multiple, which is precisely where a
+    /// seconds-based accumulator went wrong: dividing by an `f32` reciprocal
+    /// that is a hair too large loses the last step of a whole second, and
+    /// gains nothing anywhere else.
+    #[test]
+    fn an_exact_multiple_of_the_interval_is_not_a_step_short() {
+        // A whole second at the particle field's own rate. 119 was the bug.
+        let mut second = RowClock::new(120.0, 240);
+        assert_eq!(second.due(1.0), 120);
+
+        // Three exact thirds of a 60Hz frame, which is what a 180Hz display
+        // hands over. Two steps, not one -- and the same two the single frame
+        // below gets, which is the whole of decision 43's idempotency.
+        let mut thirds = RowClock::new(120.0, 240);
+        let total: usize = (0..3).map(|_| thirds.due(1.0 / 180.0)).sum();
+        assert_eq!(total, 2, "three thirds of a frame moved {total} steps");
+        let mut whole = RowClock::new(120.0, 240);
+        assert_eq!(whole.due(1.0 / 60.0), 2);
+
+        // And the same at the rates the other two callers use.
+        assert_eq!(RowClock::new(20.0, 120).due(1.0), 20);
+        assert_eq!(RowClock::new(60.0, 240).due(1.0), 60);
+        assert_eq!(RowClock::new(60.0, 240).due(0.5), 30);
+    }
 
     #[test]
     fn rows_advance_on_the_clock_and_not_on_frames() {

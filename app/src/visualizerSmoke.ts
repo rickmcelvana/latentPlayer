@@ -899,7 +899,238 @@ async function checkTheOscilloscopeTunnel(): Promise<void> {
 }
 
 /// The contract the *host* depends on, asked of every visual in the registry --
-/// the same four claims the native check makes, in the same order.
+/// The particle field's checks all run on **one** renderer, reset between them
+/// by asking for the same visual again -- which rebuilds the scene and leaves
+/// the surface alone, exactly as decision 5 says a swap does.
+///
+/// That is not tidiness. Each `WasmRenderer` holds a real GPU device, and the
+/// first version of this section asked Dawn for nine of them: it answered
+/// `E_OUTOFMEMORY` on the D3D12 command queue and the section could not run at
+/// all (2026-08-20). Freeing them as it went did not help, so the fix is not to
+/// ask.
+function resetField(renderer: WasmRenderer): void {
+  renderer.setVisual("particle-field");
+}
+
+/// What the music is doing, in `MusicalSnapshot::to_array`'s order: a firm 120
+/// BPM at `phase`, with `onset` as the strongest since the last drain.
+function musicalAt(phase: number, onset: number, centroidHz: number): Float32Array {
+  return new Float32Array([120, 0.9, phase, onset, 0.5, centroidHz]);
+}
+
+/// Runs the field for `seconds` of 60Hz frames over a held feed.
+///
+/// The beat and the onsets are synthesised the way the analysis publishes them
+/// -- a tempo throughout, and an onset standing in the snapshot for the frame
+/// after each beat (M5 decision 37) -- and identically to the native half, which
+/// is what makes the two comparable figure for figure.
+function spin(
+  renderer: WasmRenderer,
+  samples: Float32Array,
+  seconds: number,
+  beats: boolean,
+  centroidHz: number,
+): void {
+  const frames = Math.round(seconds / FRAME_SECONDS);
+  for (let n = 0; n < frames; n++) {
+    const elapsed = n * FRAME_SECONDS;
+    let musical: Float32Array;
+    if (beats) {
+      const phase = (elapsed * 2) % 1;
+      const onset = phase < FRAME_SECONDS * 2 ? 0.9 : 0;
+      musical = musicalAt(phase, onset, centroidHz);
+    } else {
+      musical = new Float32Array([0, 0, 0, 0, 0, centroidHz]);
+    }
+    renderer.draw_frame(samples, 2, RATE, FRAME_SECONDS, NO_SPECTRUM, NO_SPECTRUM, musical);
+  }
+}
+
+/// The mean colour of everything drawn -- how a field of thousands of sparks is
+/// asked what colour it is.
+function meanColour(target: HTMLCanvasElement): [number, number, number] {
+  const px = pixels(target);
+  let count = 0;
+  const sums = [0, 0, 0];
+  for (let i = 0; i < px.length; i += 4) {
+    if (px[i] <= 40 && px[i + 1] <= 40 && px[i + 2] <= 40) continue;
+    count += 1;
+    for (let c = 0; c < 3; c++) sums[c] += px[i + c];
+  }
+  const n = Math.max(count, 1);
+  return [sums[0] / n, sums[1] / n, sums[2] / n];
+}
+
+function differingBytes(a: Uint8ClampedArray, b: Uint8ClampedArray): number {
+  let differing = 0;
+  for (let i = 0; i < a.length; i++) if (a[i] !== b[i]) differing += 1;
+  return differing;
+}
+
+/// What only the particle field claims (Phase 3 M6) -- the same claims, in the
+/// same order, as the native half's.
+async function checkTheParticleField(): Promise<void> {
+  log("\nParticle field -- its own claims:");
+  const signal = tone(220, 0.6);
+  const surface = extraCanvas(320, 320);
+  const renderer = await WasmRenderer.create(
+    surface,
+    surface.width,
+    surface.height,
+    "particle-field",
+  );
+  const plain = (samples: Float32Array, elapsed = FRAME_SECONDS) =>
+    renderer.draw_frame(samples, 2, RATE, elapsed, NO_SPECTRUM, NO_SPECTRUM);
+
+  // Nothing measured is nothing drawn -- and for this visual it also means the
+  // simulation never ran, so there is no field to age.
+  plain(new Float32Array(0));
+  check(
+    "nothing played draws nothing",
+    measure(surface).lit === 0,
+    `${measure(surface).lit} lit pixels`,
+  );
+
+  // Silence is measured and still draws nothing, which is a different claim:
+  // the clock runs, the simulation steps, and nothing is spawned because there
+  // is nothing to spawn one for.
+  spin(renderer, silence(), 1.0, false, 0);
+  check(
+    "silence runs the simulation and still draws nothing",
+    measure(surface).lit === 0,
+    `${measure(surface).lit} lit pixels after a second of silence`,
+  );
+
+  // Audio fills the field: a disc seen from above its own plane, so it is wider
+  // than it is tall -- which is also the check that the camera is where this
+  // visual thinks it is.
+  spin(renderer, signal, 2.0, false, 1200);
+  const lit = measure(surface);
+  const litWidth = lit.maxX - lit.minX + 1;
+  const litHeight = lit.maxY - lit.minY + 1;
+  check(
+    "audio fills a disc wider than it is tall",
+    lit.lit > 2000 && litWidth > litHeight,
+    `${lit.lit} lit pixels, ${litWidth}px wide by ${litHeight}px tall`,
+  );
+
+  // The compute pass ran. Nothing else in this crate asserts *motion without
+  // input*: the waterfall and the tunnel hold still when the feed does, and
+  // this one must not, because its state is advanced by arithmetic rather than
+  // replaced by a measurement.
+  plain(signal);
+  const before = pixels(surface);
+  plain(signal);
+  const moved = differingBytes(before, pixels(surface));
+  check(
+    "the simulation advances on the same feed",
+    moved > 1000,
+    `${moved} of ${before.length} bytes differ between two frames`,
+  );
+
+  // Decision 42: a second delivered in one piece and in sixty moves the field
+  // exactly as far. On this shell that is not a hypothetical -- animation
+  // callbacks run at whatever the display does.
+  resetField(renderer);
+  plain(signal, 1.0);
+  const oneSecond = pixels(surface);
+  resetField(renderer);
+  for (let n = 0; n < 60; n++) plain(signal);
+  const sixtieths = pixels(surface);
+  check(
+    "a second in one frame moves the field as far as sixty frames of a sixtieth",
+    differingBytes(oneSecond, sixtieths) === 0,
+    `${differingBytes(oneSecond, sixtieths)} of ${oneSecond.length} bytes differ`,
+  );
+
+  // Decision 43, and the bug this milestone was most likely to ship. An onset
+  // is *held* in the published snapshot until the next drain replaces it, so a
+  // 180Hz display reads the same onset three times where a 60Hz display reads
+  // it once. Spawning per frame that saw one would put three times as many
+  // particles on the better machine; spawning per second of simulated time
+  // cannot.
+  const burst = musicalAt(0.5, 0.9, 1200);
+  const withBurst = (elapsed: number) =>
+    renderer.draw_frame(signal, 2, RATE, elapsed, NO_SPECTRUM, NO_SPECTRUM, burst);
+  resetField(renderer);
+  withBurst(FRAME_SECONDS);
+  const single = pixels(surface);
+  resetField(renderer);
+  for (let n = 0; n < 3; n++) withBurst(FRAME_SECONDS / 3);
+  const repeated = pixels(surface);
+  check(
+    "the same onset read three times throws what reading it once throws",
+    differingBytes(single, repeated) === 0,
+    `${differingBytes(single, repeated)} of ${single.length} bytes differ`,
+  );
+
+  // A beat is movement: the same audio with a tempo behind it pushes the field
+  // wider than the same audio without one. Decision 45 is the other half --
+  // material with no tempo gets the second picture, not a pulse invented for
+  // it.
+  resetField(renderer);
+  spin(renderer, signal, 3.0, true, 1200);
+  const beatenFigure = measure(surface);
+  resetField(renderer);
+  spin(renderer, signal, 3.0, false, 1200);
+  const steadyFigure = measure(surface);
+  const beatenWidth = beatenFigure.maxX - beatenFigure.minX + 1;
+  const steadyWidth = steadyFigure.maxX - steadyFigure.minX + 1;
+  check(
+    "onsets and the beat throw the field wider than a steady tone does",
+    beatenWidth > steadyWidth,
+    `${beatenWidth}px wide with a beat, ${steadyWidth}px without`,
+  );
+
+  // The colour is a measurement: a dark, bass-heavy moment is blue and a bright
+  // one is warm. Checked as red against blue, because "which hue" is not a
+  // thing a pixel says on its own.
+  resetField(renderer);
+  spin(renderer, signal, 1.5, false, 120);
+  const low = meanColour(surface);
+  resetField(renderer);
+  spin(renderer, signal, 1.5, false, 6000);
+  const high = meanColour(surface);
+  check(
+    "the spectral centroid colours the field",
+    low[2] > low[0] && high[0] > low[0],
+    `rgb(${low[0].toFixed(0)}, ${low[1].toFixed(0)}, ${low[2].toFixed(0)}) at 120Hz against rgb(${high[0].toFixed(0)}, ${high[1].toFixed(0)}, ${high[2].toFixed(0)}) at 6kHz`,
+  );
+}
+
+/// Whether this visual reads the musical figures at all.
+///
+/// The native half carries the same list, for the same reason: this is a claim
+/// about the *picture* rather than about the gallery, so neither shell has any
+/// use for it and the registry does not carry it. What holds the two lists
+/// together is that both smokes report the figure.
+function readsMusical(id: string): boolean {
+  return id === "particle-field";
+}
+
+/// The contract every visual in the registry has to keep, checked on **two**
+/// GPU devices per visual rather than four.
+///
+/// That budget is the page's, not a preference. Each `WasmRenderer` holds a
+/// real device, and this harness asked for four per visual until M6 -- which
+/// worked at four visuals and stopped working at five: Dawn answered
+/// `E_OUTOFMEMORY` creating the D3D12 command queue, and the run ended part-way
+/// through (2026-08-20). A gallery that grows is the whole point of this phase,
+/// so the harness had to stop growing with it.
+///
+/// What the two are:
+///
+/// - `renderer`, built as this visual, which every claim about *this* visual
+///   uses. Where a claim needs a scene with no history behind it, the visual is
+///   rebuilt in place (`setVisual`) -- the same swap decision 5 describes, and
+///   for a visual's own state it is exactly a fresh one, since all a swap keeps
+///   is the surface.
+/// - `switched`, built as some *other* visual and then switched into this one,
+///   which is the only claim here that genuinely needs a second device.
+///
+/// The native half still builds a fresh renderer per claim, because nothing
+/// there is scarce -- and because the two halves arriving at the same figures
+/// by different routes is worth more than the two being written the same way.
 async function checkTheHostContract(entry: VisualInfo): Promise<void> {
   log(`\n${entry.name} (${entry.id}):`);
   const surface = extraCanvas(320, 320);
@@ -930,11 +1161,24 @@ async function checkTheHostContract(entry: VisualInfo): Promise<void> {
   // reads the samples and the bars read the spectrum, and a contract check
   // handing over only half of it would be asking half the gallery to draw
   // nothing.
+  //
+  // This is also the `fresh` baseline the next two claims compare against: an
+  // empty feed measures nothing, pushes no history and steps no simulation, so
+  // this frame is the first thing this renderer has actually drawn.
   const signal = tone(220, 0.3);
   const spectrum = spectrumOf(signal, 2);
-  const drawSignal = (into: WasmRenderer) =>
-    into.draw_frame(signal, 2, RATE, FRAME_SECONDS, spectrum.levels, spectrum.centres);
+  const drawSignal = (into: WasmRenderer, musical?: Float32Array) =>
+    into.draw_frame(
+      signal,
+      2,
+      RATE,
+      FRAME_SECONDS,
+      spectrum.levels,
+      spectrum.centres,
+      musical,
+    );
   drawSignal(renderer);
+  const fresh = pixels(surface);
   const lit = measure(surface);
   check("audio draws something", lit.lit > 100, `${lit.lit} lit pixels`);
 
@@ -954,15 +1198,6 @@ async function checkTheHostContract(entry: VisualInfo): Promise<void> {
   switched.setVisual(entry.id);
   drawSignal(switched);
   const after = pixels(other);
-  const untouched = extraCanvas(320, 320);
-  const built = await WasmRenderer.create(
-    untouched,
-    untouched.width,
-    untouched.height,
-    entry.id,
-  );
-  drawSignal(built);
-  const fresh = pixels(untouched);
   let differing = 0;
   for (let i = 0; i < after.length; i++) if (after[i] !== fresh[i]) differing += 1;
   check(
@@ -976,35 +1211,28 @@ async function checkTheHostContract(entry: VisualInfo): Promise<void> {
     `${switched.currentVisual()}`,
   );
 
-  // M5 put the musical figures in the feed and no visual reads them yet
-  // (decision 39) -- M6's scenes are where beats drive motion. So what can be
-  // checked here is that the addition is inert: the same frame with a tempo, a
-  // beat phase and an onset in it draws exactly what it drew without them. Two
-  // fresh renderers rather than two draws, for the switch check's reason.
-  // The baseline is the `fresh` renderer above rather than a fourth one: it is
-  // already a renderer that had drawn nothing before this same frame, and each
-  // `WasmRenderer` here holds a real GPU device -- asking Dawn for two more per
-  // visual cost this page its command queue outright (E_OUTOFMEMORY, found
-  // 2026-08-20).
+  // M5 put the musical figures in the feed and M6 is where scenes started
+  // reading them, so this is two claims in one: a visual that reads them must
+  // draw something different when they change, and every visual that does not
+  // must draw *exactly* what it drew without them -- which is what stops a beat
+  // leaking into the four visuals confirmed before M6.
+  //
+  // The scene is rebuilt first, so this frame is again the first thing the
+  // visual has drawn and the only difference from `fresh` is the beat.
   const beat = new Float32Array([128, 0.9, 0.25, 0.8, 0.6, 3200]);
-  const withoutBeat = fresh;
-  const beatCanvas = extraCanvas(320, 320);
-  const beaten = await WasmRenderer.create(
-    beatCanvas,
-    beatCanvas.width,
-    beatCanvas.height,
-    entry.id,
-  );
-  beaten.draw_frame(signal, 2, RATE, FRAME_SECONDS, spectrum.levels, spectrum.centres, beat);
-  const withBeat = pixels(beatCanvas);
+  renderer.setVisual(entry.id);
+  drawSignal(renderer, beat);
+  const withBeat = pixels(surface);
   let beatDiffering = 0;
-  for (let i = 0; i < withoutBeat.length; i++) {
-    if (withoutBeat[i] !== withBeat[i]) beatDiffering += 1;
+  for (let i = 0; i < fresh.length; i++) {
+    if (fresh[i] !== withBeat[i]) beatDiffering += 1;
   }
   check(
-    "the musical figures change nothing a visual does not read",
-    beatDiffering === 0,
-    `${beatDiffering} of ${withoutBeat.length} bytes differ at ${beat[0]} BPM`,
+    readsMusical(entry.id)
+      ? "the musical figures change what this visual draws"
+      : "the musical figures change nothing a visual does not read",
+    beatDiffering > 0 === readsMusical(entry.id),
+    `${beatDiffering} of ${fresh.length} bytes differ at ${beat[0]} BPM`,
   );
 
   // Resizing rebuilds whatever the visual keeps that depends on the viewport.
@@ -1283,6 +1511,7 @@ async function run(): Promise<void> {
   await checkTheSpectrumBars();
   await checkTheSpectrogramWaterfall();
   await checkTheOscilloscopeTunnel();
+  await checkTheParticleField();
   await checkDisplayGain();
 
   log(

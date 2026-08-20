@@ -291,6 +291,11 @@ pub enum VisualKind {
     /// PLAN.md section 4's fourth built-in (Phase 3 M4): the waveform swept
     /// along a path -- the first visual whose camera moves.
     OscilloscopeTunnel,
+    /// PLAN.md section 4's fifth built-in (Phase 3 M6): particles thrown by
+    /// onsets and moved by the beat -- the first visual driven by what the
+    /// music is *doing* rather than by what it sounds like, and the first with
+    /// a compute shader behind it.
+    ParticleField,
 }
 
 impl VisualKind {
@@ -300,6 +305,7 @@ impl VisualKind {
         VisualKind::SpectrumBars,
         VisualKind::SpectrogramWaterfall,
         VisualKind::OscilloscopeTunnel,
+        VisualKind::ParticleField,
     ];
 
     /// What the gallery opens at for anyone who has never chosen.
@@ -311,6 +317,7 @@ impl VisualKind {
             VisualKind::SpectrumBars => "spectrum-bars",
             VisualKind::SpectrogramWaterfall => "spectrogram-waterfall",
             VisualKind::OscilloscopeTunnel => "oscilloscope-tunnel",
+            VisualKind::ParticleField => "particle-field",
         }
     }
 
@@ -320,6 +327,7 @@ impl VisualKind {
             VisualKind::SpectrumBars => "Spectrum bars",
             VisualKind::SpectrogramWaterfall => "Spectrogram waterfall",
             VisualKind::OscilloscopeTunnel => "Oscilloscope tunnel",
+            VisualKind::ParticleField => "Particle field",
         }
     }
 
@@ -336,6 +344,9 @@ impl VisualKind {
             }
             VisualKind::OscilloscopeTunnel => {
                 "The waveform wrapped into rings and flown through, newest furthest ahead."
+            }
+            VisualKind::ParticleField => {
+                "Onsets throw sparks, the beat pushes them outward, the brightness colours them."
             }
         }
     }
@@ -362,6 +373,9 @@ impl VisualKind {
             ),
             VisualKind::OscilloscopeTunnel => {
                 Box::new(crate::visuals::OscilloscopeTunnel::new(gpu, width, height))
+            }
+            VisualKind::ParticleField => {
+                Box::new(crate::visuals::ParticleField::new(gpu, width, height))
             }
         }
     }
