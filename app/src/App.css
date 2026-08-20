@@ -253,6 +253,103 @@ input[type="range"] {
   flex: 0 0 auto;
 }
 
+/* The musical readout: tempo, confidence, transient, brightness. Its own
+   panel because a tempo is a different kind of statement than a level -- and
+   because these are the figures the listener-facing visuals draw. */
+.musical {
+  display: flex;
+  align-items: center;
+  gap: 16px;
+  width: min(560px, 100%);
+  padding: 10px 12px;
+  border-radius: 8px;
+  border: 1px solid var(--border);
+  font-variant-numeric: tabular-nums;
+
+  .tempo {
+    display: flex;
+    align-items: baseline;
+    gap: 8px;
+    flex: 0 0 auto;
+  }
+
+  /* Brightest on the beat, fading through it. */
+  .dot {
+    width: 10px;
+    height: 10px;
+    border-radius: 50%;
+    background: var(--accent);
+    align-self: center;
+    transition: opacity 60ms linear;
+  }
+
+  .bpm {
+    font-size: 28px;
+    font-family: ui-monospace, monospace;
+    color: var(--accent);
+    line-height: 1;
+  }
+
+  /* A tempo the tracker is not sure of is shown, but not asserted. */
+  .bpm.unsure {
+    opacity: 0.55;
+  }
+
+  .unit {
+    font-size: 10px;
+    letter-spacing: 0.08em;
+    color: var(--text);
+    opacity: 0.5;
+  }
+
+  .figures {
+    display: flex;
+    flex-direction: column;
+    gap: 5px;
+    flex: 1 1 auto;
+    font-size: 11px;
+  }
+
+  .confidence,
+  .brightness {
+    display: flex;
+    align-items: center;
+    gap: 8px;
+  }
+
+  .label {
+    text-transform: uppercase;
+    letter-spacing: 0.04em;
+    opacity: 0.7;
+    flex: 0 0 72px;
+  }
+
+  .track {
+    position: relative;
+    flex: 1 1 auto;
+    height: 6px;
+    border-radius: 3px;
+    background: #14141c;
+    overflow: hidden;
+  }
+
+  .fill {
+    position: absolute;
+    top: 0;
+    bottom: 0;
+    left: 0;
+    background: var(--accent);
+  }
+
+  .value {
+    flex: 0 0 auto;
+    min-width: 52px;
+    text-align: right;
+    font-family: ui-monospace, monospace;
+    opacity: 0.85;
+  }
+}
+
 .loudness {
   display: flex;
   flex-direction: column;

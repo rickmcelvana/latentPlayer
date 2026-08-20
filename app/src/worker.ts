@@ -378,7 +378,7 @@ function pump(): void {
 /// side gives this its own thread only because it has threads to give.
 function runAnalysis(): void {
   if (!analyzer || !views) return;
-  const { control, scope, spectrum, meters, goniometer } = views;
+  const { control, scope, spectrum, meters, musical, goniometer } = views;
 
   const written = Atomics.load(control, CONTROL.tapWritten);
   let available = framesUntil(written, tapCursor);
@@ -420,9 +420,10 @@ function runAnalysis(): void {
   const levels = analyzer.update((now - lastAnalysis) / 1000);
   lastAnalysis = now;
   spectrum.set(levels);
-  // Published together, out of one `snapshot`, because they describe one
-  // instant (M5 decision 4).
+  // Published together, out of one drain, because they describe one instant
+  // (Phase 1 M5 decision 4, and Phase 3 M5 decision 38 for the musical half).
   meters.set(analyzer.meters());
+  musical.set(analyzer.musical());
   const points = analyzer.goniometer();
   goniometer.set(points);
   // The count last: a reader that sees it must be able to read every point it

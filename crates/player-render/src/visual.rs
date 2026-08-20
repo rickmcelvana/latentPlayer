@@ -30,6 +30,45 @@ pub struct Gpu<'a> {
     pub format: wgpu::TextureFormat,
 }
 
+/// What the music is doing, as `player-core`'s analysis measures it.
+///
+/// Phase 3 M5's addition to the feed. Every figure is measured off the audio
+/// thread by the same code the studio readout shows -- a visual reads these and
+/// computes none of them (decision 2), which is what stops the listener-facing
+/// and studio-facing halves of the app from ever disagreeing about the beat.
+///
+/// A plain struct here rather than `player-core`'s `MusicalSnapshot`, because
+/// this crate does not depend on that one and should not start: the shells
+/// already translate everything else in the frame, and a rendering crate that
+/// linked the analysis crate would make "a visual computes no DSP" a convention
+/// instead of a fact.
+#[derive(Clone, Copy, Debug, Default, PartialEq)]
+pub struct Musical {
+    /// Tempo in beats per minute, or 0.0 when none is established -- warming
+    /// up, silence, or material with no steady pulse. A visual that scales
+    /// anything by this has to handle the zero, which is deliberate: "no tempo"
+    /// is a state worth drawing differently rather than a number to divide by.
+    pub bpm: f32,
+    /// How much to believe [`Self::bpm`], 0..1. The figure a scene uses to
+    /// decide whether to move *on* the beat or merely with the music.
+    pub beat_confidence: f32,
+    /// Where in the beat the newest analysed sample falls: 0.0 on the beat,
+    /// approaching 1.0 just before the next one. Measured, not extrapolated to
+    /// the frame's own instant -- its resolution is one analysis hop (10ms).
+    pub beat_phase: f32,
+    /// Strength of the strongest onset since the previous analysis drain, 0.0
+    /// when there was none. An event: a visual reading it every frame cannot
+    /// miss one, and must not integrate it as if it were a level.
+    pub onset: f32,
+    /// How percussive the music is right now, 0..1. Published as measured, so a
+    /// visual that wants a decaying flash owns that decay itself -- the bars'
+    /// peak caps set that precedent in M2.
+    pub transient: f32,
+    /// Spectral centroid in Hz: the brightness of the moment. 0.0 when there is
+    /// nothing sounding, which is a value rather than a missing one.
+    pub centroid_hz: f32,
+}
+
 /// One frame's worth of what the audio is doing, assembled by the host.
 ///
 /// Deliberately a struct rather than a widening argument list: M2's spectrum
@@ -81,6 +120,12 @@ pub struct VisualFrame<'a> {
     /// Fixed for a given output rate, and empty on the same terms as
     /// `levels`.
     pub band_centres: &'a [f32],
+    /// What the music is doing: tempo, beat phase, onsets, brightness.
+    ///
+    /// Default (every figure 0.0) before anything has been measured, and after
+    /// a seek or a track change until the tempo re-establishes -- which is a
+    /// state a scene should draw rather than a gap to paper over.
+    pub musical: Musical,
     /// How much to magnify the signal for display, 1.0 being unity.
     ///
     /// **Not analysis, and the one field a shell does not fill in**: the host
@@ -102,6 +147,7 @@ impl<'a> VisualFrame<'a> {
             elapsed_seconds,
             levels: &[],
             band_centres: &[],
+            musical: Musical::default(),
             gain: 1.0,
         }
     }
@@ -115,6 +161,17 @@ impl<'a> VisualFrame<'a> {
     pub fn with_spectrum(mut self, levels: &'a [f32], band_centres: &'a [f32]) -> Self {
         self.levels = levels;
         self.band_centres = band_centres;
+        self
+    }
+
+    /// Adds M5's musical intelligence to the frame.
+    ///
+    /// The addition `with_spectrum` was written to be joined by (M2 named this
+    /// milestone as the reason the frame is a struct), so a shell with nothing
+    /// to offer says nothing rather than passing six zeroes, and the visuals
+    /// that ignore it are not edited.
+    pub fn with_musical(mut self, musical: Musical) -> Self {
+        self.musical = musical;
         self
     }
 

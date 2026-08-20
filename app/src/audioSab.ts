@@ -212,6 +212,27 @@ export const TRUE_PEAK_FLOOR_DB = -120;
 /// `GONIOMETER_POINTS` in player-core/src/analysis.rs. Two floats each.
 export const GONIOMETER_POINTS = 256;
 
+/// Where each of the musical figures sits in its region, mirroring
+/// `MusicalSnapshot::to_array` in player-core/src/analysis.rs (Phase 3 M5).
+/// Same arrangement as `METER` above and for the same reason: the worker copies
+/// what Rust returns straight in, so this is the one place the order is named
+/// on this side.
+export const MUSICAL = {
+  bpm: 0,
+  beatConfidence: 1,
+  beatPhase: 2,
+  onset: 3,
+  transient: 4,
+  centroidHz: 5,
+} as const;
+export const MUSICAL_FIELDS = 6;
+
+/// What a tempo that has not been established reads, mirroring `NO_TEMPO` in
+/// player-core/src/tempo.rs. Zero rather than a NaN, so both shells report the
+/// same thing across their very different boundaries (M5 decision 36) -- and so
+/// the region needs no initialising fill, unlike the meters above.
+export const NO_TEMPO = 0;
+
 /// How long a run of silence-for-want-of-audio has to last before it counts as
 /// buffering (Phase 2 M5), mirroring `BUFFERING_AFTER_SECONDS` in
 /// player-core/src/playback.rs -- which is where the number is decided.
@@ -254,6 +275,9 @@ export interface AudioViews {
   spectrum: Float32Array;
   /// Loudness and phase, in `METER`'s order.
   meters: Float32Array;
+  /// Tempo, beat phase, onsets and brightness, in `MUSICAL`'s order. Written in
+  /// the same step as `meters`, so the two describe one instant.
+  musical: Float32Array;
   /// Goniometer points, interleaved side/mid. Only the first
   /// `CONTROL.goniometerPoints` pairs are valid.
   goniometer: Float32Array;
@@ -268,7 +292,7 @@ export interface AudioViews {
 /// eight because a `Float64Array` view must start on an 8-byte boundary, and
 /// `METER_FIELDS` is odd -- so without this the region's start depends on the
 /// meter count, which is exactly the sort of thing that works until someone
-/// adds a meter.
+/// adds a meter. Someone did, in M5, and this is why that cost nothing.
 function eqOffset(after: number): number {
   return Math.ceil(after / 8) * 8;
 }
@@ -285,6 +309,7 @@ export function createAudioSab(channels: number, sampleRate: number): SharedArra
         SCOPE_SAMPLES * 4 +
         SPECTRUM_BANDS * 4 +
         METER_FIELDS * 4 +
+        MUSICAL_FIELDS * 4 +
         GONIOMETER_POINTS * 2 * 4,
     ) +
     EQ_FIELDS * 8;
@@ -317,12 +342,25 @@ export function audioViews(sab: SharedArrayBuffer): AudioViews {
   const spectrum = new Float32Array(sab, spectrumBytes, SPECTRUM_BANDS);
   const meterBytes = spectrumBytes + SPECTRUM_BANDS * 4;
   const meters = new Float32Array(sab, meterBytes, METER_FIELDS);
-  const goniometerBytes = meterBytes + METER_FIELDS * 4;
+  const musicalBytes = meterBytes + METER_FIELDS * 4;
+  const musical = new Float32Array(sab, musicalBytes, MUSICAL_FIELDS);
+  const goniometerBytes = musicalBytes + MUSICAL_FIELDS * 4;
   const goniometer = new Float32Array(sab, goniometerBytes, GONIOMETER_POINTS * 2);
   const eq = new Float64Array(
     sab,
     eqOffset(goniometerBytes + GONIOMETER_POINTS * 2 * 4),
     EQ_FIELDS,
   );
-  return { control, ring, scope, spectrum, meters, goniometer, eq, ringFrames, channels };
+  return {
+    control,
+    ring,
+    scope,
+    spectrum,
+    meters,
+    musical,
+    goniometer,
+    eq,
+    ringFrames,
+    channels,
+  };
 }

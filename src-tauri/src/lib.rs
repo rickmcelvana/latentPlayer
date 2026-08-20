@@ -17,7 +17,7 @@ use servers::SharedServer;
 use player_core::eq::{self, EqSettings, BAND_FREQUENCIES, EQ_BANDS};
 use player_core::library::{Library, LibraryTrack, Playlist, ScanSummary};
 use player_core::{LocalFile, Playback};
-use player_render::{GainSetting, VisualFrame, VisualKind};
+use player_render::{GainSetting, Musical, VisualFrame, VisualKind};
 use tauri::Manager;
 use tauri_plugin_global_shortcut::{Code, GlobalShortcutExt, Shortcut, ShortcutState};
 
@@ -297,6 +297,47 @@ fn meters(state: tauri::State<SharedPlayback>) -> MeterState {
         .as_ref()
         .map(|playback| playback.meters().into())
         .unwrap_or_else(|| player_core::MeterSnapshot::silent().into())
+}
+
+/// What the music is doing: tempo, beat phase, onsets and brightness.
+///
+/// One snapshot for `MeterState`'s reason -- these describe one instant -- and
+/// separate from it because "loudness and phase" and "what the music is doing"
+/// are different questions (Phase 3 M5 decision 38). Finite by construction on
+/// the same terms: `player-core` reports 0.0 for "no tempo" rather than a NaN,
+/// because a non-finite float becomes `null` crossing this boundary.
+#[derive(serde::Serialize)]
+#[serde(rename_all = "camelCase")]
+struct MusicalState {
+    bpm: f32,
+    beat_confidence: f32,
+    beat_phase: f32,
+    onset: f32,
+    transient: f32,
+    centroid_hz: f32,
+}
+
+impl From<player_core::MusicalSnapshot> for MusicalState {
+    fn from(snapshot: player_core::MusicalSnapshot) -> Self {
+        Self {
+            bpm: snapshot.bpm,
+            beat_confidence: snapshot.beat_confidence,
+            beat_phase: snapshot.beat_phase,
+            onset: snapshot.onset,
+            transient: snapshot.transient,
+            centroid_hz: snapshot.centroid_hz,
+        }
+    }
+}
+
+#[tauri::command]
+fn musical(state: tauri::State<SharedPlayback>) -> MusicalState {
+    state
+        .lock()
+        .unwrap()
+        .as_ref()
+        .map(|playback| playback.musical().into())
+        .unwrap_or_else(|| player_core::MusicalSnapshot::silent().into())
 }
 
 /// The goniometer's points for the window the analysis thread last read:
@@ -1014,6 +1055,7 @@ pub fn run() {
             spectrum,
             spectrum_bands,
             meters,
+            musical,
             goniometer,
             visualizer_state,
             set_visualizer_size,
@@ -1305,8 +1347,11 @@ pub fn run() {
                     // M2 added the spectrum to the feed, for the bars: the
                     // meters' own levels and the axis they are against, read
                     // inside the same guard as the samples so a frame still
-                    // costs one lock rather than two.
-                    let (samples, channels, rate, levels, centres) = {
+                    // costs one lock rather than two. M5 added the musical
+                    // figures on the same terms -- and out of the same
+                    // publication, so the beat a scene draws belongs to the
+                    // audio in the same frame.
+                    let (samples, channels, rate, levels, centres, musical) = {
                         let guard = shared.lock().unwrap();
                         match guard.as_ref() {
                             Some(p) => {
@@ -1319,16 +1364,32 @@ pub fn run() {
                                     rate,
                                     p.spectrum(),
                                     p.spectrum_band_centres().to_vec(),
+                                    p.musical(),
                                 )
                             }
-                            None => (Vec::new(), 2, 48_000, Vec::new(), Vec::new()),
+                            None => (
+                                Vec::new(),
+                                2,
+                                48_000,
+                                Vec::new(),
+                                Vec::new(),
+                                player_core::MusicalSnapshot::silent(),
+                            ),
                         }
                     };
                     let elapsed = last_frame.elapsed().as_secs_f32();
                     last_frame = std::time::Instant::now();
                     if let Err(e) = renderer.draw_frame(
                         &VisualFrame::new(&samples, channels, rate, elapsed)
-                            .with_spectrum(&levels, &centres),
+                            .with_spectrum(&levels, &centres)
+                            .with_musical(Musical {
+                                bpm: musical.bpm,
+                                beat_confidence: musical.beat_confidence,
+                                beat_phase: musical.beat_phase,
+                                onset: musical.onset,
+                                transient: musical.transient,
+                                centroid_hz: musical.centroid_hz,
+                            }),
                     ) {
                         log::warn!("visualizer draw_frame error: {e}");
                     }

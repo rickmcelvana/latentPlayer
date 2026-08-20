@@ -16,7 +16,7 @@ use player_core::{
     adapt_channels, read_tags, ChannelShape, InMemorySource, Meters, StreamingDecoder, TrackTags,
     GONIOMETER_POINTS,
 };
-use player_render::{GainSetting, VisualFrame, VisualKind};
+use player_render::{GainSetting, Musical, VisualFrame, VisualKind};
 use wasm_bindgen::prelude::*;
 use web_sys::HtmlCanvasElement;
 
@@ -359,6 +359,17 @@ impl WasmAnalyzer {
         self.meters.snapshot().to_array().to_vec()
     }
 
+    /// What the music is doing, as six floats in
+    /// `MusicalSnapshot::to_array`'s order -- which `MUSICAL` in
+    /// app/src/audioSab.ts mirrors, since that is the layout the worker copies
+    /// them into.
+    ///
+    /// Flat for `meters` above's reason: this is read at frame rate, and the
+    /// naming happens once on the TypeScript side.
+    pub fn musical(&self) -> Vec<f32> {
+        self.meters.musical().to_array().to_vec()
+    }
+
     /// The goniometer's points for the window just ingested: interleaved
     /// side/mid pairs (`player_core::phase::goniometer_points`).
     pub fn goniometer(&self) -> Vec<f32> {
@@ -564,6 +575,13 @@ impl WasmRenderer {
     /// from. Empty is a real answer -- before a track loads there is no
     /// analyser and nothing has been measured -- and a visual draws nothing
     /// from it rather than a row of floors.
+    ///
+    /// `musical` is M5's figures in `MusicalSnapshot::to_array`'s order, read
+    /// straight out of the shared buffer's own region: flat rather than named,
+    /// so the order is stated once in `player-core` instead of once per shell.
+    /// Optional, and a short array counts as absent -- a caller with nothing
+    /// measured says nothing rather than passing six zeroes, which is the same
+    /// shape `VisualFrame::with_musical` has on the native side.
     pub fn draw_frame(
         &mut self,
         samples: &[f32],
@@ -572,11 +590,21 @@ impl WasmRenderer {
         elapsed_seconds: f32,
         levels: &[f32],
         band_centres: &[f32],
+        musical: Option<Vec<f32>>,
     ) -> Result<(), JsValue> {
+        let musical = player_core::MusicalSnapshot::from_array(musical.as_deref().unwrap_or(&[]));
         self.inner
             .draw_frame(
                 &VisualFrame::new(samples, channels, sample_rate, elapsed_seconds)
-                    .with_spectrum(levels, band_centres),
+                    .with_spectrum(levels, band_centres)
+                    .with_musical(Musical {
+                        bpm: musical.bpm,
+                        beat_confidence: musical.beat_confidence,
+                        beat_phase: musical.beat_phase,
+                        onset: musical.onset,
+                        transient: musical.transient,
+                        centroid_hz: musical.centroid_hz,
+                    }),
             )
             .map_err(|e| JsValue::from_str(&e.to_string()))
     }

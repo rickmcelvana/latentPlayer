@@ -32,7 +32,9 @@ pub mod tags;
 pub mod tap;
 pub mod tempo;
 
-pub use analysis::{MeterSnapshot, Meters, BAND_COUNT, FFT_SIZE, GONIOMETER_POINTS};
+pub use analysis::{
+    MeterSnapshot, Meters, MusicalSnapshot, BAND_COUNT, FFT_SIZE, GONIOMETER_POINTS, MUSICAL_FIELDS,
+};
 pub use channels::{adapt_channels, ChannelShape};
 pub use decode::{decode_all, DecodedAudio};
 pub use eq::{

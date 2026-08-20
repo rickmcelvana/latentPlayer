@@ -18,6 +18,7 @@ import { Equalizer } from "./Equalizer";
 import { Goniometer } from "./Goniometer";
 import { LibraryPanel } from "./LibraryPanel";
 import { Loudness } from "./Loudness";
+import { Musical } from "./Musical";
 import { VisualizerControls } from "./VisualizerControls";
 import { ServerPanel } from "./ServerPanel";
 import { resetScrobbler, serverScrobbleTick, type ServerState } from "./server";
@@ -401,6 +402,11 @@ function App() {
           <Goniometer active={loaded} />
           <Loudness active={loaded} />
         </div>
+
+        {/* Its own panel rather than another row of the loudness readout: a
+            tempo is a different kind of statement about the audio than a level
+            is, and this is the one the listener-facing visuals will draw. */}
+        <Musical active={loaded} />
 
         {tracks.length > 0 && (
           <ol className="playlist">

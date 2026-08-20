@@ -35,8 +35,8 @@ use std::sync::atomic::{AtomicUsize, Ordering};
 
 use player_core::analysis::{band_centres, Meters};
 use player_render::{
-    GainSetting, OffscreenRenderer, VisualFrame, VisualKind, HISTORY_SECONDS, TRACE_SECONDS,
-    TUNNEL_SECONDS,
+    GainSetting, Musical, OffscreenRenderer, VisualFrame, VisualKind, HISTORY_SECONDS,
+    TRACE_SECONDS, TUNNEL_SECONDS,
 };
 
 const WIDTH: u32 = 320;
@@ -1088,6 +1088,42 @@ fn check_the_host_contract(kind: VisualKind) {
             "{} of {} bytes differ",
             after.iter().zip(&fresh).filter(|(a, b)| a != b).count(),
             fresh.len()
+        ),
+    );
+
+    // M5 put the musical figures in the feed and *no* visual reads them yet
+    // (decision 39) -- M6's scenes are where beats drive motion. So what can be
+    // checked here is that the addition is inert: the same frame with a tempo,
+    // a beat phase and an onset in it draws exactly what it drew without them.
+    // Two fresh renderers rather than two draws, for the switch check's reason.
+    let beat = Musical {
+        bpm: 128.0,
+        beat_confidence: 0.9,
+        beat_phase: 0.25,
+        onset: 0.8,
+        transient: 0.6,
+        centroid_hz: 3200.0,
+    };
+    // The baseline is `fresh` above -- already a renderer that had drawn
+    // nothing before exactly this frame. The web half shares the reason and
+    // has a harder one: a browser page only has so many GPU devices in it.
+    let without = &fresh;
+    let with_beat = pollster::block_on(OffscreenRenderer::new(WIDTH, HEIGHT, kind))
+        .expect("offscreen renderer with musical figures")
+        .draw_to_pixels(&full_frame(&signal, &spectrum).with_musical(beat))
+        .expect("render with musical figures");
+    check(
+        "the musical figures change nothing a visual does not read",
+        *without == with_beat,
+        format!(
+            "{} of {} bytes differ at {} BPM",
+            without
+                .iter()
+                .zip(&with_beat)
+                .filter(|(a, b)| a != b)
+                .count(),
+            without.len(),
+            beat.bpm
         ),
     );
 

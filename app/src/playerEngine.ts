@@ -15,6 +15,8 @@ import {
   EQ_MAX_GAIN_DB,
   LOUDNESS_FLOOR_LUFS,
   METER,
+  MUSICAL,
+  NO_TEMPO,
   SCOPE_MASK,
   SCOPE_SAMPLES,
   SPECTRUM_FLOOR_DB,
@@ -480,6 +482,63 @@ export function silentMeters(): MeterSnapshot {
     integratedLufs: LOUDNESS_FLOOR_LUFS,
     truePeakDb: TRUE_PEAK_FLOOR_DB,
     correlation: 0,
+  };
+}
+
+/// What the music is doing at one instant. Mirrors `MusicalState` in
+/// src-tauri/src/lib.rs and nativePlayer.ts's copy, on `MeterSnapshot`'s terms
+/// -- one shape, so nothing downstream branches on which shell it is in.
+export interface MusicalSnapshot {
+  /// Tempo, or `NO_TEMPO` (0) when none is established: warming up, silence, or
+  /// material with no steady pulse (Phase 3 M5 decision 36).
+  bpm: number;
+  /// How much to believe `bpm`, 0..1.
+  beatConfidence: number;
+  /// Where in the beat the newest analysed sample falls, 0..1.
+  beatPhase: number;
+  /// Strength of the strongest onset since the previous drain, 0 for none.
+  onset: number;
+  /// How percussive the music is right now, 0..1.
+  transient: number;
+  /// Spectral centroid in Hz, 0 when there is nothing sounding.
+  centroidHz: number;
+}
+
+/// The musical figures as the worker's analyser last read them.
+///
+/// Read out of the shared buffer in one go, like `meters()` and for the same
+/// reason: these six describe one instant, and are written in the same step the
+/// loudness is (M5 decision 38).
+export function musical(): MusicalSnapshot {
+  if (!views) return silentMusical();
+  const m = views.musical;
+  return {
+    bpm: m[MUSICAL.bpm],
+    beatConfidence: m[MUSICAL.beatConfidence],
+    beatPhase: m[MUSICAL.beatPhase],
+    onset: m[MUSICAL.onset],
+    transient: m[MUSICAL.transient],
+    centroidHz: m[MUSICAL.centroidHz],
+  };
+}
+
+/// The musical figures as the renderer wants them: the raw region, in
+/// `MusicalSnapshot::to_array`'s order, so the naming happens once in Rust
+/// rather than being taken apart here and put back together in wasm.
+export function musicalArray(): Float32Array {
+  if (!views) return new Float32Array(0);
+  return new Float32Array(views.musical);
+}
+
+/// What the musical figures read before anything has been measured.
+export function silentMusical(): MusicalSnapshot {
+  return {
+    bpm: NO_TEMPO,
+    beatConfidence: 0,
+    beatPhase: 0,
+    onset: 0,
+    transient: 0,
+    centroidHz: 0,
   };
 }
 

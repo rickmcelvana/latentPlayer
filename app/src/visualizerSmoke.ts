@@ -976,6 +976,37 @@ async function checkTheHostContract(entry: VisualInfo): Promise<void> {
     `${switched.currentVisual()}`,
   );
 
+  // M5 put the musical figures in the feed and no visual reads them yet
+  // (decision 39) -- M6's scenes are where beats drive motion. So what can be
+  // checked here is that the addition is inert: the same frame with a tempo, a
+  // beat phase and an onset in it draws exactly what it drew without them. Two
+  // fresh renderers rather than two draws, for the switch check's reason.
+  // The baseline is the `fresh` renderer above rather than a fourth one: it is
+  // already a renderer that had drawn nothing before this same frame, and each
+  // `WasmRenderer` here holds a real GPU device -- asking Dawn for two more per
+  // visual cost this page its command queue outright (E_OUTOFMEMORY, found
+  // 2026-08-20).
+  const beat = new Float32Array([128, 0.9, 0.25, 0.8, 0.6, 3200]);
+  const withoutBeat = fresh;
+  const beatCanvas = extraCanvas(320, 320);
+  const beaten = await WasmRenderer.create(
+    beatCanvas,
+    beatCanvas.width,
+    beatCanvas.height,
+    entry.id,
+  );
+  beaten.draw_frame(signal, 2, RATE, FRAME_SECONDS, spectrum.levels, spectrum.centres, beat);
+  const withBeat = pixels(beatCanvas);
+  let beatDiffering = 0;
+  for (let i = 0; i < withoutBeat.length; i++) {
+    if (withoutBeat[i] !== withBeat[i]) beatDiffering += 1;
+  }
+  check(
+    "the musical figures change nothing a visual does not read",
+    beatDiffering === 0,
+    `${beatDiffering} of ${withoutBeat.length} bytes differ at ${beat[0]} BPM`,
+  );
+
   // Resizing rebuilds whatever the visual keeps that depends on the viewport.
   surface.width = 640;
   renderer.resize(surface.width, surface.height);

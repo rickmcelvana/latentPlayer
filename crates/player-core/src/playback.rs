@@ -38,7 +38,7 @@ use std::time::{Duration, Instant};
 use cpal::traits::{DeviceTrait, HostTrait, StreamTrait};
 use cpal::{SampleFormat, StreamConfig};
 
-use crate::analysis::{MeterSnapshot, Meters, GONIOMETER_POINTS};
+use crate::analysis::{MeterSnapshot, Meters, MusicalSnapshot, GONIOMETER_POINTS};
 use crate::channels::{adapt_channels, ChannelShape};
 use crate::eq::{EqCoefficients, EqProcessor, EqSettings};
 use crate::error::PlayerError;
@@ -210,6 +210,11 @@ struct Published {
     levels: Vec<f32>,
     /// Loudness and phase.
     snapshot: MeterSnapshot,
+    /// Tempo, beat phase, onsets and the centroid. Under this lock rather than
+    /// one of its own, for the same reason the loudness is: these describe the
+    /// same instant, and a display that fetched them separately could draw a
+    /// beat from one moment against a spectrum from another (M5 decision 38).
+    musical: MusicalSnapshot,
     /// Goniometer points, interleaved side/mid.
     goniometer: Vec<f32>,
 }
@@ -219,6 +224,7 @@ impl Published {
         Self {
             levels: vec![crate::spectrum::FLOOR_DB; crate::analysis::BAND_COUNT],
             snapshot: MeterSnapshot::silent(),
+            musical: MusicalSnapshot::silent(),
             goniometer: Vec::new(),
         }
     }
@@ -636,6 +642,12 @@ impl Playback {
         self.published(|published| published.snapshot)
     }
 
+    /// Tempo, beat phase, onsets and the spectral centroid, as of the same
+    /// instant as the meters above (Phase 3 M5).
+    pub fn musical(&self) -> MusicalSnapshot {
+        self.published(|published| published.musical)
+    }
+
     /// The goniometer's points, interleaved side/mid, for the window the
     /// analysis thread last read.
     pub fn goniometer(&self) -> Vec<f32> {
@@ -721,6 +733,7 @@ fn analysis_loop(
             published.levels.clear();
             published.levels.extend_from_slice(meters.levels());
             published.snapshot = meters.snapshot();
+            published.musical = meters.musical();
             published.goniometer = meters.goniometer(GONIOMETER_POINTS);
         }
 

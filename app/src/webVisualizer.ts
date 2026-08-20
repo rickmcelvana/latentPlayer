@@ -19,6 +19,7 @@ import {
   outputChannels,
   outputSampleRate,
   scopeWindow,
+  musicalArray,
   spectrum,
   spectrumBands,
 } from "./playerEngine";
@@ -78,7 +79,9 @@ function drawLoop(): void {
     // The spectrum joined the feed in M2, for the bars. Read from the same
     // shared buffer the Spectrum panel reads, so the two are drawing one
     // measurement rather than two -- and empty until the worker has published
-    // any, which is a state a visual draws as nothing.
+    // any, which is a state a visual draws as nothing. M5's musical figures
+    // ride along on the same terms, in the flat order Rust named them in, out
+    // of the region the worker writes in the same step as the meters.
     renderer.draw_frame(
       scopeWindow(wanted),
       channels,
@@ -86,6 +89,7 @@ function drawLoop(): void {
       elapsed,
       spectrum(),
       spectrumBands(),
+      musicalArray(),
     );
   } catch (e) {
     // Found live (2026-08-15): a single thrown frame (e.g. a transient

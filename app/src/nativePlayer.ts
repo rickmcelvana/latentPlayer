@@ -117,6 +117,23 @@ export async function meters(): Promise<MeterSnapshot> {
   return invoke<MeterSnapshot>("meters");
 }
 
+/// What the music is doing at one instant. Mirrors `MusicalState` in
+/// src-tauri/src/lib.rs and playerEngine.ts's copy (Phase 3 M5).
+export interface MusicalSnapshot {
+  bpm: number;
+  beatConfidence: number;
+  beatPhase: number;
+  onset: number;
+  transient: number;
+  centroidHz: number;
+}
+
+/// The musical figures as the analysis thread last read them. One round trip,
+/// for `meters`'s reason: the six numbers describe one instant.
+export async function musical(): Promise<MusicalSnapshot> {
+  return invoke<MusicalSnapshot>("musical");
+}
+
 /// The goniometer's points, interleaved side/mid. Decimated in Rust to a fixed
 /// count, so what crosses the IPC boundary each frame is bounded.
 export async function goniometer(): Promise<Float32Array> {
