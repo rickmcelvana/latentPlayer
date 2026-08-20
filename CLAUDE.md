@@ -423,8 +423,8 @@ view and the three-and-two bend cycles.
 waterfall, tunnel -- all four user-confirmed on both shells, and the host
 unchanged by the last three.
 
-**Phase 3 M5 (musical intelligence) is underway** (2026-08-20), and turns the
-phase around: its work is analysis rather than rendering. `onset.rs` is the
+**Phase 3 M5 (musical intelligence) is done and user-confirmed on both shells**
+(2026-08-20), and turned the phase around: its work is analysis rather than rendering. `onset.rs` is the
 detection function and the features on its grid (rectified spectral flux over
 log-compressed magnitudes, transients, onset picking, the spectral centroid) and
 `tempo.rs` is the tempo and beat phase taken from it (autocorrelation, harmonic
@@ -465,11 +465,22 @@ correlates with. And the native one caught the spectral centroid counting the
 unit test on clean audio read within a bin -- so bins under `MAGNITUDE_FLOOR` are
 now left out of the centroid rather than floored into it.
 
-**The plumbing and the panel are user-confirmed live (2026-08-20): "works as
-expected"** -- given before those two fixes, neither of which changes what a
-listener sees on material with a beat. The outstanding half is a confirming
-glance: a held note or a quiet passage should now read "--" rather than a
-confident tempo.
+**User-confirmed live on both shells (2026-08-20)**, twice -- once on the
+plumbing ("works as expected") and again on a longer look after the two fixes:
+*"It looks smoother on web now than it did. Now it looks smooth in transitions,
+quiet passages are smoothed out visually. All pass."* The second look is what
+confirms the tempo gate from the outside: the readout stops asserting a tempo
+where there are no beats to assert one from.
+
+That first look also found a trap worth knowing: **a stale page.** The browser
+was running the bundle from before a `npm run wasm` rebuild, which *skips a
+little on transitions* rather than failing -- a mismatched wasm module and
+shared-buffer layout look like a performance problem from the outside. Reload
+after rebuilding; WORKFLOW.md says so at the step.
+
+**M6 (particle / raymarched scenes) is next** -- the first visuals driven by M5's
+uniforms rather than by geometry-per-sample, and this workspace's first compute
+shaders, whose WebGPU limits get checked at the milestone's start on both shells.
 
 The certificate answer changed a finding into a fix: ureq defaults to
 webpki-roots, a bundle compiled into the binary, under which installing a
@@ -516,7 +527,8 @@ cargo test --workspace --exclude player-rt-wasm
 cargo clippy --workspace --exclude player-rt-wasm --all-targets -- -D warnings
 cargo fmt --check
 # player-rt-wasm is wasm-only (see WORKFLOW.md for why it's excluded above):
-cd app && npm run wasm   # rebuilds it for wasm32 via wasm-pack
+cd app && npm run wasm   # rebuilds it for wasm32 via wasm-pack -- reload any
+                         # page left open, or it keeps the old module (WORKFLOW.md)
 
 cd app && npx tsc -b && npm run build   # frontend
 cd app && npm run dev                    # web dev server

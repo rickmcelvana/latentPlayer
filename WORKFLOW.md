@@ -22,6 +22,20 @@ cd app && npm run dev                              # web dev server (localhost:5
 cargo tauri dev                                    # desktop dev build (see gotcha below)
 ```
 
+## Reload the page after `npm run wasm`
+
+The dev server hot-reloads TypeScript; it does **not** reload the wasm module a
+running page already instantiated. A page left open across a rebuild therefore
+runs the old module against the new TypeScript -- and when the two disagree
+about the shared buffer's layout, the symptom is not an error. It is audio that
+*skips a little at transitions*, which reads as a performance problem and sent
+one Phase 3 M5 session looking for one (2026-08-20).
+
+Reload the page after every `npm run wasm`. The smoke harnesses
+(`/musical.html`, `/visualizer.html`, and the rest) are the usual victims,
+because they are the pages most likely to be sitting open while the Rust under
+them is being changed.
+
 ## Why `--exclude player-rt-wasm`
 
 `player-rt-wasm` calls `wgpu::SurfaceTarget::Canvas`, which only exists

@@ -1555,7 +1555,7 @@ M5 (musical intelligence) is next, and turns the phase around: its work is
 `player-core` analysis -- onsets, beat tracking, spectral centroid -- verified
 the analysis suite's way, against known answers rather than against pixels.
 
-## M5 -- Musical intelligence: built and checked 2026-08-20
+## M5 -- Musical intelligence: done, user-confirmed 2026-08-20
 
 PLAN.md section 4's second modernization clause: "onset/beat detection, BPM
 tracking, spectral centroid, transient detection feeding shader uniforms --
@@ -1947,11 +1947,39 @@ the onset detector, fifteen on the tempo tracker, four on the composition in
 `visual_smoke` and **71/71** at `/visualizer.html`, where the four new checks are
 decision 39's: the musical figures change nothing a visual does not read.
 
-**Live-confirmed on both shells (2026-08-20): "works as expected."** That was
-the plumbing and the readout against real music -- and it was given *before* the
-two fixes above, both of which came out of the smokes that followed it. Neither
-changes what a listener sees on material with a beat (the tempo gate only
-refuses tempi that were never real, and the centroid moves by a few percent), so
-what is outstanding is a confirming glance rather than a re-test: **a held note
-or a quiet passage should now read "--" rather than a confident tempo**, which
-is the visible half of the first fix.
+**Live-confirmed on both shells (2026-08-20)**, twice: once on the plumbing and
+the readout ("works as expected"), before the two fixes above, and again after
+them on a longer look -- see the closing section below.
+\n
+### Closed (2026-08-20)
+
+Confirmed live on both shells, on a second and more careful pass: *"It looks
+smoother on web now than it did. Now it looks smooth in transitions, quiet
+passages are smoothed out visually. All pass."*
+
+That settles the two things the fixtures could not ask about.
+
+- **The tempo gate reads correctly to a person.** "Quiet passages are smoothed
+  out visually" is what `MIN_ONSETS_IN_WINDOW` looks like from the outside: the
+  readout stops asserting a tempo where there are no beats to assert one from,
+  rather than holding a confident number through a passage that has nothing in
+  it. The web harness found that as a figure (122.4 BPM at confidence 1.00
+  during a held tone); this is the same fix seen as behaviour.
+- **The panel is legible while the music moves**, which is the half the smokes
+  cannot reach at all -- they read numbers, not the experience of watching them
+  change.
+
+The first look of that session found something worth writing down, and it was
+not a bug in this milestone: **a stale page.** The browser was still running the
+bundle from before the wasm rebuild, and it *skipped a little on transitions* --
+which is what a mismatched wasm module and shared-buffer layout look like from
+the outside rather than a crash. A reload fixed it. WORKFLOW.md now says so
+where the `npm run wasm` step is, because the failure is silent and looks like a
+performance problem.
+
+**M5 is closed.** M6 (particle and raymarched scenes) is next, and is the first
+milestone whose visuals are driven by these uniforms rather than by
+geometry-per-sample -- also this workspace's first compute shaders, whose WebGPU
+limits get checked at its start on both shells rather than assumed until its end.
+The frame fields M5 landed are carried but unread until then, which is the one
+loose end this milestone leaves on purpose.
