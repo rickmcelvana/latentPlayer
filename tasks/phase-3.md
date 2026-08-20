@@ -1555,7 +1555,7 @@ M5 (musical intelligence) is next, and turns the phase around: its work is
 `player-core` analysis -- onsets, beat tracking, spectral centroid -- verified
 the analysis suite's way, against known answers rather than against pixels.
 
-## M5 -- Musical intelligence: planned 2026-08-19
+## M5 -- Musical intelligence: built and checked 2026-08-20
 
 PLAN.md section 4's second modernization clause: "onset/beat detection, BPM
 tracking, spectral centroid, transient detection feeding shader uniforms --
@@ -1799,3 +1799,159 @@ needs to know now rather than after its scenes are built on it.
   spectrum's constants -- the four visuals confirmed on them stay confirmed.
 - **No new thread on either shell, and no compute shaders.** The drain that feeds
   the meters feeds this; M6 is where WebGPU compute gets checked.
+
+### What landed (2026-08-20)
+
+**`onset.rs`, the detection function and the features on its grid.** A
+short-time transform of its own on a hop derived from the output rate -- 480
+frames at 48kHz, 441 at 44.1kHz, both landing on exactly 100Hz, so the two rates
+this app actually meets resolve tempo identically. Rectified spectral flux over
+log-compressed magnitudes is the detection function; an adaptive threshold over
+the previous 350ms plus a 50ms refractory picks onsets from it; a slowly-released
+peak normalises the transient figure to 0..1; and the spectral centroid is taken
+from the same bins on the same clock, because a brightness measured on a
+different window would be a brightness from a different moment. Decision 32's
+promise is a test rather than a claim: the same audio pushed whole and in five
+awkward sizes yields identical hops.
+
+**`tempo.rs`, the tempo and the beat.** Autocorrelation over eight seconds of
+detection function, scored across the lags for 60-200 BPM with each candidate's
+own harmonics summed in and a log-normal prior at 120 BPM, then interpolated --
+which is what lets 90 BPM (lag 66.67, unreachable by any integer lag) read 90.0
+rather than 89.55 or 90.91. The phase is a PLL: it advances on the hop clock at
+the estimated tempo and is pulled toward onsets, so it keeps counting through a
+bar with nothing in it. Pure arithmetic over a ring of floats -- no FFT, no
+device, no clock but the hop count it is told about -- so almost all of it is
+checkable without a GPU or a browser.
+
+**The wiring, and what it did not disturb.** `MusicalSnapshot` sits beside
+`MeterSnapshot` in `analysis.rs`: a separate struct because "loudness and phase"
+and "what the music is doing" are different questions, published in the same step
+under the same lock because they describe the same instant. `Meters::ingest`
+feeds the detector every sample and forwards each completed hop to the tracker,
+and a discontinuity resets both -- a tempo measured across a seek or a hand-off
+is a tempo nobody played, and the seam itself would otherwise be the loudest
+onset in the track.
+
+**One of each thing per shell**, as decision 38 said. Natively: a `musical`
+command beside `meters`, and the redraw thread reading the figures out of the
+same publication as the spectrum, so a scene's beat belongs to the audio in the
+same frame. On the web: a six-float region in the shared buffer written in the
+same step as the meters, `WasmAnalyzer::musical()`, and that region handed to
+`draw_frame` *flat*, in `MusicalSnapshot::to_array`'s order, so the order is
+stated once in Rust rather than once per shell. The EQ region's 8-byte alignment
+helper -- written in Phase 1 M8 against "the day someone adds a meter" -- is why
+that addition moved nothing else.
+
+**`VisualFrame` grew by one chained `with_musical`, and no visual reads it**
+(decision 39). So what both smokes check is that the addition is *inert*: the
+same frame with a tempo, a beat phase and an onset in it draws byte-identically,
+per visual, on a renderer that had drawn nothing either time.
+
+**The studio panel is its own** (decision 40): tempo, confidence, transient and
+brightness, polled at the loudness panel's 100ms because these are digits you
+read rather than watch.
+
+### Three things found while building
+
+**Log compression made a held note fire onsets.** Compression is what stops a
+kick drum from hiding every other onset in a mix, and its cost is that it
+magnifies *relative* change -- which in a bin holding nothing but window leakage
+is large, because the hop is not a whole number of cycles and a held sine moves
+its own leakage tails every hop. Four seconds of one 440Hz note fired fifteen
+onsets. Magnitudes are now normalised so a full-scale sine reads 1.0 and floored
+at -80dBFS, which drops the residue from 62 to 0.18 against a click's 1005. Both
+constants are sized by that measurement and say so where they are defined.
+
+**The first confidence measure failed in the exact case it existed for.** "How
+far the winning score beat the average candidate" reported *no tempo at all* for
+the offbeat-eighths track -- the octave-error check, the one thing that
+measurement was written to survive. A peaky pattern leaves most candidates deeply
+negative, so the average says more about the pattern's shape than about
+certainty. Confidence is now the periodicity itself: the normalised correlation
+at the winning period, which is bounded, meaningful for any pattern, and
+independent of what else was on the ballot.
+
+**The web smoke ran a browser out of GPU devices.** The inertness check's first
+version built two more `WasmRenderer`s per visual, and Dawn refused outright
+(`E_OUTOFMEMORY` on the D3D12 command queue) partway through the run. The
+baseline is now the fresh renderer the switch check already builds -- the same
+renderer, the same empty history -- which is one device instead of two. The
+native half does the same, for symmetry rather than necessity.
+
+### Two more things found, both by the smokes
+
+**A tempo can be confidently wrong about silence, and the native pass was
+luck.** The web harness read **122.4 BPM at confidence 1.00 while a held 1kHz
+tone was playing** -- with the detector reporting *zero* onsets and a peak
+transient of 0.022 over the same nine seconds. The autocorrelation is normalised
+by the detection function's own energy, deliberately, so that a pulse can be
+found in quiet music as well as loud; the cost is that a periodicity in
+numerical residue scores exactly as well as a drum. The native build read no
+tempo for the identical fixture, which looked like agreement and was not: its
+residue simply happened not to be periodic.
+
+The fix is in `tempo.rs` and says what a tempo is: **beats are events, so a
+window with fewer than four onsets in it has no tempo**, whatever it correlates
+with. Four is lenient -- the slowest tempo tracked puts eight beats in the
+eight-second window and the fastest twenty-six -- so half the beats can be
+missed and a real pulse still reports. A unit test now pins both halves: a tiny
+periodic detection function with no onsets reads nothing, and the identical
+shape *with* onsets reads 120.0.
+
+This is the second time in this milestone that the two shells disagreeing was
+the instrument. It is also the answer to a question the unit tests could not
+ask, because a synthetic detection function does not have a residue.
+
+**The centroid was counting the noise floor.** A 1kHz tone read 1148Hz through
+the real playback path where the unit test on clean synthetic audio read within
+a bin of 1000. A centre of mass counts every contributor, and five hundred bins
+of dither and resampler noise at -85dBFS are inaudible and *numerous*. Bins
+below `MAGNITUDE_FLOOR` are now left out of the centroid entirely rather than
+floored -- the same constant doing a second job, and for the same reason: what
+in this spectrum is the music rather than the noise under it. The tone now reads
+1061Hz natively and 999Hz on the web.
+
+### Verified
+
+**16/16** natively (`cargo run -p player-core --example musical_smoke`) and
+**16/16** in a real browser at `/musical.html`, on fixtures generated from the
+same arithmetic down to the noise bursts' seed -- the same click tracks, sample
+for sample:
+
+| claim | native | web |
+| --- | --- | --- |
+| a 120 BPM click track reads | 120.00 BPM | 120.00 BPM |
+| ...at confidence | 1.00 | 1.00 |
+| onsets over nine seconds (eighteen clicks) | 18 | 17 |
+| the phase, once locked, is off the beat by | 0.062 | 0.047 |
+| after a gapless hand-off into a 90 BPM track | 89.71 BPM | 89.70 BPM |
+| an offbeat on every eighth reads | 120.00 BPM | 120.00 BPM |
+| a 1kHz tone's brightness | 1061 Hz | 999 Hz |
+| a held note's tempo | none | none |
+| rubato notes: confidence / onsets | 0.33 / 38 | 0.42 / 34 |
+
+The tempi agree to a hundredth of a BPM, which they must: both shells run the
+same Rust over the same audio, and the only thing that differs is which
+threads it runs on. The counted figures (onsets seen, phase at the moment of an
+onset) differ by what a poller catches between two publications, and the
+brightness figures by which instant was caught -- a click track's *newest*
+window is silence most of the time, which is why "a click's own window is
+broadband" is a maximum seen (12527 Hz natively, 21754 Hz on the web) rather
+than a reading taken afterwards.
+
+Also green: `cargo fmt --check`, `cargo clippy --workspace --all-targets -D
+warnings`, the full suite (**305 tests**, up from 276 at the end of M4 -- ten on
+the onset detector, fifteen on the tempo tracker, four on the composition in
+`analysis.rs`), `npm run wasm`, `npx tsc -b`, `npm run build`, plus **64/64** in
+`visual_smoke` and **71/71** at `/visualizer.html`, where the four new checks are
+decision 39's: the musical figures change nothing a visual does not read.
+
+**Live-confirmed on both shells (2026-08-20): "works as expected."** That was
+the plumbing and the readout against real music -- and it was given *before* the
+two fixes above, both of which came out of the smokes that followed it. Neither
+changes what a listener sees on material with a beat (the tempo gate only
+refuses tempi that were never real, and the centroid moves by a few percent), so
+what is outstanding is a confirming glance rather than a re-test: **a held note
+or a quiet passage should now read "--" rather than a confident tempo**, which
+is the visible half of the first fix.

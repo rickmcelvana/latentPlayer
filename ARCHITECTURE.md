@@ -36,8 +36,46 @@ crates/
                      and the web worker run the same code, so the two shells
                      cannot measure differently. None runs on the audio thread.
 
+                     onset.rs and tempo.rs (Phase 3 M5) are the musical
+                     intelligence: the onset detection function, transients and
+                     the spectral centroid, and the tempo and beat phase taken
+                     from them. They join the meters on the same drain but run
+                     on a **hop clock of their own** -- a hop derived from the
+                     output rate (480 frames at 48kHz, 441 at 44.1kHz, both
+                     exactly 100Hz) with an internal accumulator, so what they
+                     measure cannot depend on how often `ingest` is called. That
+                     is the difference between them and the spectrum next door:
+                     a picture of a window may be taken whenever a display asks,
+                     while spectral flux measured between two drains would be a
+                     different measurement on every drain -- and the native
+                     thread drains every 16ms where the web worker drains on
+                     `requestAnimationFrame`. They do not reuse
+                     `SpectrumAnalyzer` (display resolution, log bands, a 30dB/s
+                     release baked in, computed on demand -- none of which is a
+                     detection function) and their own bins are never published,
+                     since a second published spectrum would be a second answer
+                     to the question the one tap exists to answer once. Tempo is
+                     autocorrelation with harmonic scoring, a log-normal prior at
+                     120 BPM, an onset count that has to be met before any tempo
+                     is reported (an autocorrelation normalised by its own energy
+                     will otherwise find a confident tempo in numerical residue --
+                     a held tone read 122.4 BPM at confidence 1.00 on the web
+                     build with no onsets detected at all, 2026-08-20) and an
+                     *interpolated* peak -- at a 100Hz detection
+                     function the lags either side of 120 BPM are 120.0 and
+                     117.6, so an integer lag could never report 90.0 at all --
+                     and "no tempo" is 0.0 with a confidence beside it rather
+                     than a NaN. `MusicalSnapshot` carries the six figures and is
+                     published beside `MeterSnapshot`, in the same step under the
+                     same lock: different questions, one instant.
+
                      The loudness meters measure a *continuous listen*, so a
-                     seek, a lap or a gapless hand-off resets them (M5). The
+                     seek, a lap or a gapless hand-off resets them (M5) -- and
+                     since Phase 3 M5 so do the onset detector and the tempo
+                     tracker, for the sharper version of the same reason: a
+                     tempo spanning two tracks is a tempo nobody played, and the
+                     seam itself would otherwise be the loudest onset in the
+                     track. The
                      hand-off is the awkward one -- the audio is continuous by
                      design, so nothing in the tap marks it and both shells
                      watch their track counter instead. The drain carrying a
@@ -175,8 +213,17 @@ crates/
                      not exist yet becomes a `player-core` meter first,
                      cross-target, and then a field here. The frame grows by
                      addition -- `with_spectrum` chains onto `new`, so a caller
-                     with nothing to add says nothing and M5's analysis will be
-                     another field rather than another signature.
+                     with nothing to add says nothing rather than passing empty
+                     slices. M5 was that growth's stated reason and took it:
+                     `with_musical` carries a `Musical` (tempo, confidence, beat
+                     phase, onset, transient, centroid), and **no visual reads it
+                     yet** -- M6's scenes are where beats drive motion, with M6's
+                     decisions. `Musical` is a plain struct here rather than
+                     `player-core`'s `MusicalSnapshot` because this crate does
+                     not depend on that one and should not start: the shells
+                     translate everything else in the frame, and a rendering
+                     crate that linked the analysis crate would make "a visual
+                     computes no DSP" a convention instead of a fact.
 
                      gain.rs is display gain (added 2026-08-18, after the first
                      live fullscreen run): the fixed steps, the automatic mode's
@@ -289,8 +336,12 @@ crates/
                      Since Phase 3 M1 it also carries the host's surface:
                      `WasmRenderer.create` takes a visual's id, `setVisual`
                      swaps the scene, `draw_frame` takes the feed's parts
-                     (samples, layout, rate, elapsed time, and since M2 the
-                     spectrum and its axis), and `visualCatalog`/`defaultVisual` hand the
+                     (samples, layout, rate, elapsed time, since M2 the
+                     spectrum and its axis, and since M5 the musical figures --
+                     optional, and passed *flat*, in
+                     `MusicalSnapshot::to_array`'s order, so the order is stated
+                     once in Rust rather than once per shell), and
+                     `visualCatalog`/`defaultVisual` hand the
                      registry to the web UI -- so the browser offers exactly
                      the visuals the desktop shell does, named identically.
 
@@ -339,6 +390,10 @@ src-tauri/           Tauri 2 desktop shell. Two windows: the React webview
                      as `#[tauri::command]`s returning one `TransportState`
                      struct rather than a command per field, so the seek
                      bar, clock and play button can't disagree mid-poll. The
+                     analysis answers the same way -- `meters` for loudness and
+                     phase, and since Phase 3 M5 `musical` for tempo, beat phase,
+                     onsets and brightness, each one struct so a readout cannot
+                     show two instants as one. The
                      EQ answers the same way (`EqState`: sliders, labels and
                      the curve in one round trip) and is *held here* rather
                      than in the engine -- `Playback` is rebuilt per track, so
@@ -402,8 +457,11 @@ app/                 React + TS + Vite. Same component tree renders in the
                      audioSab.ts holds the one definition
                      of the SharedArrayBuffer all three web parties use --
                      control block, playback ring, scope history, the
-                     spectrum/meter/goniometer regions the worker publishes
-                     into, and the EQ's coefficients (a Float64Array, written
+                     spectrum/meter/musical/goniometer regions the worker
+                     publishes into (the musical region is Phase 3 M5's, six
+                     floats written in the same step as the meters -- and the
+                     8-byte alignment helper M8 wrote "against the day someone
+                     adds a meter" is why that addition moved nothing), and the EQ's coefficients (a Float64Array, written
                      by the worker and read by the worklet behind a generation
                      counter it treats as a seqlock) -- including
                      the seek handshake that mirrors the native one, and the
@@ -495,20 +553,27 @@ app/                 React + TS + Vite. Same component tree renders in the
                      parsing sharing it would be audible. Search is one
                      function for both shells, since by that point both hold
                      the same array of rows. Spectrum.tsx,
-                     Loudness.tsx and Goniometer.tsx draw the dBFS, LUFS and
-                     mid/side pairs their adapter hands them and compute
+                     Loudness.tsx, Goniometer.tsx and (Phase 3 M5) Musical.tsx
+                     draw the dBFS, LUFS, mid/side pairs and tempo their adapter
+                     hands them and compute
                      nothing -- including the goniometer's 45-degree rotation,
                      which is two lines of arithmetic and still lives in Rust
-                     so the two shells cannot draw different figures.
+                     so the two shells cannot draw different figures. The
+                     musical readout is its own panel rather than another row of
+                     the loudness one, because a tempo is a different kind of
+                     statement about the audio than a level is -- and because a
+                     person who knows a track's tempo, watching that number, is
+                     the best instrument this project has for the octave errors
+                     every tempo estimator is prone to.
                      gapless.html, spectrum.html, loudness.html,
-                     visualizer.html,
+                     visualizer.html, musical.html,
                      library.html, eq.html, subsonic.html, remote.html and
                      browse.html
                      (with their *Smoke.ts) are dev-only harnesses -- served at
                      those paths, never bundled -- running the same checks as
                      the native gapless_smoke, spectrum_smoke, loudness_smoke,
-                     visual_smoke, library_smoke, eq_smoke, subsonic_smoke,
-                     remote_smoke and browse_smoke examples. subsonic.html
+                     visual_smoke, musical_smoke, library_smoke, eq_smoke,
+                     subsonic_smoke, remote_smoke and browse_smoke examples. subsonic.html
                      additionally checks the two things only a browser can fail
                      at, CORS and mixed content; remote.html plays a real server
                      track through the app's own playlist path; browse.html adds
@@ -681,7 +746,7 @@ What was verified live on Windows (via the in-app browser against
   -- so decode -> SAB -> worklet -> cursor -> scope feed all work.
 - **Not verified programmatically: how it looks on screen.** The automation
   browser pane runs hidden, and a hidden tab gets zero
-  `requestAnimationFrame` callbacks, so `webScope.ts`'s rAF loop never ticks
+  `requestAnimationFrame` callbacks, so `webVisualizer.ts`'s rAF loop never ticks
   there -- the app's own canvas reads back empty for that reason alone.
   Every piece that loop calls was driven manually instead and works.
   **User-confirmed live the same day: "Web passes. Sounds perfect, scope
@@ -1031,11 +1096,37 @@ at the correct rate, re-verified with the same probe.
   defended against is this process being killed between the two, which leaves
   the registration with the OS until the process is reaped -- the usual shape of
   this trade, and the reason the window is never left fullscreen and hidden.
+- **The beat is measured, not predicted** (Phase 3 M5). `beat_phase` advances
+  at hop boundaries, so its resolution is 10ms, and neither shell extrapolates
+  it forward to the frame it is drawn in -- what a visual gets is where the beat
+  was at the newest *analysed* sample. Two small errors point opposite ways
+  around that: the tap sees audio shortly before the device plays it, while the
+  analysis lags by up to one drain (16ms natively, a frame on the web). Both are
+  below the ~30ms at which a person hears two events as separate, and the live
+  look found nothing to report -- but M6 is the milestone that will drive motion
+  from this, and if a pulse ever reads late, this is the place it comes from.
+  The fix available then is a host-side extrapolation from `bpm` and
+  `beat_phase`, which is animation over measured values rather than analysis,
+  and so allowed by decision 2.
+- **No downbeat, no bar position, no key** (Phase 3 M5). The tempo tracker
+  answers where a *beat* is, not where a bar starts, and nothing here detects
+  key, chords or section boundaries. A scene that wants to change on the bar
+  cannot yet, and that is scope rather than oversight: none of it is in PLAN.md
+  section 4's list for this phase.
+- **Tempo is real-time only; the library has no BPM.** The tracker needs about
+  four seconds of a continuous listen before it reports anything, and it starts
+  over on a seek or a track change, so there is no per-track tempo to sort or
+  search a library by. Storing one means analysing whole files offline -- a
+  schema, a scan cost and a migration -- which belongs with the library work,
+  not with a real-time meter.
 - **No WebGL2 fallback on the web build.** `player-render` on wasm32 only
   targets wgpu's WebGPU backend; a browser/GPU without WebGPU gets a clear
-  error (`webScope.ts` checks `navigator.gpu` up front) rather than a
+  error (`webVisualizer.ts` checks `navigator.gpu` up front) rather than a
   silent blank canvas, but there's still no fallback rendering path. Real
-  WebGL2 support (`wgpu`'s `webgl` feature + backend selection) is Phase 1.
+  WebGL2 support (`wgpu`'s `webgl` feature + backend selection) is **Phase 4**:
+  tasks/phase-3.md decision 8 kept it out of the visualizer suite deliberately,
+  since taking it there would tax every new visual with a second constraint set
+  while the gallery was being born.
 - ~~**Web AudioContext sample rate must match the decoded track exactly.**~~
   Closed in M3. The original bug (2026-08-15) was that the web build ran the
   context at its default rate regardless of the file's, so playback was
@@ -1050,7 +1141,8 @@ at the correct rate, re-verified with the same probe.
   now owns a `StreamingResampler`). The pitch itself is checked rather than
   assumed: /gapless.html measures the played tone's frequency, and a
   resampling error would read 239Hz where it wants 220Hz.
-- **The scope's rAF loop now survives a bad frame** (`webScope.ts`). It
+- **The visualizer's rAF loop now survives a bad frame**
+  (`webVisualizer.ts`, named `webScope.ts` when this was written). It
   used to have no try/catch around `draw_frame`; a single thrown frame
   (e.g. a transient `SurfaceUnavailable` from `Renderer::draw_frame`'s own
   documented recoverable cases) silently killed the entire render loop

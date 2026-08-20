@@ -86,6 +86,24 @@ const PRIOR_WIDTH_OCTAVES: f32 = 0.9;
 /// about the pattern's shape than about how sure the answer is.
 const CONFIDENT_CORRELATION: f32 = 0.3;
 
+/// How many onsets the window has to contain before a tempo is reported at
+/// all.
+///
+/// A tempo needs beats, and a beat is an event. Without this the
+/// autocorrelation -- which is normalised by the detection function's own
+/// energy, so that it can find a pulse in quiet music as well as loud -- will
+/// report a *confident* tempo for a periodicity in numerical residue. That is
+/// not hypothetical: a held 1kHz tone read 122.4 BPM at confidence 1.00 on the
+/// web build while the detector reported no onsets at all and a peak transient
+/// of 0.022 (measured 2026-08-20 by `/musical.html`). The native build read no
+/// tempo for the same fixture, which was luck rather than correctness -- its
+/// residue happened not to be periodic.
+///
+/// Four is lenient: the slowest tempo tracked puts eight beats in this window
+/// and the fastest twenty-six, so half of them can be missed and a real pulse
+/// still reports.
+const MIN_ONSETS_IN_WINDOW: usize = 4;
+
 /// Below this, the tempo is reported as [`NO_TEMPO`] rather than as a number
 /// nobody should act on -- decision 36's "material with no steady pulse says
 /// so". The confidence itself is still published, so a consumer can tell a
@@ -131,6 +149,9 @@ pub struct TempoTracker {
     detection_hz: f32,
     /// Ring of detection values, newest at `write`.
     history: Vec<f32>,
+    /// Whether each of those hops carried an onset, in the same order. Counted
+    /// rather than correlated: see `MIN_ONSETS_IN_WINDOW`.
+    onsets: Vec<bool>,
     write: usize,
     filled: usize,
     /// Time-ordered scratch copy of `history`, and the autocorrelation over it.
@@ -168,6 +189,7 @@ impl TempoTracker {
         Self {
             detection_hz,
             history: vec![0.0; window],
+            onsets: vec![false; window],
             write: 0,
             filled: 0,
             series: Vec::with_capacity(window),
@@ -189,6 +211,7 @@ impl TempoTracker {
     /// measured across two tracks is a tempo nobody played.
     pub fn reset(&mut self) {
         self.history.fill(0.0);
+        self.onsets.fill(false);
         self.write = 0;
         self.filled = 0;
         self.since_estimate = 0;
@@ -206,6 +229,7 @@ impl TempoTracker {
             0.0
         };
         self.history[self.write] = detection;
+        self.onsets[self.write] = onset > 0.0;
         self.write = (self.write + 1) % self.history.len();
         self.filled = (self.filled + 1).min(self.history.len());
 
@@ -262,6 +286,14 @@ impl TempoTracker {
     fn estimate(&mut self) {
         let count = self.filled;
         let capacity = self.history.len();
+
+        // Beats first: without events there is nothing here that a listener
+        // would call a tempo, however periodic the residue happens to be.
+        if self.onsets.iter().filter(|seen| **seen).count() < MIN_ONSETS_IN_WINDOW {
+            self.bpm = NO_TEMPO;
+            self.confidence = 0.0;
+            return;
+        }
 
         // Oldest first, so lags mean what they say.
         self.series.clear();
@@ -530,6 +562,31 @@ mod tests {
             reading.confidence,
             reading.bpm
         );
+    }
+
+    #[test]
+    fn a_periodic_residue_with_no_onsets_in_it_is_not_a_tempo() {
+        // The web build's held 1kHz tone, in miniature: a detection function
+        // that is perfectly periodic and vanishingly small, with nothing in it
+        // any detector would call an onset. The autocorrelation is normalised
+        // by its own energy, so without `MIN_ONSETS_IN_WINDOW` this reads a
+        // confident 120 BPM (measured 2026-08-20).
+        let period = 60.0 * DETECTION_HZ / 120.0;
+        let mut tracker = TempoTracker::new(DETECTION_HZ);
+        for value in pulses(1_200, period) {
+            tracker.push(value * 0.0005, 0.0);
+        }
+        let reading = tracker.reading();
+        assert_eq!(reading.bpm, NO_TEMPO, "confidence {}", reading.confidence);
+        assert_eq!(reading.confidence, 0.0);
+
+        // ...and the identical shape *with* onsets in it is a tempo, which is
+        // what keeps this rule from being a way of reporting nothing.
+        let mut heard = TempoTracker::new(DETECTION_HZ);
+        for value in pulses(1_200, period) {
+            heard.push(value * 0.0005, if value > 0.9 { value } else { 0.0 });
+        }
+        assert!((heard.reading().bpm - 120.0).abs() < 0.5);
     }
 
     #[test]

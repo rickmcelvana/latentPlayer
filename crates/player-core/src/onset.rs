@@ -53,7 +53,9 @@ pub const DETECTION_HZ: f32 = 100.0;
 const COMPRESSION: f32 = 1000.0;
 
 /// The quietest magnitude that counts as content, in normalised full-scale
-/// units: -80dBFS per bin.
+/// units: -80dBFS per bin. It does two jobs -- it floors the flux, and it gates
+/// the centroid -- and both are about the same thing: what in this spectrum is
+/// the music rather than the noise under it.
 ///
 /// Compression's cost is that it magnifies *relative* change, and the relative
 /// change in a bin holding nothing but window leakage is large -- a held 440Hz
@@ -292,8 +294,18 @@ impl OnsetDetector {
             // The centroid is taken on the *linear* magnitudes: it is the
             // energy's centre of mass in Hz, and compressing first would move
             // it toward whatever is quietest.
-            weighted += f64::from(magnitude) * f64::from(bin as f32 * bin_hz);
-            total += f64::from(magnitude);
+            //
+            // Bins under `MAGNITUDE_FLOOR` are left out of it entirely rather
+            // than floored, because a centre of mass counts every contributor:
+            // five hundred bins of dither and resampler noise at -85dBFS are
+            // inaudible and *numerous*, and they dragged a 1kHz tone's
+            // brightness to 1148Hz through the real playback path -- clean
+            // synthetic audio in a unit test read 1000Hz, which is exactly the
+            // kind of difference only a live check finds (measured 2026-08-20).
+            if magnitude > MAGNITUDE_FLOOR {
+                weighted += f64::from(magnitude) * f64::from(bin as f32 * bin_hz);
+                total += f64::from(magnitude);
+            }
 
             let compressed = (1.0 + COMPRESSION * magnitude.max(MAGNITUDE_FLOOR)).ln();
             if self.have_previous {

@@ -421,9 +421,55 @@ view and the three-and-two bend cycles.
 
 **That closes PLAN.md section 4's built-in suite** -- vectorscope, bars,
 waterfall, tunnel -- all four user-confirmed on both shells, and the host
-unchanged by the last three. M5 (musical intelligence: onsets, beat tracking,
-spectral centroid as new `player-core` meters) is next, and is the first
-milestone in this phase whose work is analysis rather than rendering.
+unchanged by the last three.
+
+**Phase 3 M5 (musical intelligence) is underway** (2026-08-20), and turns the
+phase around: its work is analysis rather than rendering. `onset.rs` is the
+detection function and the features on its grid (rectified spectral flux over
+log-compressed magnitudes, transients, onset picking, the spectral centroid) and
+`tempo.rs` is the tempo and beat phase taken from it (autocorrelation, harmonic
+scoring, a log-normal prior at 120 BPM, an interpolated peak, and a PLL for the
+phase). Both run on a **hop clock derived from the output rate** -- 480 frames
+at 48kHz, 441 at 44.1kHz, both exactly 100Hz -- rather than on the caller's
+cadence, because flux measured between two drains is a different measurement on
+every drain and the two shells drain on different clocks; an internal
+accumulator makes chunking irrelevant, which is asserted rather than claimed.
+The display spectrum is deliberately not reused (smoothed, log-binned,
+irregularly timed) and the detector's own bins are never published.
+`MusicalSnapshot` joins `MeterSnapshot` on the one drain and resets with it on a
+broken listen. The plumbing is one of each thing per shell: a `musical` command
+natively, a six-float shared-buffer region on the web, `VisualFrame::with_musical`
+in `player-render`, and a studio panel (`Musical.tsx`) of its own.
+**No visual reads the new frame fields yet** -- M6 drives scenes with beats,
+with M6's decisions -- so both smokes check instead that the addition is *inert*:
+64/64 in `visual_smoke` (was 60/60) and 71/71 at `/visualizer.html` (was 67/67),
+byte-identical with and without a tempo in the frame.
+
+Verified the analysis suite's way, against known answers: **16/16** in
+`cargo run -p player-core --example musical_smoke` and **16/16** at
+`/musical.html`, on fixtures generated from the same arithmetic down to the
+noise bursts' seed -- 120.00 BPM against 120.00, 89.71 against 89.70 after a
+gapless hand-off into a 90 BPM track (a tempo no integer autocorrelation lag can
+express), 120.00 against 120.00 with an offbeat on every eighth, and a 1kHz
+tone's brightness at 1061Hz against 999Hz. 305 tests, up from 276 at the end of
+M4; clippy, fmt, `tsc` and the web build green.
+
+Those two harnesses earned themselves twice over. The web one caught a tempo of
+**122.4 BPM at confidence 1.00 during a held tone** -- with zero onsets detected
+-- because an autocorrelation normalised by its own energy scores a periodicity
+in numerical residue as confidently as a drum; the native build read no tempo for
+the same fixture, which was luck rather than agreement. `tempo.rs` now says what
+a tempo is: fewer than four onsets in the window means no tempo, whatever it
+correlates with. And the native one caught the spectral centroid counting the
+*noise floor* -- a 1kHz tone read 1148Hz through the real playback path where the
+unit test on clean audio read within a bin -- so bins under `MAGNITUDE_FLOOR` are
+now left out of the centroid rather than floored into it.
+
+**The plumbing and the panel are user-confirmed live (2026-08-20): "works as
+expected"** -- given before those two fixes, neither of which changes what a
+listener sees on material with a beat. The outstanding half is a confirming
+glance: a held note or a quiet passage should now read "--" rather than a
+confident tempo.
 
 The certificate answer changed a finding into a fix: ureq defaults to
 webpki-roots, a bundle compiled into the binary, under which installing a
@@ -451,6 +497,11 @@ real Navidrome to verify against.
 server misbehaves -- retries, refusals, a captive portal, a token that stopped
 working; `/failing.html` is its web half and is what holds `audioSab.ts`'s
 mirrored buffering threshold to `player-core`'s.
+
+`cargo run -p player-core --example musical_smoke` checks the tempo, the beat,
+the onsets and the brightness through the whole playback path against
+synthesized click tracks with known answers; `/musical.html` is its web half,
+generating the identical fixtures.
 
 `cargo run -p player-core --example seek_smoke -- <path>` checks that seeking a given file yields
 the same audio as playing through to that point — written for MP3, whose bit reservoir makes
