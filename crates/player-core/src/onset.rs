@@ -89,6 +89,26 @@ const SILENCE_FLOOR: f32 = 0.5;
 /// with a rattly tail is one onset rather than three.
 const REFRACTORY_SECONDS: f32 = 0.05;
 
+/// The detection-function value a full-strength transient is measured against,
+/// as a **floor under the normalising peak**.
+///
+/// Without it the transient figure is purely relative -- `detection / its own
+/// recent peak` -- so material whose every flux value is tiny still reports 1.0
+/// as soon as one of those tiny values is the largest of them. That is not a
+/// hypothetical either: a sustained organ pad with no attacks in it at all read
+/// `transient 1.000, onset 1.000` and a confident 142 BPM, reported live on
+/// 2026-08-20 and reproduced with a synthesized pad. Its largest detection
+/// value was **4.71**, where a piano attack reaches 136 and a click 108 -- so
+/// the reading was thirty times too big, and nothing in the arithmetic could
+/// tell.
+///
+/// Sized from those measurements, and it is a floor rather than a scale: any
+/// material whose peak flux is above it normalises exactly as it did before, so
+/// a quiet mix with real transients in it still reads 1.0 on its own loudest
+/// hit. Only material with nothing percussive anywhere in it is scaled down,
+/// which is the honest answer for it.
+const TRANSIENT_REFERENCE: f32 = 30.0;
+
 /// How long the normalising peak takes to forget a loud passage. This is what
 /// makes [`HopFeatures::transient`] a 0..1 figure rather than an unbounded one,
 /// and the release is slow so that a quiet bar after a loud one does not
@@ -335,11 +355,11 @@ impl OnsetDetector {
         self.recent_filled = (self.recent_filled + 1).min(self.recent.len());
 
         self.peak = (self.peak * self.peak_decay).max(detection);
-        let transient = if self.peak > f32::MIN_POSITIVE {
-            (detection / self.peak).clamp(0.0, 1.0)
-        } else {
-            0.0
-        };
+        // Against the louder of what this material has recently done and an
+        // absolute reference, so "as strong as anything here" cannot mean "as
+        // strong as anything" when nothing here is strong.
+        let reference = self.peak.max(TRANSIENT_REFERENCE);
+        let transient = (detection / reference).clamp(0.0, 1.0);
 
         self.since_onset = self.since_onset.saturating_add(1);
         let over_threshold = flux > mean * THRESHOLD_FACTOR + SILENCE_FLOOR;

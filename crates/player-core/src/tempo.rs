@@ -104,6 +104,23 @@ const CONFIDENT_CORRELATION: f32 = 0.3;
 /// still reports.
 const MIN_ONSETS_IN_WINDOW: usize = 4;
 
+/// How strong a picked onset has to be before it counts as one of those four,
+/// or is allowed to pull the beat phase.
+///
+/// `MIN_ONSETS_IN_WINDOW` asks for beats and this says what a beat is. The
+/// peak picker fires on any rise above its local mean, which is right for
+/// finding *where* something happened and wrong for deciding whether the
+/// something was a beat: a slow swell in a pad crosses that bar repeatedly,
+/// and eighty-two such crossings in twelve seconds correlated into a confident
+/// 142 BPM (reported live 2026-08-20 on sustained organ material, reproduced
+/// with a synthesized pad).
+///
+/// A quarter of full strength, against `onset.rs`'s newly absolute scale: a
+/// real attack reports 1.0 there, the pad's crossings report about 0.15, and
+/// anything a listener would call a beat is far nearer the first than the
+/// second.
+const MIN_ONSET_STRENGTH: f32 = 0.25;
+
 /// Below this, the tempo is reported as [`NO_TEMPO`] rather than as a number
 /// nobody should act on -- decision 36's "material with no steady pulse says
 /// so". The confidence itself is still published, so a consumer can tell a
@@ -229,12 +246,13 @@ impl TempoTracker {
             0.0
         };
         self.history[self.write] = detection;
-        self.onsets[self.write] = onset > 0.0;
+        let is_beat = onset >= MIN_ONSET_STRENGTH;
+        self.onsets[self.write] = is_beat;
         self.write = (self.write + 1) % self.history.len();
         self.filled = (self.filled + 1).min(self.history.len());
 
         self.advance_phase();
-        if onset > 0.0 {
+        if is_beat {
             self.pull_phase(onset);
         }
 

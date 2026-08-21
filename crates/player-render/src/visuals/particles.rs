@@ -35,9 +35,15 @@ use super::history::RowClock;
 
 /// How many particles exist. Every one of them is simulated every step whether
 /// it is alive or not, which is what makes the cost of this visual a constant
-/// rather than a function of the music -- 32768 is 512 workgroups of 64, and one
-/// megabyte of state.
-const PARTICLES: u32 = 32_768;
+/// rather than a function of the music -- 131072 is 2048 workgroups of 64, and
+/// four megabytes of state.
+///
+/// It is the *budget* rather than the population: how many are alive at once is
+/// the emission rate times a lifetime, and a fullscreen window is allowed four
+/// times what a 480px one uses (see [`density_scale`]). Sized so the largest
+/// case fits with room to spare, because a slot recycled while its particle is
+/// still alive is a spark that vanishes mid-flight.
+const PARTICLES: u32 = 131_072;
 const WORKGROUP: u32 = 64;
 
 /// The simulation's clock: 120 steps a second, and a stall budget of two
@@ -99,8 +105,53 @@ const KICK: f32 = 3.5;
 /// loud passage.
 const MAX_RADIUS: f32 = 3.2;
 
-/// A particle's radius in world units, before its life-fade shrinks it.
+/// A particle's radius in world units at [`REFERENCE_HEIGHT`], before its
+/// life-fade shrinks it.
 const SPARK_SIZE: f32 = 0.04;
+
+/// The viewport height [`SPARK_SIZE`] is stated at, and the range the scaling
+/// below is allowed to reach.
+///
+/// A spark is a quad in the *world*, and the camera is fitted to the field --
+/// so at twice the viewport height the same field is drawn twice as large and
+/// every spark with it. That is right for a trace and wrong for a field of
+/// them: it means a bigger window shows the same picture magnified, which is
+/// what "smooth but blurred, and the resolution suffers past 480" was when this
+/// was first watched fullscreen (reported live 2026-08-20).
+///
+/// So the world size is scaled by the reference height over the real one, which
+/// holds a spark at roughly the same size *to the eye* and lets a fullscreen
+/// window spend its pixels on more of them rather than on bigger ones. The
+/// reference is the default visualizer size, so the size that was watched and
+/// approved is the size that is preserved.
+///
+/// Clamped at both ends: below about two pixels a spark stops being a shape and
+/// starts being aliasing that crawls, and above the top of the range a small
+/// window would show a handful of blobs.
+const REFERENCE_HEIGHT: f32 = 480.0;
+const SPARK_SCALE_RANGE: (f32, f32) = (0.25, 1.6);
+
+/// How much more to emit for a viewport of this height.
+///
+/// The other half of the same finding. Holding a spark's *pixel* size fixed
+/// stops a big window from magnifying the picture, but on its own it leaves a
+/// fullscreen field looking thin -- the same population thrown across five times
+/// the pixels. Emission therefore follows the viewport's area, so a bigger
+/// window buys both more detail and more of it.
+///
+/// Never below the reference: a small window keeps the density that was watched
+/// and approved rather than being thinned to match its pixel count. Capped at
+/// four, which is where the fixed budget above stops being comfortable.
+fn density_scale(height: u32) -> f32 {
+    let ratio = (height.max(1) as f32) / REFERENCE_HEIGHT;
+    (ratio * ratio).clamp(1.0, 4.0)
+}
+
+/// How much to scale [`SPARK_SIZE`] for a viewport of this height.
+fn spark_scale(height: u32) -> f32 {
+    let height = (height.max(1) as f32).max(1.0);
+    (REFERENCE_HEIGHT / height).clamp(SPARK_SCALE_RANGE.0, SPARK_SCALE_RANGE.1)
+}
 
 /// How bright one spark is, and how hard the tone map's shoulder pulls the sum
 /// of many back towards white.
@@ -628,6 +679,7 @@ impl ParticleField {
             return 0;
         }
         let dt = 1.0 / STEP_HZ;
+        let density = density_scale(self.height);
         let level = (frame.peak() * frame.gain).clamp(0.0, 1.0);
         let onset = frame.musical.onset.clamp(0.0, 1.0);
         let kick = beat_kick(&frame.musical);
@@ -644,7 +696,7 @@ impl ParticleField {
             // Emission is a rate integrated over the step, with the fraction
             // carried -- so a frame worth half a particle spawns none now and
             // one later, rather than none ever.
-            let rate = BASE_RATE * level.sqrt() + ONSET_RATE * self.energy;
+            let rate = (BASE_RATE * level.sqrt() + ONSET_RATE * self.energy) * density;
             self.carry += rate * dt;
             let issue = self.carry.floor().clamp(0.0, PARTICLES as f32);
             self.carry -= issue;
@@ -778,7 +830,7 @@ impl Visual for ParticleField {
                 right: [right[0], right[1], right[2], 0.0],
                 up: [up[0], up[1], up[2], 0.0],
                 params: [
-                    SPARK_SIZE,
+                    SPARK_SIZE * spark_scale(self.height),
                     SPARK_BRIGHTNESS * (0.45 + 0.55 * level),
                     LIFE_MIN + LIFE_SPAN,
                     self.srgb,
@@ -905,6 +957,44 @@ mod tests {
             (facing.abs() - 1.0).abs() < 1e-3,
             "quads face {facing} of the way at the eye"
         );
+    }
+
+    #[test]
+    fn a_spark_holds_its_size_to_the_eye_rather_than_in_the_world() {
+        // The bug this pins was reported from a fullscreen look, not from a
+        // check: sparks sized in world units are magnified along with the field
+        // the camera is fitted to, so a 1440p window drew the 480px picture
+        // three times bigger and called it blurry.
+        assert!((spark_scale(480) - 1.0).abs() < 1e-6);
+        // Twice the height, half the world size -- which is the same pixels.
+        assert!((spark_scale(960) - 0.5).abs() < 1e-6);
+        // A fullscreen 1440p window lands inside the range rather than on its
+        // floor, so the compensation is real there rather than clamped away.
+        assert!(spark_scale(1440) > SPARK_SCALE_RANGE.0);
+        assert!((spark_scale(1440) - 1.0 / 3.0).abs() < 1e-6);
+        // 4K is past the floor, and stops there: a spark under a couple of
+        // pixels is aliasing rather than a shape.
+        assert_eq!(spark_scale(2160), SPARK_SCALE_RANGE.0);
+        // And a tiny window gets the other end of the clamp rather than sparks
+        // the size of the field.
+        assert_eq!(spark_scale(120), SPARK_SCALE_RANGE.1);
+        assert_eq!(spark_scale(0), SPARK_SCALE_RANGE.1);
+    }
+
+    #[test]
+    fn a_bigger_window_gets_more_sparks_rather_than_bigger_ones() {
+        // The other half of the fullscreen finding: pixel-sized sparks alone
+        // leave a large window looking thin.
+        assert!((density_scale(480) - 1.0).abs() < 1e-6);
+        assert!((density_scale(720) - 2.25).abs() < 1e-6);
+        // Fullscreen asks for five times the reference and is given four, which
+        // is what the fixed budget can hold.
+        assert_eq!(density_scale(1080), 4.0);
+        assert_eq!(density_scale(2160), 4.0);
+        // And a small window is never *thinned* -- the approved density is a
+        // floor, not a ratio.
+        assert_eq!(density_scale(320), 1.0);
+        assert_eq!(density_scale(1), 1.0);
     }
 
     #[test]

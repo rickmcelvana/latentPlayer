@@ -41,6 +41,9 @@ const TRACK_SECONDS: u32 = 30;
 const FIRST_BPM: f32 = 120.0;
 const SECOND_BPM: f32 = 90.0;
 
+/// How long the pad takes to reach full level. See `Fixture::Pad`.
+const PAD_FADE_SECONDS: f32 = 1.0;
+
 /// The tone used for the brightness check, and for "a held note is not a beat".
 const TONE_HZ: f32 = 1000.0;
 
@@ -84,6 +87,15 @@ enum Fixture {
     Clicks { bpm: f32, offbeat: bool },
     /// A held sine: brightness with a known answer, and no beat at all.
     Tone,
+    /// A sustained pad: swelling partials, no attacks anywhere in it.
+    ///
+    /// The fixture M6's first live look earned. Sustained organ material was
+    /// reported as a confident 142 BPM with `transient 1.000` -- because the
+    /// transient figure was normalised by its own recent peak alone, so flux
+    /// thirty times too small to be an attack still read as full strength, and
+    /// the swells crossed the onset picker's bar often enough to correlate
+    /// (2026-08-20). There is nothing here for either figure to find.
+    Pad,
     /// Soft notes at deliberately irregular intervals -- the rubato case. There
     /// are onsets to find and no tempo to find, which is the failure this
     /// milestone most needs to fail *honestly* (decision 36).
@@ -125,6 +137,29 @@ fn render(fixture: &Fixture, frames: usize) -> Vec<f32> {
                 0.5 * (2.0 * std::f32::consts::PI * TONE_HZ * n as f32 / SRC_RATE as f32).sin()
             })
             .collect(),
+        Fixture::Pad => {
+            // Four partials, slightly detuned so they beat against each other,
+            // under a slow swell. Every ingredient of the material that was
+            // misread: continuous, harmonically rich, and moving -- with no
+            // event in it anywhere.
+            (0..frames)
+                .map(|n| {
+                    let t = n as f32 / SRC_RATE as f32;
+                    let swell = 0.5 + 0.5 * (2.0 * std::f32::consts::PI * 0.07 * t).sin();
+                    let voices: f32 = [(110.0, 0.5), (164.8, 0.35), (220.5, 0.3), (330.0, 0.2)]
+                        .iter()
+                        .map(|(hz, amp)| amp * (2.0 * std::f32::consts::PI * hz * t).sin())
+                        .sum();
+                    // Faded in over a second, because a file that begins at
+                    // half amplitude on its first sample *does* begin with an
+                    // attack -- and the detector is right to say so. Without
+                    // this the fixture's only transient is the fixture's own
+                    // start, which is not what it is here to measure.
+                    let fade = (t / PAD_FADE_SECONDS).min(1.0);
+                    0.35 * fade * swell * voices
+                })
+                .collect()
+        }
         Fixture::Rubato => {
             // Onsets in seconds, and the note each starts. Irregular on
             // purpose: no two gaps are the same, and no gap is a multiple of
@@ -212,6 +247,11 @@ struct Watched {
     /// centroid of a percussive track is a thing you catch, not a thing you
     /// read afterwards.
     brightest: f32,
+    /// The strongest transient seen. What M6's live look turned into a figure:
+    /// on material with no attacks this has to stay near zero, and it read
+    /// 1.000 until `onset.rs` was given an absolute reference to measure
+    /// against.
+    strongest_transient: f32,
 }
 
 /// Plays for `duration`, polling faster than the analysis publishes so that
@@ -225,6 +265,7 @@ fn watch(playback: &Playback, duration: Duration) -> Watched {
         lowest_phase: f32::MAX,
         highest_phase: f32::MIN,
         brightest: 0.0,
+        strongest_transient: 0.0,
     };
     let mut last_onset = 0.0f32;
     while Instant::now() < until {
@@ -237,6 +278,7 @@ fn watch(playback: &Playback, duration: Duration) -> Watched {
         }
         last_onset = musical.onset;
         watched.brightest = watched.brightest.max(musical.centroid_hz);
+        watched.strongest_transient = watched.strongest_transient.max(musical.transient);
         if musical.bpm > NO_TEMPO {
             watched.lowest_phase = watched.lowest_phase.min(musical.beat_phase);
             watched.highest_phase = watched.highest_phase.max(musical.beat_phase);
@@ -259,6 +301,7 @@ fn main() {
     let offbeat = dir.join("latentplayer_musical_offbeat.wav");
     let tone = dir.join("latentplayer_musical_tone.wav");
     let rubato = dir.join("latentplayer_musical_rubato.wav");
+    let pad = dir.join("latentplayer_musical_pad.wav");
     write_wav(
         &first,
         &Fixture::Clicks {
@@ -285,6 +328,7 @@ fn main() {
     .expect("write the offbeat click track");
     write_wav(&tone, &Fixture::Tone).expect("write the tone");
     write_wav(&rubato, &Fixture::Rubato).expect("write the rubato notes");
+    write_wav(&pad, &Fixture::Pad).expect("write the pad");
 
     let playback = Playback::open(Box::new(LocalFile::new(&first))).expect("open the click track");
     playback.set_volume(0.1); // be kind to whoever is at the keyboard
@@ -471,7 +515,34 @@ fn main() {
     );
     drop(playback);
 
-    for path in [&first, &second, &offbeat, &tone, &rubato] {
+    // The pad, which is where M6's live look found this suite believing itself.
+    // Sustained material with no attacks must report no tempo and no transient
+    // -- the second is the cause and the first is the symptom, so both are
+    // checked rather than only the one a listener noticed.
+    let playback = Playback::open(Box::new(LocalFile::new(&pad))).expect("open the pad");
+    playback.set_volume(0.1);
+    playback.play();
+    let watched = watch(&playback, SETTLE);
+    let held = playback.musical();
+    check(
+        "a sustained pad is not a beat",
+        held.bpm == NO_TEMPO && held.beat_confidence == 0.0,
+        format!(
+            "{:.1} BPM, confidence {:.2} (142 BPM at 1.00 was the bug)",
+            held.bpm, held.beat_confidence
+        ),
+    );
+    check(
+        "and nothing in it reads as a transient",
+        watched.strongest_transient < 0.25,
+        format!(
+            "{:.3} at strongest, against 1.000 before the reference was absolute",
+            watched.strongest_transient
+        ),
+    );
+    drop(playback);
+
+    for path in [&first, &second, &offbeat, &tone, &rubato, &pad] {
         let _ = std::fs::remove_file(path);
     }
 

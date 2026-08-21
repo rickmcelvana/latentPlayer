@@ -80,13 +80,17 @@ function noise(): () => number {
 type Fixture =
   | { kind: "clicks"; bpm: number; offbeat: boolean }
   | { kind: "tone" }
-  | { kind: "rubato" };
+  | { kind: "rubato" }
+  | { kind: "pad" };
 
 /// Frames between clicks at `bpm`. Rounded, so both shells place them
 /// identically.
 function clickPeriod(bpm: number): number {
   return Math.round((60 / bpm) * SRC_RATE);
 }
+
+/// How long the pad takes to reach full level. See the pad fixture below.
+const PAD_FADE_SECONDS = 1.0;
 
 /// Onsets in seconds and the note each starts, for the rubato fixture.
 /// Irregular on purpose: no two gaps are the same, and no gap is a multiple of
@@ -124,6 +128,31 @@ function render(fixture: Fixture, frames: number): Float32Array {
         const since = into - half;
         out[n] = next() * (1 - since / 128) * 0.35;
       }
+    }
+    return out;
+  }
+  if (fixture.kind === "pad") {
+    // Four partials, slightly detuned so they beat against each other, under a
+    // slow swell -- every ingredient of the material M6's live look found being
+    // misread as a confident 142 BPM, and no event anywhere in it.
+    for (let n = 0; n < frames; n++) {
+      const t = n / SRC_RATE;
+      const swell = 0.5 + 0.5 * Math.sin(2 * Math.PI * 0.07 * t);
+      let voices = 0;
+      for (const [hz, amp] of [
+        [110.0, 0.5],
+        [164.8, 0.35],
+        [220.5, 0.3],
+        [330.0, 0.2],
+      ]) {
+        voices += amp * Math.sin(2 * Math.PI * hz * t);
+      }
+      // Faded in over a second, because a file that begins at half amplitude
+      // on its first sample *does* begin with an attack -- and the detector is
+      // right to say so. Without this the fixture's only transient is the
+      // fixture's own start, which is not what it is here to measure.
+      const fade = Math.min(t / PAD_FADE_SECONDS, 1);
+      out[n] = 0.35 * fade * swell * voices;
     }
     return out;
   }
@@ -195,6 +224,10 @@ interface Watched {
   /// of a percussive track is a thing you catch, not a thing you read
   /// afterwards.
   brightest: number;
+  /// The strongest transient seen. What M6's live look turned into a figure: on
+  /// material with no attacks this has to stay near zero, and it read 1.000
+  /// until `onset.rs` was given an absolute reference to measure against.
+  strongestTransient: number;
 }
 
 /// Plays for `ms`, polling faster than the analysis publishes so that onsets
@@ -207,6 +240,7 @@ async function watch(ms: number): Promise<Watched> {
     lowestPhase: Number.POSITIVE_INFINITY,
     highestPhase: Number.NEGATIVE_INFINITY,
     brightest: 0,
+    strongestTransient: 0,
   };
   let lastOnset = 0;
   while (performance.now() < until) {
@@ -217,6 +251,7 @@ async function watch(ms: number): Promise<Watched> {
     }
     lastOnset = m.onset;
     watched.brightest = Math.max(watched.brightest, m.centroidHz);
+    watched.strongestTransient = Math.max(watched.strongestTransient, m.transient);
     if (m.bpm > NO_TEMPO) {
       watched.lowestPhase = Math.min(watched.lowestPhase, m.beatPhase);
       watched.highestPhase = Math.max(watched.highestPhase, m.beatPhase);
@@ -246,6 +281,7 @@ async function runSmoke(): Promise<void> {
   const offbeat = makeWav({ kind: "clicks", bpm: FIRST_BPM, offbeat: true }, "click-offbeat.wav");
   const tone = makeWav({ kind: "tone" }, "tone.wav");
   const rubato = makeWav({ kind: "rubato" }, "rubato.wav");
+  const pad = makeWav({ kind: "pad" }, "pad.wav");
 
   await loadFile(first);
   setVolume(0.1); // be kind to whoever is at the keyboard
@@ -389,6 +425,26 @@ async function runSmoke(): Promise<void> {
     "and its notes are darker than a click",
     watched.brightest > 0 && watched.brightest < 2000,
     `${watched.brightest.toFixed(0)} Hz at brightest`,
+  );
+
+  // The pad, which is where M6's live look found this suite believing itself.
+  // Sustained material with no attacks must report no tempo and no transient --
+  // the second is the cause and the first is the symptom, so both are checked
+  // rather than only the one a listener noticed.
+  await loadFile(pad);
+  setVolume(0.1);
+  await play();
+  watched = await watch(SETTLE_MS);
+  const sustained = musical();
+  check(
+    "a sustained pad is not a beat",
+    sustained.bpm === NO_TEMPO && sustained.beatConfidence === 0,
+    `${sustained.bpm.toFixed(1)} BPM, confidence ${sustained.beatConfidence.toFixed(2)} (142 BPM at 1.00 was the bug)`,
+  );
+  check(
+    "and nothing in it reads as a transient",
+    watched.strongestTransient < 0.25,
+    `${watched.strongestTransient.toFixed(3)} at strongest, against 1.000 before the reference was absolute`,
   );
 
   pause();
