@@ -582,6 +582,26 @@ impl WasmRenderer {
     /// Optional, and a short array counts as absent -- a caller with nothing
     /// measured says nothing rather than passing six zeroes, which is the same
     /// shape `VisualFrame::with_musical` has on the native side.
+    /// The wide argument list is deliberate, and the alternative is worse here
+    /// specifically. Grouping these into one `#[wasm_bindgen]` struct would put
+    /// an **exported Rust type on a 60Hz path**: checked against this repo's own
+    /// generated bindings rather than assumed, every exported struct gets an
+    /// explicit `free(): void` and a `FinalizationRegistry` fallback
+    /// (`app/src/wasm/player_rt_wasm.js`, `__wbg_wasmrenderer_free` and
+    /// friends), so a frame object built per animation callback is either freed
+    /// by hand every frame -- inside a `try`, since `webVisualizer.ts` draws in
+    /// one -- or left to GC-timed finalization of Rust heap. Neither is a trade
+    /// worth making to satisfy a lint about a list that is documented argument
+    /// by argument above and mirrors `VisualFrame::new().with_spectrum()
+    /// .with_musical()` exactly.
+    ///
+    /// The list has grown once per milestone (M2 added two, M5 added one), so
+    /// the honest trigger to revisit is **growth, not width**: if a milestone
+    /// needs a tenth argument, that is the point at which the feed should
+    /// become a shared-buffer region the renderer reads for itself -- which is
+    /// how `musical` already arrives on the worker's side -- rather than a
+    /// longer call.
+    #[allow(clippy::too_many_arguments)]
     pub fn draw_frame(
         &mut self,
         samples: &[f32],
