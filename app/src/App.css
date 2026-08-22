@@ -449,7 +449,8 @@ input[type="range"] {
 
 /* The visualizer host's controls (Phase 3 M1): the gallery on one row, the
    host's own buttons -- size, visibility, fullscreen -- on the next. Two rows
-   because they are two different things: which visual, and how it is shown. */
+   because they are two different things: which visual, and how it is shown.
+   M7a adds a third, shown only while MilkDrop is the visual: which preset. */
 .visualizer-controls {
   display: flex;
   flex-direction: column;
@@ -459,6 +460,7 @@ input[type="range"] {
 
   .gallery,
   .gain,
+  .presets,
   .host {
     display: flex;
     align-items: center;

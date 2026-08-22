@@ -562,6 +562,32 @@ impl WasmRenderer {
         self.inner.gain().id().to_string()
     }
 
+    /// Loads a MilkDrop preset from its `.milk` text, or clears the selection
+    /// by passing `undefined` (Phase 3 M7a).
+    ///
+    /// The one command decision 49 adds, and it takes *text* rather than a path
+    /// because a browser has no path to give: the web shell reads the file
+    /// through a file input and hands over what it read. The desktop shell
+    /// reads it from disk and reaches the same `Renderer::set_preset`, so both
+    /// shells parse the same file with the same code and get the same answer
+    /// about it -- including the same list of what it needs and this build does
+    /// not do.
+    ///
+    /// The selection lives on the host and survives a visual swap, so loading a
+    /// preset while the bars are showing is not a mistake to guard against: it
+    /// is how a person browsing a folder would expect it to work.
+    ///
+    /// Answers with that list, one string per line, so the caller can show it.
+    /// An unparseable file is an error rather than an empty selection, since
+    /// "this is not a preset" and "no preset is chosen" are different states.
+    #[wasm_bindgen(js_name = setPreset)]
+    pub fn set_preset(&mut self, text: Option<String>) -> Result<Vec<String>, JsValue> {
+        self.inner
+            .set_preset(text.as_deref())
+            .map_err(|e| JsValue::from_str(&format!("{e}")))?;
+        Ok(self.inner.preset_report())
+    }
+
     /// Draws one frame from the host's feed.
     ///
     /// `channels` is the interleaving width of `samples` -- the output's, since

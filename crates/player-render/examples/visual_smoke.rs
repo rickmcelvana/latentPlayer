@@ -1168,8 +1168,15 @@ fn check_the_host_contract(kind: VisualKind) {
     // reads the samples and the bars read the spectrum, and a contract check
     // that handed over only half of it would be asking half the gallery to draw
     // nothing.
+    //
+    // The scene is rebuilt first so this is the *first* frame it has drawn,
+    // which is what the `fresh` baseline below is too -- and, since M7a, what
+    // the empty frame above no longer leaves it as: a feedback loop advances on
+    // every frame it is given. Without this the two halves of the check would
+    // report different pixel counts for the same claim.
     let signal = tone(220.0, 0.3);
     let spectrum = Spectrum::of(&signal, 2);
+    renderer.set_visual(kind);
     let lit = measure(
         &renderer
             .draw_to_pixels(&full_frame(&signal, &spectrum))

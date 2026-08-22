@@ -1429,6 +1429,235 @@ function readsMusical(id: string): boolean {
 /// The native half still builds a fresh renderer per claim, because nothing
 /// there is scarce -- and because the two halves arriving at the same figures
 /// by different routes is worth more than the two being written the same way.
+/// The near-black field every visual draws on, as the bytes a readback sees.
+/// The MilkDrop checks measure light *against* it.
+const BACKGROUND_BYTES = [5, 5, 8];
+
+/// A preset that draws a bright circular waveform and nothing else, plus
+/// whatever extra keys a claim needs. The same text the native half builds, so
+/// the two can be compared figure for figure.
+function milkPreset(extra: string): string {
+  return (
+    "[preset00]\n" +
+    "warp=0\n" +
+    "nWaveMode=0\n" +
+    "fWaveAlpha=1.0\n" +
+    "fWaveScale=1.0\n" +
+    "fWaveSmoothing=0\n" +
+    "bMaximizeWaveColor=0\n" +
+    "fGammaAdj=1.0\n" +
+    "bTexWrap=0\n" +
+    extra
+  );
+}
+
+/// Mean brightness of a whole canvas, 0..255.
+function meanBrightness(target: HTMLCanvasElement): number {
+  const px = pixels(target);
+  let sum = 0;
+  for (let i = 0; i < px.length; i += 4) {
+    sum += Math.max(px[i], px[i + 1], px[i + 2]);
+  }
+  return sum / (px.length / 4);
+}
+
+/// Mean brightness inside a centred box of `fraction` of the canvas.
+function meanCentre(target: HTMLCanvasElement, fraction: number): number {
+  const px = pixels(target);
+  const { width, height } = target;
+  const halfW = Math.floor((width * fraction) / 2);
+  const halfH = Math.floor((height * fraction) / 2);
+  const cx = Math.floor(width / 2);
+  const cy = Math.floor(height / 2);
+  let sum = 0;
+  let n = 0;
+  for (let y = Math.max(0, cy - halfH); y < Math.min(height, cy + halfH); y++) {
+    for (let x = Math.max(0, cx - halfW); x < Math.min(width, cx + halfW); x++) {
+      const i = (y * width + x) * 4;
+      sum += Math.max(px[i], px[i + 1], px[i + 2]);
+      n += 1;
+    }
+  }
+  return n === 0 ? 0 : sum / n;
+}
+
+async function checkMilkdrop(): Promise<void> {
+  log("\nMilkDrop -- its own claims:");
+  // One renderer for the whole section, presets swapped in place. M6's live run
+  // found this harness answering `E_OUTOFMEMORY` past four renderers per
+  // visual, and this visual has N presets behind it rather than one scene --
+  // exactly the shape decision 58 was written for.
+  const surface = extraCanvas(320, 320);
+  const renderer = await WasmRenderer.create(surface, surface.width, surface.height, "milkdrop");
+  const signal = tone(220, 0.9);
+  const spectrum = spectrumOf(signal, 2);
+
+  const run = (text: string | undefined, frames: number) => {
+    renderer.setPreset(text);
+    for (let f = 0; f < frames; f++) {
+      renderer.draw_frame(
+        signal,
+        2,
+        RATE,
+        FRAME_SECONDS,
+        spectrum.levels,
+        spectrum.centres,
+        undefined,
+      );
+    }
+  };
+
+  // --- The loop itself: decay is what makes a feedback frame a feedback frame,
+  // and it is the one figure every preset in existence depends on. ---
+  run(milkPreset("fDecay=1.0\n"), 60);
+  const held = meanBrightness(surface);
+  run(milkPreset("fDecay=0.5\n"), 60);
+  const fading = meanBrightness(surface);
+  check(
+    "a preset that does not decay accumulates its own waveform",
+    held > fading * 1.5,
+    `mean ${held.toFixed(1)} at decay 1.0 against ${fading.toFixed(1)} at 0.5`,
+  );
+
+  // --- The four whole-frame filters. `invert` turns the field itself white. ---
+  run(milkPreset("bInvert=1\nfWaveAlpha=0\n"), 4);
+  const corner = pixels(surface).slice(0, 3);
+  check(
+    "bInvert turns the frame's own background inside out",
+    corner[0] > 200 && corner[1] > 200 && corner[2] > 200,
+    `rgb(${corner[0]}, ${corner[1]}, ${corner[2]})`,
+  );
+
+  run(milkPreset("fDecay=0.9\n"), 30);
+  const plain = meanBrightness(surface);
+  run(milkPreset("fDecay=0.9\nbDarken=1\n"), 30);
+  const darker = meanBrightness(surface);
+  run(milkPreset("fDecay=0.9\nbBrighten=1\n"), 30);
+  const brighter = meanBrightness(surface);
+  check(
+    "bDarken and bBrighten bend the frame the two ways round",
+    darker < plain && plain < brighter,
+    `${darker.toFixed(1)} darkened, ${plain.toFixed(1)} plain, ${brighter.toFixed(1)} brightened`,
+  );
+
+  // --- Gamma, measured as *light* rather than as the frame's mean: a waveform
+  // is a thin line on a near-black field, so almost all of the mean is the
+  // field and four times the gamma moves it by a quarter. ---
+  const field = BACKGROUND_BYTES[2];
+  run(milkPreset("fDecay=0.9\nfGammaAdj=0.5\n"), 30);
+  const dim = meanBrightness(surface) - field;
+  run(milkPreset("fDecay=0.9\nfGammaAdj=2.0\n"), 30);
+  const bright = meanBrightness(surface) - field;
+  check(
+    "gamma scales the light in the composited frame",
+    bright > dim * 1.5,
+    `${bright.toFixed(2)} of light at gamma 2.0 against ${dim.toFixed(2)} at 0.5`,
+  );
+
+  // --- The borders, drawn *into* the feedback buffer and so part of the loop
+  // rather than an overlay on it. ---
+  run(
+    milkPreset("fDecay=0.9\nfWaveAlpha=0\nob_size=0.05\nob_r=1\nob_g=0\nob_b=0\nob_a=1\n"),
+    4,
+  );
+  const bordered = pixels(surface);
+  const edgeAt = (surface.height / 2) * surface.width * 4;
+  const edge = [bordered[edgeAt], bordered[edgeAt + 1], bordered[edgeAt + 2]];
+  const middle = meanCentre(surface, 0.2);
+  check(
+    "an outer border rings the frame in the colour the preset asked for",
+    edge[0] > 150 && edge[1] < 80 && edge[2] < 80 && middle < 20,
+    `edge rgb(${edge[0]}, ${edge[1]}, ${edge[2]}), middle ${middle.toFixed(1)}`,
+  );
+
+  // --- The centre darkening. `fWaveParam=-0.45` pulls mode 0's ring in from
+  // radius 0.5 to 0.05, so there is light in the middle to take down: a ring at
+  // its usual radius leaves the centre empty, and "darker than nothing" is not
+  // a measurement. ---
+  const centredWave = "fDecay=1.0\nzoom=1.01\nfWaveParam=-0.45\n";
+  run(milkPreset(centredWave), 60);
+  const undarkened = meanCentre(surface, 0.04);
+  run(milkPreset(centredWave + "bDarkenCenter=1\n"), 60);
+  const darkened = meanCentre(surface, 0.04);
+  check(
+    "bDarkenCenter takes the middle down",
+    darkened < undarkened,
+    `${darkened.toFixed(1)} against ${undarkened.toFixed(1)} in the middle twenty-fifth`,
+  );
+
+  // --- Video echo: a second copy of the picture at another scale, mixed in. ---
+  run(milkPreset("fDecay=0.9\nfVideoEchoAlpha=0\n"), 20);
+  const withoutEcho = measure(surface).lit;
+  run(milkPreset("fDecay=0.9\nfVideoEchoAlpha=0.5\nfVideoEchoZoom=2.0\n"), 20);
+  const withEcho = measure(surface).lit;
+  check(
+    "video echo puts a second copy of the picture in the frame",
+    withEcho > withoutEcho,
+    `${withEcho} lit pixels with the echo, ${withoutEcho} without`,
+  );
+
+  // --- The waveform's own position, which a preset drives per frame. ---
+  run(milkPreset("fDecay=0.0\nwave_x=0.5\nwave_y=0.5\n"), 4);
+  const centred = measure(surface).minX;
+  run(milkPreset("fDecay=0.0\nwave_x=0.75\nwave_y=0.5\n"), 4);
+  const moved = measure(surface).minX;
+  const shift = moved - centred;
+  const expected = surface.width / 4;
+  check(
+    "wave_x moves the waveform a quarter of the frame per quarter turn",
+    Math.abs(shift - expected) < 12,
+    `moved ${shift}px, expected about ${expected}px`,
+  );
+
+  // --- Zoom: reading from a smaller region every frame is what makes a
+  // picture grow outward. ---
+  run(milkPreset("fDecay=1.0\nzoom=1.0\n"), 40);
+  const still = measure(surface);
+  run(milkPreset("fDecay=1.0\nzoom=1.03\n"), 40);
+  const growing = measure(surface);
+  check(
+    "a zoom above one grows the picture outward frame after frame",
+    growing.maxX - growing.minX > still.maxX - still.minX,
+    `${growing.maxX - growing.minX}px wide zooming, ${still.maxX - still.minX}px wide still`,
+  );
+
+  // --- A stranger's program, bounded by budget rather than by trust (decision
+  // 51). The claim is not that it finishes -- it will not -- but that the frame
+  // after it is a frame. ---
+  run(milkPreset("fDecay=0.9\nper_pixel_1=loop(1000000, zoom = zoom + 0.000001;);\n"), 8);
+  check(
+    "a preset whose equations run away still draws its frame",
+    meanBrightness(surface) > 0,
+    `mean ${meanBrightness(surface).toFixed(1)}`,
+  );
+
+  // --- Clearing the selection goes back to MilkDrop's defaults, which are a
+  // real preset. Anything else leaves a gallery entry looking broken the moment
+  // a library is emptied. ---
+  run(undefined, 30);
+  check(
+    "clearing the preset falls back to MilkDrop's defaults rather than to nothing",
+    measure(surface).lit > 100,
+    `${measure(surface).lit} lit pixels`,
+  );
+
+  // --- And the one claim only this shell can make: a file that is not a preset
+  // is an error rather than an empty selection. The native half asserts the
+  // same thing through `set_milk_preset`; here it is the wasm boundary that has
+  // to carry the refusal across. ---
+  let refused = false;
+  try {
+    renderer.setPreset("fDecay=0.5\n");
+  } catch {
+    refused = true;
+  }
+  check(
+    "a file with no preset section is refused rather than silently ignored",
+    refused,
+    refused ? "threw, as it should" : "was accepted",
+  );
+}
+
 async function checkTheHostContract(entry: VisualInfo): Promise<void> {
   log(`\n${entry.name} (${entry.id}):`);
   const surface = extraCanvas(320, 320);
@@ -1460,9 +1689,16 @@ async function checkTheHostContract(entry: VisualInfo): Promise<void> {
   // handing over only half of it would be asking half the gallery to draw
   // nothing.
   //
-  // This is also the `fresh` baseline the next two claims compare against: an
-  // empty feed measures nothing, pushes no history and steps no simulation, so
-  // this frame is the first thing this renderer has actually drawn.
+  // This is also the `fresh` baseline the next two claims compare against, so
+  // the scene is rebuilt first and this frame is the first thing it has drawn.
+  //
+  // That rebuild used to be absent, on the argument that an empty feed measures
+  // nothing, pushes no history and steps no simulation. True of the first six
+  // visuals and **false of MilkDrop**: a feedback loop advances on every frame
+  // it is given, and its preset draws a waveform from silence, so the empty
+  // frame above leaves a picture behind. The native half never had the problem
+  // because it builds a renderer per baseline; this rebuilds the scene instead,
+  // which costs no GPU device (decision 58) and reaches the same state.
   const signal = tone(220, 0.3);
   const spectrum = spectrumOf(signal, 2);
   const drawSignal = (into: WasmRenderer, musical?: Float32Array) =>
@@ -1475,6 +1711,7 @@ async function checkTheHostContract(entry: VisualInfo): Promise<void> {
       spectrum.centres,
       musical,
     );
+  renderer.setVisual(entry.id);
   drawSignal(renderer);
   const fresh = pixels(surface);
   const lit = measure(surface);
@@ -1811,6 +2048,7 @@ async function run(): Promise<void> {
   await checkTheOscilloscopeTunnel();
   await checkTheParticleField();
   await checkTheRaymarchedSolid();
+  await checkMilkdrop();
   await checkDisplayGain();
 
   log(

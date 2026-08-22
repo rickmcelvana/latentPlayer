@@ -5,12 +5,15 @@
 // user is doing is the same in both -- pick a visual, size it, put it away,
 // give it the whole screen -- which is the argument for the adapter underneath
 // (visualizer.ts) rather than two components that happen to look alike.
-import { useEffect, useState } from "react";
+import { useEffect, useRef, useState } from "react";
+import { open } from "@tauri-apps/plugin-dialog";
+import { isTauri } from "./isTauri";
 import {
   DEFAULT_VISUALIZER_SIZE,
   VISUALIZER_SIZES,
   gainCatalog,
   setGain,
+  setMilkPreset,
   setVisual,
   setVisualizerFullscreen,
   setVisualizerSize,
@@ -34,6 +37,17 @@ export function VisualizerControls() {
   const [gainIsMeasurement, setGainIsMeasurement] = useState(true);
   /// Why fullscreen did not happen, when it did not. Cleared on the next try.
   const [refused, setRefused] = useState<string | null>(null);
+  /// The selected MilkDrop preset's name, and what it needs that this build
+  /// does not do (Phase 3 M7a, decisions 49 and 56).
+  const [preset, setPreset] = useState<string | null>(null);
+  const [presetReport, setPresetReport] = useState<string[]>([]);
+  /// Why a preset would not load. A file that is not a preset is the one
+  /// failure here a person can act on, so it is said rather than swallowed.
+  const [presetError, setPresetError] = useState<string | null>(null);
+  /// The web shell's file input. Hidden, and clicked from the button, because
+  /// a bare `<input type="file">` cannot be styled like the rest of the panel.
+  const fileInput = useRef<HTMLInputElement | null>(null);
+  const milkdropShowing = visual === "milkdrop";
 
   // The gallery, and the selection this session opens on. Both come from Rust:
   // the list is `VisualKind::ALL` (decision 3) and the stored id is only
@@ -88,6 +102,8 @@ export function VisualizerControls() {
           if (state.visual) setVisualId(state.visual);
           if (state.gain) setGainId(state.gain);
           setGainIsMeasurement(state.gainIsMeasurement);
+          setPreset(state.preset);
+          setPresetReport(state.presetReport);
         })
         .catch(() => {
           // A visualizer we can't ask about is still one with working buttons.
@@ -114,6 +130,60 @@ export function VisualizerControls() {
   const chooseGain = (id: string) => {
     setGainId(id);
     void setGain(id).catch(() => {});
+  };
+
+  /// Picks a `.milk` file, in whichever way this shell picks files.
+  ///
+  /// Two mechanisms because there is no one mechanism: the desktop shell opens
+  /// a native dialog and gets a path, the browser opens a file input and gets a
+  /// `File`. Both hand `visualizer.ts` something with a name and a way to reach
+  /// the bytes, and it is the last place in the app that knows the difference.
+  const choosePreset = async () => {
+    setPresetError(null);
+    try {
+      if (isTauri()) {
+        const picked = await open({
+          multiple: false,
+          filters: [{ name: "MilkDrop preset", extensions: ["milk"] }],
+        });
+        if (typeof picked !== "string") return;
+        const name = picked.split(/[\\/]/).pop() ?? picked;
+        const report = await setMilkPreset({ name, path: picked, text: async () => "" });
+        setPreset(name);
+        setPresetReport(report);
+      } else {
+        fileInput.current?.click();
+      }
+    } catch (e) {
+      setPresetError(String(e));
+    }
+  };
+
+  const onFilePicked = async (event: React.ChangeEvent<HTMLInputElement>) => {
+    const file = event.target.files?.[0];
+    // Cleared so picking the same file twice in a row fires again -- which is
+    // exactly what someone editing a preset does.
+    event.target.value = "";
+    if (!file) return;
+    setPresetError(null);
+    try {
+      const report = await setMilkPreset({ name: file.name, text: () => file.text() });
+      setPreset(file.name);
+      setPresetReport(report);
+    } catch (e) {
+      setPresetError(String(e));
+    }
+  };
+
+  const clearPreset = async () => {
+    setPresetError(null);
+    try {
+      await setMilkPreset(null);
+      setPreset(null);
+      setPresetReport([]);
+    } catch (e) {
+      setPresetError(String(e));
+    }
   };
 
   const toggle = () => {
@@ -158,6 +228,47 @@ export function VisualizerControls() {
               {entry.name}
             </button>
           ))}
+        </div>
+      )}
+      {/* Only while MilkDrop is the visual showing: a preset means nothing to
+          the other six, and a control that is always there but usually inert is
+          a control people learn to ignore. It says what it needs when nothing
+          is loaded, because nothing is loaded on a fresh install -- no preset
+          ships with the app (decision 57), so an empty gallery entry is the
+          normal first experience rather than an error. */}
+      {milkdropShowing && (
+        <div className="presets">
+          <span className="label">Preset</span>
+          <button type="button" onClick={() => void choosePreset()}>
+            {preset ? "Change preset" : "Load a .milk preset"}
+          </button>
+          {preset && (
+            <>
+              <span className="hint">{preset}</span>
+              <button type="button" onClick={() => void clearPreset()}>
+                Clear
+              </button>
+            </>
+          )}
+          {!preset && (
+            <span className="hint">
+              None loaded -- showing MilkDrop's defaults. No presets ship with this app.
+            </span>
+          )}
+          {presetReport.length > 0 && (
+            <span className="hint scaled" title={presetReport.join("\n")}>
+              {presetReport.length} thing{presetReport.length === 1 ? "" : "s"} this preset needs
+              that this build does not do
+            </span>
+          )}
+          {presetError && <span className="hint refused">{presetError}</span>}
+          <input
+            ref={fileInput}
+            type="file"
+            accept=".milk"
+            style={{ display: "none" }}
+            onChange={(event) => void onFilePicked(event)}
+          />
         </div>
       )}
       {gains.length > 0 && (

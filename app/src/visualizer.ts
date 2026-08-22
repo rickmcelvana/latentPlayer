@@ -14,6 +14,7 @@ import { isTauri } from "./isTauri";
 import {
   gainCatalog as gainCatalogNative,
   setGain as setGainNative,
+  setMilkPreset as setMilkPresetNative,
   setVisual as setVisualNative,
   setVisualizerFullscreen as setVisualizerFullscreenNative,
   setVisualizerSize as setVisualizerSizeNative,
@@ -23,8 +24,11 @@ import {
 } from "./nativePlayer";
 import {
   currentGain as currentGainWeb,
+  currentPresetReportWeb,
+  currentPresetWeb,
   currentVisual as currentVisualWeb,
   gainCatalogWeb,
+  setPresetWeb,
   isCanvasFullscreen,
   isVisualizerVisibleWeb,
   resizeVisualizer,
@@ -93,6 +97,13 @@ export interface VisualizerState {
   /// A `GainSetting::id`.
   gain: string;
   gainIsMeasurement: boolean;
+  /// The selected MilkDrop preset's file name, or null when there is none.
+  /// Selection state beside the visual rather than part of it (decision 49):
+  /// it survives switching to another visual and back.
+  preset: string | null;
+  /// What that preset needs and this build does not do, plus anything that went
+  /// wrong compiling it -- shown beside its name (decision 56).
+  presetReport: string[];
 }
 
 /// The web build's canvas, handed over by the component that owns it so this
@@ -184,6 +195,8 @@ export async function visualizerState(): Promise<VisualizerState> {
     visual: currentVisualWeb(),
     gain: currentGainWeb(),
     gainIsMeasurement: currentGainWeb() === "1",
+    preset: currentPresetWeb(),
+    presetReport: currentPresetReportWeb(),
   };
 }
 
@@ -235,4 +248,32 @@ export async function setVisual(id: string): Promise<void> {
 export async function setVisualizerFullscreen(fullscreen: boolean): Promise<void> {
   if (isTauri()) return setVisualizerFullscreenNative(fullscreen);
   return setCanvasFullscreen(fullscreen);
+}
+
+/// Loads a MilkDrop preset, or clears the selection with `null` (Phase 3 M7a).
+///
+/// The last thing in this module that differs by shell, and it differs for a
+/// reason neither side can avoid: the desktop shell has a path and the web shell
+/// has a `File`. Both end at the same `Renderer::set_preset` in Rust, so both
+/// parse the same file with the same code and get the same answer about what it
+/// needs -- which is what the return value carries.
+///
+/// Not remembered between sessions, deliberately. A stored path is a path that
+/// will eventually name a file that has moved, and this milestone has nowhere
+/// to put a library yet: pointing at a folder is M7c's, and it is the flow that
+/// deserves the persistence.
+export async function setMilkPreset(file: MilkPresetChoice | null): Promise<string[]> {
+  if (isTauri()) return setMilkPresetNative(file?.path ?? null);
+  if (!file) return setPresetWeb(null, null);
+  return setPresetWeb(file.name, await file.text());
+}
+
+/// A preset the user picked, in whichever form their shell offers. The desktop
+/// shell fills in `path`; the web shell fills in `text`.
+export interface MilkPresetChoice {
+  name: string;
+  /// Native only -- a path this process can read.
+  path?: string;
+  /// The `.milk` text. Read lazily, since the native shell never needs it here.
+  text(): Promise<string>;
 }

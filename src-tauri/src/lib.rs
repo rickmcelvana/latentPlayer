@@ -86,6 +86,30 @@ struct VisualizerWindow {
     /// The display gain the UI has asked for, reaching the renderer the same
     /// way and for the same reason.
     gain: Mutex<GainSetting>,
+    /// The MilkDrop preset the UI has asked for (Phase 3 M7a), reaching the
+    /// renderer the same way again.
+    ///
+    /// Carries a generation rather than being compared by value: the renderer
+    /// cannot be asked which preset it holds without reaching across to the
+    /// redraw thread, and comparing 50KB of `.milk` text every frame to find
+    /// out whether it changed would be the most expensive thing in the loop.
+    preset: Mutex<PresetRequest>,
+}
+
+/// A preset the UI has selected, and a counter that says when it changed.
+#[derive(Clone, Default)]
+struct PresetRequest {
+    generation: u64,
+    /// What to show a person -- the file's name, not its path.
+    name: Option<String>,
+    /// The `.milk` text itself. `None` means no preset is selected, which is a
+    /// state rather than an absence: the visual falls back to MilkDrop's own
+    /// defaults, since no preset ships with the app (decision 57).
+    text: Option<String>,
+    /// What this preset needs that this build does not do, and anything that
+    /// went wrong compiling it. Settled when it loads and shown beside its
+    /// name (decision 56).
+    report: Vec<String>,
 }
 
 /// Managed so the UI can reach the selection. The rest of this type is still
@@ -100,7 +124,24 @@ impl VisualizerWindow {
             redraw: Mutex::new(None),
             requested: Mutex::new(VisualKind::DEFAULT),
             gain: Mutex::new(GainSetting::DEFAULT),
+            preset: Mutex::new(PresetRequest::default()),
         }
+    }
+
+    fn request_preset(&self, name: Option<String>, text: Option<String>, report: Vec<String>) {
+        if let Ok(mut slot) = self.preset.lock() {
+            slot.generation = slot.generation.wrapping_add(1);
+            slot.name = name;
+            slot.text = text;
+            slot.report = report;
+        }
+    }
+
+    fn requested_preset(&self) -> PresetRequest {
+        self.preset
+            .lock()
+            .map(|slot| slot.clone())
+            .unwrap_or_default()
     }
 
     fn request(&self, kind: VisualKind) {
@@ -622,6 +663,14 @@ struct VisualizerState {
     /// true at unity. The panel says so, because a scope that has been scaled
     /// without saying so is worse than one that cannot scale.
     gain_is_measurement: bool,
+    /// The selected MilkDrop preset's file name, or `None` when there is none.
+    /// Part of the *visualizer's* state rather than the gallery's because it is
+    /// selection, and it survives switching to another visual and back
+    /// (decision 49).
+    preset: Option<String>,
+    /// What that preset needs and this build does not do, plus anything that
+    /// went wrong compiling it -- one line each, ready to show (decision 56).
+    preset_report: Vec<String>,
 }
 
 /// One entry in the gallery. Filled from `player_render::VisualKind`, which is
@@ -668,6 +717,56 @@ fn set_gain(id: String, visualizer: tauri::State<SharedVisualizer>) -> Result<()
     Ok(())
 }
 
+/// Loads a MilkDrop preset from a path, or clears the selection with `None`
+/// (Phase 3 M7a) -- decision 49's one command per shell.
+///
+/// Reads the file here rather than in the UI, so that a `.milk` on disk and a
+/// `.milk` dropped into a browser reach exactly the same parser. The web half
+/// is `WasmRenderer::setPreset`, which takes the text because a browser has no
+/// path to give.
+///
+/// Parsed here as well as on the redraw thread, which is two parses of one
+/// file: it is what lets the command answer *now* -- a bad file is an error the
+/// person who clicked sees, and a good one comes back with the list of what it
+/// needs -- rather than the UI discovering both a frame later by polling. A
+/// `.milk` is tens of kilobytes of string work; the milestone's own measurements
+/// put every one of the corpus under a millisecond.
+#[tauri::command]
+fn set_milk_preset(
+    path: Option<String>,
+    visualizer: tauri::State<SharedVisualizer>,
+) -> Result<Vec<String>, String> {
+    let Some(path) = path else {
+        visualizer.request_preset(None, None, Vec::new());
+        return Ok(Vec::new());
+    };
+    let path = std::path::PathBuf::from(path);
+    let bytes = std::fs::read(&path).map_err(|e| format!("cannot read {}: {e}", path.display()))?;
+    // Lossy rather than strict: presets are twenty years of text files written
+    // by people on whatever their editor did, and a stray byte in a comment is
+    // not a reason to refuse to draw one.
+    let text = String::from_utf8_lossy(&bytes).into_owned();
+    let preset = player_render::milk::Preset::parse(&text)
+        .map_err(|e| format!("{} is not a MilkDrop preset: {e}", path.display()))?;
+    let mut report: Vec<String> = preset
+        .unsupported
+        .iter()
+        .map(|u| format!("{}: {}", u.what, u.why))
+        .collect();
+    report.extend(
+        player_render::milk::Runtime::new(&preset)
+            .faults()
+            .iter()
+            .map(|f| f.to_string()),
+    );
+    let name = path
+        .file_name()
+        .map(|n| n.to_string_lossy().to_string())
+        .unwrap_or_else(|| path.display().to_string());
+    visualizer.request_preset(Some(name), Some(text), report.clone());
+    Ok(report)
+}
+
 #[tauri::command]
 fn visual_catalog() -> Vec<VisualInfo> {
     VisualKind::ALL
@@ -686,6 +785,7 @@ fn visualizer_state(
     visualizer: tauri::State<SharedVisualizer>,
 ) -> VisualizerState {
     let window = app.get_window(VISUALIZER_LABEL);
+    let requested_preset = visualizer.requested_preset();
     let size = window
         .as_ref()
         .and_then(|w| w.inner_size().ok())
@@ -710,6 +810,8 @@ fn visualizer_state(
         visual: visualizer.requested().id().to_string(),
         gain: visualizer.requested_gain().id().to_string(),
         gain_is_measurement: visualizer.requested_gain().is_measurement(),
+        preset: requested_preset.name,
+        preset_report: requested_preset.report,
     }
 }
 
@@ -1062,6 +1164,7 @@ pub fn run() {
             set_visualizer_visible,
             set_visualizer_fullscreen,
             set_visual,
+            set_milk_preset,
             visual_catalog,
             set_gain,
             gain_catalog,
@@ -1274,6 +1377,11 @@ pub fn run() {
                 // automatic gain's release, and every animated visual after M1)
                 // runs slow in exactly the moments it matters.
                 let mut last_frame = std::time::Instant::now();
+                // Which preset generation the renderer is holding. Zero is the
+                // "none selected" the renderer starts in, so a first selection
+                // is a change and re-selecting the same file still reloads it
+                // -- which is what someone editing a preset expects.
+                let mut last_preset = 0u64;
                 while redraw_visualizer.running.load(Ordering::Acquire) {
                     // A hidden visualizer is drawn for nobody, so this parks instead
                     // of spending a GPU frame every 16ms on something no one can
@@ -1333,6 +1441,18 @@ pub fn run() {
                     let wanted_gain = redraw_visualizer.requested_gain();
                     if wanted_gain != renderer.gain() {
                         renderer.set_gain(wanted_gain);
+                    }
+                    // The selected preset, by generation rather than by value.
+                    // A failure here is logged and dropped rather than stopping
+                    // the loop: the command already rejected an unparseable
+                    // file, so anything reaching this is a surprise, and a
+                    // surprise should not take the visualizer down with it.
+                    let wanted_preset = redraw_visualizer.requested_preset();
+                    if wanted_preset.generation != last_preset {
+                        last_preset = wanted_preset.generation;
+                        if let Err(e) = renderer.set_preset(wanted_preset.text.as_deref()) {
+                            log::warn!("the selected preset would not load: {e}");
+                        }
                     }
 
                     // The analysis feed (decision 2). Assembled here, off the

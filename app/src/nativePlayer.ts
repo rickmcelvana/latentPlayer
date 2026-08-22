@@ -240,6 +240,18 @@ export async function setVisual(id: string): Promise<void> {
   return invoke("set_visual", { id });
 }
 
+/// Loads a MilkDrop preset from a path on disk, or clears the selection with
+/// `null` (Phase 3 M7a).
+///
+/// The *path* rather than the text, because this shell has a filesystem and the
+/// web one does not: reading the file in Rust means both shells hand the same
+/// bytes to the same parser. Answers with what the preset needs that this build
+/// does not do, one line each -- an empty array is a preset with nothing to
+/// report, not a failure.
+export async function setMilkPreset(path: string | null): Promise<string[]> {
+  return invoke<string[]>("set_milk_preset", { path });
+}
+
 /// The display-gain steps, out of `player_render::GainSetting`.
 export async function gainCatalog(): Promise<GainInfo[]> {
   return invoke<GainInfo[]>("gain_catalog");

@@ -140,6 +140,19 @@ export async function startVisualizer(
   // The wrapper, if the canvas has one -- see `fullscreenTarget` above. A
   // canvas with no wrapper is still fullscreen-able, just stretched.
   if (selectedGain) renderer.setGain(selectedGain);
+  // A preset chosen before the renderer existed, or before it was rebuilt.
+  // Restored rather than dropped, for the same reason the visual and the gain
+  // are: selection belongs to the host, not to whichever renderer is current.
+  if (selectedPresetText !== null) {
+    try {
+      selectedPresetReport = renderer.setPreset(selectedPresetText);
+    } catch (e) {
+      console.error("the remembered preset would not load:", e);
+      selectedPresetText = null;
+      selectedPresetName = null;
+      selectedPresetReport = [];
+    }
+  }
   fullscreenTarget = canvas.parentElement ?? canvas;
   document.addEventListener("fullscreenchange", onFullscreenChange);
   if (rafHandle === null) rafHandle = requestAnimationFrame(drawLoop);
@@ -179,6 +192,36 @@ export function setVisualWeb(id: string): void {
 /// still starting up).
 export function currentVisual(): string {
   return renderer?.currentVisual() ?? selected;
+}
+
+/// The `.milk` text of the selected preset, so a renderer built later can be
+/// given it. The web renderer is created lazily and can be torn down and rebuilt
+/// (`stopVisualizer`), and a selection that only lived inside it would be lost
+/// each time -- the same reason `selected` and `selectedGain` are held here.
+let selectedPresetText: string | null = null;
+let selectedPresetName: string | null = null;
+let selectedPresetReport: string[] = [];
+
+/// Loads a MilkDrop preset from its `.milk` text, or clears the selection.
+///
+/// Text rather than a path: a browser hands over a `File`, and this module is
+/// where that difference from the desktop shell stops. Throws on a file that is
+/// not a preset, which is a different state from "no preset chosen" and is worth
+/// telling the person who picked it.
+export function setPresetWeb(name: string | null, text: string | null): string[] {
+  const report = renderer ? renderer.setPreset(text ?? undefined) : [];
+  selectedPresetText = text;
+  selectedPresetName = text === null ? null : name;
+  selectedPresetReport = report;
+  return report;
+}
+
+export function currentPresetWeb(): string | null {
+  return selectedPresetName;
+}
+
+export function currentPresetReportWeb(): string[] {
+  return selectedPresetReport;
 }
 
 /// Shows or hides the visualizer: the canvas goes out of the page and the draw
