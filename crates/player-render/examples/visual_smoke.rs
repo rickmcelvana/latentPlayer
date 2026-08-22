@@ -1113,6 +1113,16 @@ fn reads_musical(kind: VisualKind) -> bool {
         VisualKind::OscilloscopeTunnel
         | VisualKind::ParticleField
         | VisualKind::RaymarchedSolid => true,
+        // MilkDrop presets are written against `bass`/`mid`/`treb`, which this
+        // build summarises from the frame's own spectrum -- so the tempo and
+        // onset figures reach nothing, and the host contract checks that they
+        // change nothing.
+        VisualKind::MilkDrop => false,
+        // `VisualKind` is `#[non_exhaustive]`, so a visual added in a later
+        // build reaches here rather than failing to compile. "Reads nothing"
+        // is the safe answer: the contract check then asserts the musical
+        // figures change its picture by nothing, which a visual that *does*
+        // read them will fail loudly rather than pass quietly.
         _ => false,
     }
 }
@@ -2092,6 +2102,301 @@ Display gain:"
     );
 }
 
+/// A preset that draws a bright circular waveform and nothing else, plus
+/// whatever extra keys a claim needs.
+///
+/// `warp=0` and `fWaveSmoothing=0` throughout: the point of each check below is
+/// one named behaviour, and the default ripple and the sample low-pass are two
+/// other behaviours that would blur what is being measured. Both have their own
+/// checks elsewhere.
+fn milk_preset(extra: &str) -> String {
+    format!(
+        "[preset00]\n\
+         warp=0\n\
+         nWaveMode=0\n\
+         fWaveAlpha=1.0\n\
+         fWaveScale=1.0\n\
+         fWaveSmoothing=0\n\
+         bMaximizeWaveColor=0\n\
+         fGammaAdj=1.0\n\
+         bTexWrap=0\n\
+         {extra}"
+    )
+}
+
+/// Mean brightness of the whole frame, 0..255. The figure that says whether a
+/// feedback loop is holding its picture or letting it go.
+fn mean_brightness(pixels: &[u8]) -> f32 {
+    let mut sum = 0.0f32;
+    for pixel in pixels.chunks_exact(4) {
+        sum += f32::from(pixel[0].max(pixel[1]).max(pixel[2]));
+    }
+    sum / (pixels.len() / 4) as f32
+}
+
+/// Mean brightness inside a centred box of `fraction` of the frame.
+fn mean_centre(pixels: &[u8], fraction: f32) -> f32 {
+    let half_w = (WIDTH as f32 * fraction * 0.5) as u32;
+    let half_h = (HEIGHT as f32 * fraction * 0.5) as u32;
+    let (cx, cy) = (WIDTH / 2, HEIGHT / 2);
+    let (mut sum, mut n) = (0.0f32, 0usize);
+    for y in cy.saturating_sub(half_h)..(cy + half_h).min(HEIGHT) {
+        for x in cx.saturating_sub(half_w)..(cx + half_w).min(WIDTH) {
+            let i = ((y * WIDTH + x) * 4) as usize;
+            sum += f32::from(pixels[i].max(pixels[i + 1]).max(pixels[i + 2]));
+            n += 1;
+        }
+    }
+    if n == 0 {
+        0.0
+    } else {
+        sum / n as f32
+    }
+}
+
+/// Draws `frames` frames of the loaded preset and answers with the last.
+fn run_preset(renderer: &mut OffscreenRenderer, text: &str, frames: usize) -> Vec<u8> {
+    renderer.set_preset(Some(text)).expect("a preset parses");
+    let signal = tone(220.0, 0.9);
+    let spectrum = Spectrum::of(&signal, 2);
+    let mut last = Vec::new();
+    for _ in 0..frames {
+        last = renderer
+            .draw_to_pixels(&full_frame(&signal, &spectrum))
+            .expect("a MilkDrop frame renders");
+    }
+    last
+}
+
+/// The near-black field every visual draws on, as the bytes a readback sees.
+/// Named here because the MilkDrop checks measure light *against* it.
+const BACKGROUND_BYTES: [u8; 3] = [5, 5, 8];
+
+fn check_milkdrop() {
+    println!("\nMilkDrop -- its own claims:");
+    // One renderer for the whole section, presets swapped in place. M6's live
+    // run found the web harness answering `E_OUTOFMEMORY` past four renderers
+    // per visual, and the same shape applies here with more force: this visual
+    // has N presets behind it rather than one scene (decision 58).
+    let mut renderer =
+        pollster::block_on(OffscreenRenderer::new(WIDTH, HEIGHT, VisualKind::MilkDrop))
+            .expect("offscreen renderer for MilkDrop");
+
+    // --- The loop itself: decay is what makes a feedback frame a feedback
+    // frame, and it is the one figure every preset in existence depends on. ---
+    let held = mean_brightness(&run_preset(&mut renderer, &milk_preset("fDecay=1.0\n"), 60));
+    let fading = mean_brightness(&run_preset(&mut renderer, &milk_preset("fDecay=0.5\n"), 60));
+    check(
+        "a preset that does not decay accumulates its own waveform",
+        held > fading * 1.5,
+        format!("mean {held:.1} at decay 1.0 against {fading:.1} at 0.5"),
+    );
+
+    // --- The four whole-frame filters. Each is a pair of D3D9 blend states in
+    // MilkDrop and a line of arithmetic here, and each has an exact
+    // consequence: `invert` turns the field itself white. ---
+    let inverted = run_preset(&mut renderer, &milk_preset("bInvert=1\nfWaveAlpha=0\n"), 4);
+    let corner = &inverted[..3];
+    check(
+        "bInvert turns the frame's own background inside out",
+        corner.iter().all(|c| *c > 200),
+        format!("rgb({}, {}, {})", corner[0], corner[1], corner[2]),
+    );
+
+    // `darken` squares the picture, so a mid-grey halves and the whole frame
+    // gets dimmer -- while `brighten` does the reverse. Measured against the
+    // same preset with neither, so the waveform is identical in all three.
+    let plain = mean_brightness(&run_preset(&mut renderer, &milk_preset("fDecay=0.9\n"), 30));
+    let darker = mean_brightness(&run_preset(
+        &mut renderer,
+        &milk_preset("fDecay=0.9\nbDarken=1\n"),
+        30,
+    ));
+    let brighter = mean_brightness(&run_preset(
+        &mut renderer,
+        &milk_preset("fDecay=0.9\nbBrighten=1\n"),
+        30,
+    ));
+    check(
+        "bDarken and bBrighten bend the frame the two ways round",
+        darker < plain && plain < brighter,
+        format!("{darker:.1} darkened, {plain:.1} plain, {brighter:.1} brightened"),
+    );
+
+    // --- Gamma is a multiply, so twice the gamma is a brighter frame; it is
+    // the setting most presets in the wild lean on, and MilkDrop's own default
+    // is 2.0 rather than 1.0.
+    //
+    // Measured as *light* rather than as the frame's mean: a waveform is a thin
+    // line on a near-black field, so almost all of the mean is the background
+    // and four times the gamma moves it by a quarter. Subtracting the field is
+    // what turns that into the figure the setting actually controls. ---
+    let field = f32::from(BACKGROUND_BYTES[2]);
+    let dim = mean_brightness(&run_preset(
+        &mut renderer,
+        &milk_preset("fDecay=0.9\nfGammaAdj=0.5\n"),
+        30,
+    )) - field;
+    let bright = mean_brightness(&run_preset(
+        &mut renderer,
+        &milk_preset("fDecay=0.9\nfGammaAdj=2.0\n"),
+        30,
+    )) - field;
+    check(
+        "gamma scales the light in the composited frame",
+        bright > dim * 1.5,
+        format!("{bright:.2} of light at gamma 2.0 against {dim:.2} at 0.5"),
+    );
+
+    // --- The borders, which are drawn *into* the feedback buffer and so are
+    // part of the loop rather than an overlay on it. ---
+    let bordered = run_preset(
+        &mut renderer,
+        &milk_preset("fDecay=0.9\nfWaveAlpha=0\nob_size=0.05\nob_r=1\nob_g=0\nob_b=0\nob_a=1\n"),
+        4,
+    );
+    let edge = {
+        let i = ((HEIGHT / 2 * WIDTH) * 4) as usize; // left edge, mid height
+        [bordered[i], bordered[i + 1], bordered[i + 2]]
+    };
+    let middle = mean_centre(&bordered, 0.2);
+    check(
+        "an outer border rings the frame in the colour the preset asked for",
+        edge[0] > 150 && edge[1] < 80 && edge[2] < 80 && middle < 20.0,
+        format!(
+            "edge rgb({}, {}, {}), middle {middle:.1}",
+            edge[0], edge[1], edge[2]
+        ),
+    );
+
+    // --- The centre darkening, which exists to stop a zooming loop saturating
+    // the one point every frame reads from most often. ---
+    //
+    // `fWaveParam=-0.45` pulls mode 0's ring in from radius 0.5 to 0.05, so the
+    // waveform sweeps through the middle and there is light there to take down.
+    // A ring at its usual radius leaves the centre empty, and "darker than
+    // nothing" is not a measurement -- which is how this check first read.
+    let centred_wave = "fDecay=1.0\nzoom=1.01\nfWaveParam=-0.45\n";
+    let undarkened = mean_centre(
+        &run_preset(&mut renderer, &milk_preset(centred_wave), 60),
+        0.04,
+    );
+    let darkened = mean_centre(
+        &run_preset(
+            &mut renderer,
+            &milk_preset(&format!("{centred_wave}bDarkenCenter=1\n")),
+            60,
+        ),
+        0.04,
+    );
+    check(
+        "bDarkenCenter takes the middle down",
+        darkened < undarkened,
+        format!("{darkened:.1} against {undarkened:.1} in the middle twenty-fifth"),
+    );
+
+    // --- Video echo: a second copy of the frame at another scale, mixed in.
+    // At zoom 2 it reads the middle half, so the echo is the centre magnified
+    // and the frame gains light away from where the waveform is. ---
+    let no_echo = run_preset(
+        &mut renderer,
+        &milk_preset("fDecay=0.9\nfVideoEchoAlpha=0\n"),
+        20,
+    );
+    let echoed = run_preset(
+        &mut renderer,
+        &milk_preset("fDecay=0.9\nfVideoEchoAlpha=0.5\nfVideoEchoZoom=2.0\n"),
+        20,
+    );
+    let ring_without = measure(&no_echo);
+    let ring_with = measure(&echoed);
+    check(
+        "video echo puts a second copy of the picture in the frame",
+        ring_with.count > ring_without.count,
+        format!(
+            "{} lit pixels with the echo, {} without",
+            ring_with.count, ring_without.count
+        ),
+    );
+
+    // --- The waveform's own position, which a preset drives per frame. ---
+    let centred = measure(&run_preset(
+        &mut renderer,
+        &milk_preset("fDecay=0.0\nwave_x=0.5\nwave_y=0.5\n"),
+        4,
+    ));
+    let moved = measure(&run_preset(
+        &mut renderer,
+        &milk_preset("fDecay=0.0\nwave_x=0.75\nwave_y=0.5\n"),
+        4,
+    ));
+    let shift = moved.min_x as i64 - centred.min_x as i64;
+    // wave_x runs 0..1 across the frame and 0.5 is the middle, so a quarter of
+    // the way over is a quarter of the frame's width.
+    let expected = (WIDTH / 4) as i64;
+    check(
+        "wave_x moves the waveform a quarter of the frame per quarter turn",
+        (shift - expected).abs() < 12,
+        format!("moved {shift}px, expected about {expected}px"),
+    );
+
+    // --- Zoom, which is the loop's other defining motion: reading from a
+    // smaller region every frame is what makes a picture grow outward. ---
+    let still = measure(&run_preset(
+        &mut renderer,
+        &milk_preset("fDecay=1.0\nzoom=1.0\n"),
+        40,
+    ));
+    let growing = measure(&run_preset(
+        &mut renderer,
+        &milk_preset("fDecay=1.0\nzoom=1.03\n"),
+        40,
+    ));
+    check(
+        "a zoom above one grows the picture outward frame after frame",
+        growing.max_x - growing.min_x > still.max_x - still.min_x,
+        format!(
+            "{}px wide zooming, {}px wide still",
+            growing.max_x - growing.min_x,
+            still.max_x - still.min_x
+        ),
+    );
+
+    // --- A stranger's program, bounded by budget rather than by trust
+    // (decision 51). The claim is not that it finishes -- it will not -- but
+    // that the frame after it is a frame, and that the rest of the preset is
+    // still drawn. ---
+    let runaway = run_preset(
+        &mut renderer,
+        &milk_preset("fDecay=0.9\nper_pixel_1=loop(1000000, zoom = zoom + 0.000001;);\n"),
+        8,
+    );
+    check(
+        "a preset whose equations run away still draws its frame",
+        mean_brightness(&runaway) > 0.0 && runaway.len() == (WIDTH * HEIGHT * 4) as usize,
+        format!("mean {:.1}", mean_brightness(&runaway)),
+    );
+
+    // --- Clearing the selection is a state, not a no-op: it goes back to
+    // MilkDrop's defaults, which are a real preset and draw a real picture.
+    // Anything else would leave a gallery entry looking broken the moment a
+    // library is emptied. ---
+    renderer.set_preset(None).expect("clearing cannot fail");
+    let signal = tone(220.0, 0.9);
+    let spectrum = Spectrum::of(&signal, 2);
+    let mut defaults = Vec::new();
+    for _ in 0..30 {
+        defaults = renderer
+            .draw_to_pixels(&full_frame(&signal, &spectrum))
+            .expect("defaults render");
+    }
+    check(
+        "clearing the preset falls back to MilkDrop's defaults rather than to nothing",
+        measure(&defaults).count > 100,
+        format!("{} lit pixels", measure(&defaults).count),
+    );
+}
+
 fn main() {
     println!(
         "offscreen: {WIDTH}x{HEIGHT}, {RATE} Hz -- {TRACE_SECONDS}s of trace,          {HISTORY_SECONDS}s of spectrogram, {TUNNEL_SECONDS}s of tunnel"
@@ -2123,6 +2428,7 @@ fn main() {
     check_the_oscilloscope_tunnel();
     check_the_particle_field();
     check_the_raymarched_solid();
+    check_milkdrop();
     check_display_gain();
 
     let checks = CHECKS.load(Ordering::Relaxed);

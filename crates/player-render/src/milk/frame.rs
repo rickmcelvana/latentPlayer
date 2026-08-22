@@ -85,6 +85,8 @@ struct CompositeUniform {
     /// brighten, darken, solarize, invert -- as 0.0 or 1.0, in the order
     /// MilkDrop applies them.
     filters: [f32; 4],
+    /// The field this crate draws every visual on, as a display colour.
+    background: [f32; 4],
 }
 
 /// What the composite pass needs that the preset's state does not carry.
@@ -778,6 +780,10 @@ impl MilkFrame {
                     f32::from(u8::from(state.solarize)),
                     f32::from(u8::from(state.invert)),
                 ],
+                background: {
+                    let [r, g, b] = attachments::BACKGROUND;
+                    [r as f32, g as f32, b as f32, 1.0]
+                },
             }),
         );
 
@@ -949,6 +955,7 @@ struct CompositeUniform {
     echo: vec4<f32>,
     misc: vec4<f32>,
     filters: vec4<f32>,
+    background: vec4<f32>,
 };
 
 @group(0) @binding(0) var previous: texture_2d<f32>;
@@ -1055,6 +1062,17 @@ fn comp_fs(in: CompOut) -> @location(0) vec4<f32> {
     if (comp.filters.y > 0.5) { colour = colour * colour; }
     if (comp.filters.z > 0.5) { colour = 2.0 * colour * (1.0 - colour); }
     if (comp.filters.w > 0.5) { colour = 1.0 - colour; }
+
+    // The picture is *light on a dark field*: a MilkDrop frame is black
+    // wherever nothing has been drawn, and black there means "nothing", not
+    // "a black object". So it is added over this crate's own background rather
+    // than replacing it -- which is what every other visual does implicitly by
+    // clearing to that colour and drawing over it, and is why a fullscreen
+    // preset has the same faint sense of a surface behind it that the rest of
+    // the gallery has (`attachments::BACKGROUND`). At rgb(5,5,8) the lift is
+    // two percent, visible only in the blacks, which is exactly where it is
+    // meant to be visible.
+    colour = min(colour + comp.background.rgb, vec3<f32>(1.0));
 
     return vec4<f32>(to_target(colour, comp.misc.y), 1.0);
 }
@@ -1164,6 +1182,16 @@ mod tests {
         // arithmetic -- which cost this module an afternoon during the spike.
         assert_eq!(std::mem::size_of::<WarpUniform>() % 16, 0);
         assert_eq!(std::mem::size_of::<CompositeUniform>() % 16, 0);
-        assert_eq!(std::mem::size_of::<CompositeUniform>(), 112);
+        assert_eq!(std::mem::size_of::<CompositeUniform>(), 128);
+        // Size alone does not catch the failure that actually happened here:
+        // adding `background` in a different position on each side left the
+        // struct exactly as big and made `filters` read the background's
+        // alpha, which is 1.0 -- so every frame drew inverted, pure white. The
+        // fields must be declared in the same order as the WGSL block above,
+        // and that is a thing to check by eye when either is edited.
+        assert_eq!(
+            std::mem::size_of::<CompositeUniform>(),
+            (4 + 1 + 1 + 1 + 1) * std::mem::size_of::<[f32; 4]>()
+        );
     }
 }
