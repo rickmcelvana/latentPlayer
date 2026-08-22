@@ -2353,3 +2353,332 @@ ceiling now sits just above 4K.
   milestone.
 - **Two shared pieces moved on their second caller**, as ever: `visuals/palette`
   (centroid to hue) and `hue_to_rgb` in `shared.wgsl`.
+
+## M7 -- MilkDrop `.milk` compatibility: the spike, run 2026-08-22
+
+Decision 7 required this milestone to open with a de-risk spike -- "parse one
+classic preset, run its equations, render offscreen" -- before the engine was
+committed to. It has run, against five real presets the user supplied in
+`milkdrop/`, and it reports well enough to plan against. `cargo run -p
+player-render --example milk_spike` is the report; it is a *report*, not a check
+that passes, and it stays that way until the milestone has claims to check.
+
+The corpus turned out to be harder than "classic", which is lucky. These are
+MilkDrop2077/MilkDrop 3 presets (`MILKDROP_PRESET_VERSION` 201 and 300,
+`PSVERSION` 2 through 4): HLSL pixel shaders in both passes, custom waves and
+shapes, external texture packs, one sprite, and -- in `martin - Gin Tonic on Ice
+003.milk` -- a **256-resonator bank with a nested integrator, written in EEL, run
+every frame** to detect tempo. A spike against four-on-the-floor material would
+have reported a much easier milestone than the real one.
+
+### Leg 1 -- the format: 5/5 read
+
+`milk/parse.rs`, 9 unit tests. The format is `key=value` lines with three habits
+that are each a silent wrong answer rather than an error:
+
+- **Code arrives one line per key and the lines join with a newline**, not by
+  concatenation. The corpus writes `rx2 = gmegabuf((i2+o)%ni*8+5);//mirrored`,
+  and concatenating lets that comment eat the next statement.
+- **The numbering is spelled two ways.** Top-level blocks put an underscore
+  before the index (`per_frame_1`, `per_pixel_1`, `per_frame_init_1`); the
+  per-wave and per-shape blocks do not (`wave_0_per_frame1`,
+  `wave_0_per_point1`, `shape_0_per_frame1`). Both are in this corpus. A parser
+  that assumes one reads an empty program for half of a preset and reports
+  nothing wrong.
+- **Shader lines carry a leading backtick**, which is a marker MilkDrop 2 added
+  so leading whitespace survives its own INI writer. Exactly one is stripped.
+
+One difference between the two reference readers is worth having decided rather
+than inherited: **MilkDrop asks for index 1, then 2, and stops at the first one
+missing; Butterchurn takes every matching line in file order.** They differ only
+on a preset with a gap, where MilkDrop truncates the block. File order is the
+forgiving reading and is what this takes -- forgiving is the right default for a
+feature whose whole point is a folder full of strangers' files.
+
+What the corpus needs that this build does not do, named per preset rather than
+ignored: **sprites** (MilkDrop 3's own extension, `[SPRITE1_BEGIN]`, which draws
+an external PNG) and **texture packs** -- `sampler_fw_clouds`,
+`sampler_MilkDrop3_002`, `sampler_MilkDrop3_003` name images that ship
+separately from the presets. The two procedural noise textures are excluded from
+that list because MilkDrop generates them and so can we.
+
+### Leg 2 -- EEL: 31/31 blocks compiled, zero unknown functions
+
+`milk/eel.rs`, 19 unit tests: a tokenizer, a precedence-climbing parser, and a
+tree-walking evaluator over names interned to slot indices at compile time. Every
+code block in every preset compiles -- 31 of 31 -- and the function surface the
+corpus actually uses is small and closed: `megabuf`, `gmegabuf`, `sin`, `cos`,
+`if`, `loop`, `max`, `min`, `rand`, `below`, `above`, `pow`, `abs`, `sqrt`,
+`sqr`, `int`, `atan`, `asin`, `log`, `exp`. Twenty names.
+
+Three semantics were verified against Cockos' WDL source rather than written
+from memory, per CONVENTIONS.md, and each is load-bearing:
+
+- **`NSEEL_CLOSEFACTOR` is `0.00001`**, and it governs both `==`/`!=` (`|a-b| <
+  0.00001`) and *truthiness* (`|v| > 0.00001`). Presets are written by trying
+  things until they look right, so the quirk is in the corpus whether the
+  authors knew about it or not.
+- **Memory is `NSEEL_RAM_BLOCKS` (128) blocks of `NSEEL_RAM_ITEMSPERBLOCK`
+  (65536)**, reached lazily. The corpus opens with `loop(10000,
+  megabuf(n)=gmegabuf(n)=0; n+=1;)`, so a preset really does walk it; allocating
+  it eagerly would cost 64MB per preset.
+- **Loops are bounded at `NSEEL_LOOPFUNC_SUPPORT_MAXLEN` (1048576)**, which caps
+  one loop and says nothing about ten nested ones -- hence the budget below.
+
+And one the corpus proved by itself: **names are case-insensitive.** One preset
+writes `MINBPM = 70` in its init and reads `minbpm` in a loop three lines later.
+
+One deliberate divergence: `rand` draws from a seeded generator the context owns.
+MilkDrop's presets are not reproducible frame to frame and ours have to be, or no
+preset could ever get the pixel-readback check decision 6 requires of every
+visual in this crate.
+
+**The cost, and the surprise.** Release build, this machine, ten frames each,
+worst frame reported:
+
+| preset | mesh 32x24 | mesh 64x48 | where it goes |
+|---|---|---|---|
+| Dude the walls are moving2 | 2122us | 2260us | per_frame, all of it |
+| Royal - Mashup (190) | 2088us | 2120us | custom waves, all of it |
+| riding the wave | 888us | 1146us | 245 frame / 84->360 pixel / 559 waves |
+| Gin Tonic on Ice 003 | 710us | 1007us | 192 frame / 98->398 pixel / 419 waves |
+| Venom Textures 2 Manda | 160us | 625us | per_pixel, all of it |
+
+Worst case **2.3ms, or 13.6% of a 60fps frame** -- affordable, and that answers
+the risk the phase named. But the *breakdown* overturns the obvious assumption.
+**The cost is not per-vertex code.** In the two most expensive presets, `per_pixel`
+costs nothing at all: one spends its whole budget in `per_frame` (the resonator
+bank, 522k evaluated nodes in a single frame) and the other in **custom waves**
+(512 points x three waves). Only the cheapest preset in the corpus is
+mesh-dominated. So "shrink the mesh" -- the lever a renderer reaches for first,
+and the one M6 had just used for the raymarch -- would have bought nothing on
+either of the two presets that need it. Worth knowing before it is built.
+
+One more figure for sizing: a single `per_frame_init` reached **990,045 nodes**.
+A budget has to be per block and generous; `DEFAULT_BUDGET` is 4,000,000.
+
+### Leg 3 -- the frame: it runs, and the readback earned itself immediately
+
+`milk/frame.rs`, 6 unit tests. A MilkDrop frame is not a scene that gets
+redrawn, it is a **feedback loop**: the previous frame is resampled through a
+warped mesh into the new one, and everything a preset does visually is a
+consequence of that. The spike stands that loop up under wgpu -- two
+`Rgba16Float` targets ping-ponged, a warp mesh whose source coordinates are
+computed per vertex on the CPU (which is where they have to be computed, since
+`per_pixel` is EEL), and a composite pass -- seeds a bright 16x16 square into it,
+advances 30 frames under each preset's own `per_pixel`, and reads the result
+back.
+
+It works, and the presets move differently from each other, which is the claim.
+The quantitative one: **Gin Tonic's `per_pixel` writes `dy=0.005`**, which over
+30 frames of a 128px frame predicts 19.2px of downward drift. The lit centroid
+moved from 63.5 to 83.1 -- **19.6px**, the rest being the preset's own
+`zoom=1.003`. The control (no preset, zoom 1.05) grows concentrically and does
+not move; the preset with no `per_pixel` block at all stands perfectly still,
+256 lit pixels, exactly its seed.
+
+16-bit float for the pair is not a luxury: a loop that multiplies its own output
+by a decay every frame quantises to a visible staircase in 8 bits within a
+second.
+
+**And the readback caught a bug in its first run.** The composite pass's
+fullscreen triangle had its doubling applied twice -- once to the uv and once to
+the clip position -- so the whole picture drew at quarter scale in one corner.
+Every preset still "worked", and the lit centroid still moved. What said it was
+wrong was one number: the seeded square's centre read `(31.5, 31.5)` where a
+128px frame puts it at `(63.5, 63.5)`. Nothing about the picture's *behaviour*
+was wrong, so a person watching it would have had no reason to look twice. Third
+milestone running that a figure caught what an eye would not have.
+
+### What the spike says the milestone is
+
+- **The format is easy and is done.** Parsing is not the risk; it was 9 tests.
+- **EEL is easy and is nearly done.** 31/31, twenty functions, and the two
+  semantic traps are found and pinned. This was the phase's named risk and it is
+  the smallest of the three.
+- **The frame is understood and its skeleton stands.** What remains is
+  MilkDrop's *full* per-vertex transform -- `zoomexp`'s radius-dependent
+  exponent and the four `warp` sine terms -- which must be taken from MilkDrop's
+  own source rather than anyone's memory, because getting it subtly wrong is
+  invisible in a still frame and obvious in motion.
+- **The shader translation is the milestone.** 244 shader lines across five
+  presets use only 15 distinct constructs, which sounds small until you look at
+  what two of them require. `float2 water = tex2D(sampler_noise_mq, ...)` -- HLSL
+  truncates a `float4` to a `float2` implicitly and WGSL does not. `ret = 1-uv`
+  where `uv` is a `float2` -- HLSL promotes the scalar and WGSL does not.
+  Handling either one needs the *type of every expression*, so the translator is
+  a small typed compiler and not a table of string substitutions. That is the
+  piece to plan around, and it is why M7 splits.
+
+### One thing the spike did not raise, and the user did
+
+Presets arrive by the **hundred or the thousand** -- that is how people use
+MilkDrop, and it is the stated expectation for this app. Nothing in the spike
+tests it and everything in the plan has to assume it: a parse that never panics,
+an unsupported feature that is a note rather than a refusal, an evaluator a bad
+preset cannot hang, a selection model that can name a preset at all (`VisualKind`
+is a fixed enum and cannot), and a scan that stays off the audio and UI threads
+the way `library.rs` already does for music.
+
+### Licensing, which is now a decision and not a risk
+
+Checked rather than assumed: **the MilkDrop3 repository declares no license** --
+GitHub's license field is null and there is no `LICENSE` or `COPYING` file at its
+root. The five presets in `milkdrop/` came from that source. Supporting the
+*format* is unaffected and license-clean (decision 7's Butterchurn-guided,
+never-projectM route stands). **Shipping any preset with the app is a separate
+question with no answer yet**, and until it has one, `milkdrop/` is local test
+data rather than repository content.
+
+## M7 -- MilkDrop `.milk` compatibility: planned 2026-08-22, against what the spike reported
+
+The phase plan said M7 was "the one most likely to split or slip once the spike
+reports -- planned as such rather than discovered as such". The spike has
+reported, and it splits three ways along the seam it found: the format and the
+equations are nearly done, the frame's skeleton stands, and the shader
+translation is the milestone. So M7 lands in three parts, each of which is a
+thing a person can watch:
+
+- **M7a -- a preset draws.** The format, EEL, the full warp transform, the
+  feedback frame, and the fixed-function pipeline: decay, gamma, video echo, the
+  basic waveform, borders. No preset shaders. Verified on presets whose
+  `PSVERSION` is 0, and on the corpus's presets with their shaders ignored.
+- **M7b -- a preset draws *as itself*.** The HLSL-to-WGSL translator, warp and
+  comp passes, MilkDrop's helper library and uniforms, and the blur chain the
+  helpers need. This is the largest single piece in the phase.
+- **M7c -- the rest of the surface.** Custom waves, custom shapes, motion
+  vectors, and the preset library at the scale people actually use it.
+
+Each is done only when it works on both shells and a person has watched it, as
+ever. If M7b overruns, M7a and M7c are still shippable and still worth shipping:
+a gallery that plays a thousand presets approximately is a better product than
+one that plays none exactly.
+
+### Decisions (49-58)
+
+49. **A preset is selection state, and this is where the host changes.** Five
+    milestones running, nothing outside `player-render` changed for a new
+    visual. That ends here, deliberately and once: `VisualKind` is a fixed enum
+    of ids and cannot name a preset, so `VisualKind::MilkDrop` becomes one entry
+    whose selection *includes* a preset. The host gains a selected-preset
+    alongside its selected-visual, persisted like the visual is, and the shells
+    gain one command each to set it. Nothing else about M1's seam moves --
+    a preset is still a scene, swapped between frames, on the thread that owns
+    the renderer.
+50. **The preset collection is a library, built like the music library.**
+    Hundreds to thousands of `.milk` files is the stated use, so the pattern is
+    the one `library.rs` already proved: a folder is scanned **off the audio and
+    UI threads** (a blocking thread natively, a worker on the web) into a
+    versioned index of name, parse status and unsupported notes; the `.milk`
+    text is read on selection rather than held; a preset that fails to parse is
+    *listed as failing* rather than hidden, because a collection where a tenth
+    of the files silently do not appear is a collection nobody can debug.
+51. **A preset is a stranger's program, sandboxed by budget rather than by
+    trust.** Every block runs under `eel::Context::budget` and exhausting it
+    ends that block's frame and marks the preset, never the process. Loops are
+    bounded at EEL2's own 1048576. This is not hypothetical hardening: the
+    corpus already contains a single `per_frame_init` costing 990,045 nodes, so
+    the line between "expensive" and "runaway" is real and has to be drawn
+    somewhere explicit.
+52. **EEL is interpreted in Rust, one implementation, both shells.** Not
+    transpiled to JavaScript -- that is Butterchurn's move and it is unavailable
+    to a Rust core that has to run natively too -- and not compiled, because the
+    spike measured a tree walk at 2.3ms worst case on the hardest preset in the
+    corpus and a compiler is a large piece of work to buy back 13% of a frame
+    that is not currently short.
+53. **The mesh is not the performance lever, so do not build one.** Measured:
+    in the two most expensive presets `per_pixel` costs nothing, and the budget
+    goes to `per_frame` and to custom waves. A mesh-size or render-scale setting
+    would leave both untouched. The lever that matches the measurement is the
+    budget of decision 51 plus dropping a frame's *equations* rather than its
+    pixels, and the mesh stays at MilkDrop's own default.
+54. **HLSL is translated by a typed mini-compiler, never by text
+    substitution.** Two constructs in the corpus force it: implicit truncation
+    (`float2 water = tex2D(...)`, where the source is a `float4`) and scalar
+    promotion (`1-uv`, where `uv` is a `float2`). WGSL permits neither, and
+    deciding either one needs the type of the surrounding expression. So M7b
+    parses HLSL into a typed tree and emits WGSL from it, and the emitter's
+    output is checked by *compiling it*, which is a thing wgpu will do for free.
+55. **MilkDrop's shader environment is ours to provide, and is written down.**
+    `GetPixel`, `GetBlur1..3`, `lum`, `sampler_main`, the `texsize`/`aspect`
+    uniforms, `uv`/`rad`/`ang`, `time`, `bass`/`mid`/`treb` and `q1..q32` are
+    not HLSL, they are MilkDrop's standard library, and the translator is
+    useless without them. They live in a WGSL prelude next to
+    `visuals/shared.wgsl`, which is already the place this crate keeps the code
+    every shader gets.
+56. **The supported subset is a list the app can show, not a paragraph in a
+    doc.** `parse::Unsupported` already names what a preset needs and this build
+    does not do; the library UI shows it per preset. Out of scope for M7 and
+    named as such: **sprites** (MilkDrop 3's own extension) and **texture
+    packs** -- both are external image files, both are a content-distribution
+    question rather than an engine one, and the procedural noise textures
+    MilkDrop generates for itself are *in* scope because generating them is
+    arithmetic.
+57. **No preset ships with the app until its provenance is established.**
+    Checked, not assumed: the MilkDrop3 repository declares no license -- no
+    SPDX field, no `LICENSE` file. The engine's licence cleanliness (decision 7:
+    Butterchurn-guided, never projectM) says nothing about `.milk` files. So
+    `milkdrop/` is local test data, kept out of the repository, and the app
+    ships pointing at a folder the user chooses. If a bundled starter set is
+    ever wanted it needs provenance per preset, which is a separate piece of
+    work with a separate answer.
+58. **The web checks are designed against M6's device budget from the start.**
+    `/visualizer.html` gets one `WasmRenderer` per section, reset in place with
+    `setVisual` between claims -- the rule WORKFLOW.md already records. M7 adds a
+    visual with N presets behind it, which is exactly the shape that found the
+    limit at five visuals, so the per-preset checks run on one renderer and
+    switch presets rather than building a renderer each.
+
+### Shape of the work
+
+**M7a.** `milk/parse.rs` and `milk/eel.rs` are done and stay. `milk/frame.rs`
+grows MilkDrop's full per-vertex transform -- `zoomexp` and the four `warp` sine
+terms -- **read out of MilkDrop's own source**, which is the one place in this
+milestone where writing from memory is specifically forbidden and specifically
+tempting, since the reduced version already looks plausible in a still frame.
+Then the fixed-function state a preset carries in its 69 scalars: decay, gamma,
+video echo and its orientation, `bDarkenCenter`/`bBrighten`/`bDarken`/`bInvert`/
+`bSolarize`, the inner and outer borders, and the built-in waveform in its
+several modes. `VisualKind::MilkDrop` joins the registry with decision 49's
+selection, and the shells gain their one command each.
+
+**M7b.** `milk/hlsl.rs`: a tokenizer, a parser producing a typed tree, and a
+WGSL emitter, with the prelude of decision 55 beside it. The blur chain
+(`GetBlur1..3`) is a real render pass MilkDrop runs when a preset asks for one,
+so it lands here rather than in M7a, and only when asked for.
+
+**M7c.** Custom waves and custom shapes -- the per-point and per-instance
+programs the spike already runs, now drawn -- plus motion vectors, and the
+library of decision 50 with its scan, index and UI.
+
+### What "verified" has to mean here
+
+The phase's three kinds of check apply, with one addition this milestone earns:
+
+- **Pixel readback per claim**, both shells, as every visual since M1. The
+  spike's leg 3 is the pattern: seed something known, advance a known number of
+  frames under known equations, and assert *where it went* rather than that it
+  changed. The spike's own bug is the argument -- the picture moved correctly
+  and was still drawn at quarter scale.
+- **Known-answer equation tests**, the analysis suite's way: EEL blocks with
+  computed answers, and the two verified quirks (the close factor, the block
+  memory) asserted rather than assumed.
+- **A corpus run that must not regress.** `milk_spike` becomes `milk_smoke`: N
+  presets parsed, M blocks compiled, zero panics, every unsupported feature
+  named, and the worst frame cost reported. Run it against a folder of hundreds
+  and the figure that matters is not that they all work -- they will not -- but
+  that the count of those that do never falls.
+- **A person watching it**, which for this milestone means a person watching
+  *their own presets*, not ours. That is the only test of whether the warp
+  transform is right.
+
+### What this milestone will not do
+
+- No sprite support and no texture packs (decision 56).
+- No bundled presets (decision 57).
+- No `.milk2` double presets, and no preset *blending* -- MilkDrop crossfades
+  between two presets and that needs two engines live at once. It is a real
+  feature and it is M8's problem or later.
+- No preset editing. Reading is the whole milestone.
+- No WebGL2 fallback (decision 8, unchanged): a preset engine is the last place
+  to take on a second constraint set.

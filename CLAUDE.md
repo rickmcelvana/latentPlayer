@@ -536,8 +536,54 @@ Four `WasmRenderer`s per visual worked at four visuals and made Dawn answer
 per-visual section runs on one renderer reset in place. M7 should be designed
 against that from the start.
 
-**M7 (MilkDrop `.milk` compatibility) is next** -- the largest milestone in the
-phase and the one planned as splittable, opening with decision 7's spike.
+**M7 (MilkDrop `.milk` compatibility): decision 7's spike has run (2026-08-22),
+and M7 is planned against what it reported** -- see `tasks/phase-3.md` for the
+findings and for the three-way split and ten decisions (49-58) they support.
+`cargo run -p player-render --example milk_spike` is the report, run against the
+user's own presets in `milkdrop/` (local test data, gitignored -- decision 57:
+the MilkDrop3 repository those came from declares no licence, so supporting the
+format is licence-clean but shipping a preset is a separate unanswered
+question).
+
+The short version. **The format and the equations are nearly done and were the
+smaller risks**: `milk/parse.rs` reads 5/5 presets and `milk/eel.rs` compiles
+**31/31** of their code blocks with zero unknown functions -- 34 new unit tests,
+109 in `player-render`, up from 75. EEL's two load-bearing quirks are verified
+against Cockos' WDL source rather than memory (`NSEEL_CLOSEFACTOR` is 0.00001
+and governs `==` *and* truthiness; memory is 128 blocks of 65536, reached
+lazily) and one the corpus proved by itself (names are case-insensitive -- a
+preset sets `MINBPM` and reads `minbpm`). **The equations are affordable and the
+obvious optimisation is the wrong one**: worst frame 2.3ms, 13.6% of a 60fps
+frame -- but in the two most expensive presets `per_pixel` costs *nothing*, the
+budget going to `per_frame` (a 256-resonator tempo bank, 522k nodes in one
+frame) and to custom waves. Shrinking the mesh, the lever M6 had just used for
+the raymarch, would have bought nothing on either.
+
+**The frame's skeleton stands**: `milk/frame.rs` runs MilkDrop's feedback loop
+under wgpu -- two `Rgba16Float` targets ping-ponged through a warped mesh, plus
+a composite -- and a seeded square advanced 30 frames under a real preset's
+`per_pixel` lands where its arithmetic says (`dy=0.005` predicts 19.2px of
+drift; measured 19.6). What remains is MilkDrop's *full* per-vertex transform,
+to be read from its own source rather than anyone's memory. The readback earned
+itself on its first run, third milestone in a row: every preset moved correctly
+and the whole picture was still drawn at quarter scale in one corner, and the
+only thing that said so was the seeded square's centre reading (31.5,31.5) where
+a 128px frame puts it at (63.5,63.5).
+
+**The shader translation is the milestone**, and is why M7 splits three ways
+(M7a a preset draws, M7b a preset draws as itself, M7c waves/shapes/library).
+244 shader lines use only 15 distinct constructs, but two of them --
+`float2 water = tex2D(...)` truncating a float4 implicitly, and `1-uv` promoting
+a scalar against a float2 -- are illegal in WGSL and need the type of the
+surrounding expression, so the translator is a small typed compiler rather than
+a substitution table.
+
+One constraint the spike did not raise and the user did: **presets arrive by the
+hundred or the thousand.** That shapes decisions 49-51 -- a preset is selection
+state (`VisualKind` is a fixed enum and cannot name one), the collection is a
+library scanned off the audio and UI threads like `library.rs`, and a stranger's
+program is sandboxed by an evaluation budget so a bad preset ends its own frame
+rather than the app.
 
 
 The certificate answer changed a finding into a fix: ureq defaults to

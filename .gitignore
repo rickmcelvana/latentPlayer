@@ -14,3 +14,11 @@
 *.ogg
 *.opus
 *.wav
+
+# MilkDrop presets dropped in the tree to test against, same reasoning as the
+# audio above and one more: a `.milk` file's licence is its author's, and the
+# MilkDrop3 repository these came from declares none (checked 2026-08-22, Phase
+# 3 M7's spike -- no SPDX field, no LICENSE file). Supporting the format is
+# licence-clean; shipping someone's preset is a separate question with no answer
+# yet, so the corpus stays local. See tasks/phase-3.md decision 57.
+/milkdrop/

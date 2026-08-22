@@ -25,6 +25,7 @@ mod attachments;
 mod camera;
 mod error;
 mod gain;
+pub mod milk;
 pub mod trace;
 mod visual;
 mod visuals;
