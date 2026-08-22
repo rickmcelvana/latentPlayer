@@ -36,6 +36,26 @@ Reload the page after every `npm run wasm`. The smoke harnesses
 because they are the pages most likely to be sitting open while the Rust under
 them is being changed.
 
+## A browser page has a GPU device budget
+
+Every `WasmRenderer` in `/visualizer.html` holds a real GPU device, and a page
+can hold only so many. The number is not documented anywhere and the failure is
+not gradual: Dawn answers `E_OUTOFMEMORY` creating the D3D12 command queue, the
+renderer that asked for it throws, and the run stops part-way through with the
+checks after it never attempted.
+
+Found in Phase 3 M6 (2026-08-20), when the gallery reached five visuals: the
+host-contract loop had been asking for four devices per visual, which worked at
+four visuals and did not at five. Freeing them as it went did not help.
+
+So when adding checks to that harness: **create one renderer per section and
+reset it between claims** with `setVisual` (the scene is rebuilt, the surface is
+untouched -- decision 5's swap), and resize the canvas in place where a claim is
+about the window's shape. The native half still builds a fresh `OffscreenRenderer`
+per claim, because nothing there is scarce; the two halves reaching the same
+figures by different routes is worth more than the two being written the same
+way.
+
 ## Why `--exclude player-rt-wasm`
 
 `player-rt-wasm` calls `wgpu::SurfaceTarget::Canvas`, which only exists

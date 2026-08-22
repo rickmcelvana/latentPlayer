@@ -2234,3 +2234,122 @@ simulation is a simulation:
 - **No WebGL2 fallback** (decision 8), and no second implementation of anything
   for a browser without compute: the web build already says plainly that it needs
   WebGPU.
+
+## M6 -- Particle / raymarched scenes: done, user-confirmed 2026-08-22
+
+Three things shipped, all confirmed live on both shells: the particle field, the
+raymarched solid, and the tunnel's beat-reactive camera that M4 deferred here.
+**95/95** natively (`cargo run -p player-render --example visual_smoke`, was
+64/64 at the end of M5) and **104/104** at `/visualizer.html` (was 71/71), plus
+**18/18** in both halves of the analysis smoke, which grew a fixture because of
+what the first live look found.
+
+The confirmations, in the user's words: density "good... a lot of different types
+of music", the pulse "more of a breathing than flashing", the solid "reads as
+shapes and looks like it's breathing", the tunnel's new camera "gave no
+uncomfortable feelings", fullscreen on the solid "looks good", and swapping
+between all six "smooth".
+
+### What landed
+
+**Compute, and it was already paid for.** Decision 41's spike ran first on both
+shells and found the limits in hand: both request `wgpu::Limits::default()` and
+have been getting it since Phase 0 (native, RTX 5060 Ti over Vulkan: 1024
+invocations per workgroup, 49KB of workgroup storage; Dawn: 1024 and 32KB). The
+one genuinely per-stage limit -- storage buffers in the vertex stage, zero of
+them in compatibility mode -- is sidestepped by binding the particle buffer as an
+instance-step vertex buffer, which turned out to be free insurance on this
+machine (Dawn reports 16) and is kept for the machines that are not this one.
+
+**`visuals/particles.rs`** -- one compute dispatch per fixed step, one additive
+quad per particle, 131072 of them. Its three rules are decisions 42-44 and each
+is a bug that would otherwise have been someone else's: the simulation steps on
+its own 120Hz clock, an onset enters only through an idempotent `max`, and a
+particle is a pure function of its spawn ordinal.
+
+**`visuals/solid.rs`** -- a sphere whose radius at a latitude *is* the
+analyser's band at that frequency. Decision 46 is the whole design and it is what
+makes the visual checkable: bass-heavy material draws 0.50 of the frame wide at
+the foot against 0.35 at the crown, treble-heavy reverses it (0.41 against 0.54),
+and halving the band count changes the shape by nothing -- 0.50 either way,
+because a band is placed by its frequency rather than by its index. Every one of
+those figures is identical on both shells.
+
+**`visuals/tunnel.rs`** -- decision 48, one expression. The beat moves the eye
+along the path it was already on, never the ring clock, because the clock is what
+makes a ring a picture of a fixed slice of audio.
+
+**The assertion held, five milestones running.** Nothing outside
+`player-render` changed for either new visual: two registry lines, four files,
+and the web *check*. Both galleries listed the fifth and sixth visuals with
+nothing edited -- verified in the running app, which lists all six.
+
+### What the checks found, and what only a person could
+
+Three real bugs, and the split between how they were found is the milestone's
+lesson.
+
+**The clock was wrong, in two visuals that were already confirmed.** The particle
+field's own chunking check failed, and the cause was `RowClock` counting
+*seconds* and dividing by an `f32` reciprocal a hair too large: a frame of
+exactly one second at 120Hz asked for 119 steps rather than 120, and three frames
+of exactly a third of a sixtieth -- what a 180Hz display hands over every frame
+-- asked for one rather than two. It counts rows now (`1.0 * 120.0` is exactly
+120.0), and the waterfall's 48 checks and the tunnel's 60 pass unchanged over the
+fix. A check written for a new visual found a bug in two old ones.
+
+**A sustained pad was a confident 142 BPM.** The user played organ and synth
+material with no rhythm in it and the particle field pulsed anyway. The visual
+was behaving correctly and believing a wrong number: `onset.rs` normalised
+`transient` by its own recent peak alone, so material whose every flux value is
+tiny still reported 1.0 -- the pad's largest detection value is 4.71 where a
+piano attack reaches 136 and a click 108. The normalising peak now has an
+absolute floor under it (30.0, sized from those measurements), and `tempo.rs`
+says what a beat is: an onset must reach a quarter strength to count toward
+`MIN_ONSETS_IN_WINDOW` or to pull the phase. The pad reports no tempo at
+confidence 0.00 and the 120 BPM click track still reads 120.00 at 1.00. Both
+analysis smokes gained the fixture (16/16 -> 18/18 on each), faded in over a
+second, because a file that begins at half amplitude on its first sample really
+does begin with an attack and the detector was right to say so.
+
+**Fullscreen was "smooth but blurred" past about 480px.** That one was the
+visual's: a spark is a quad in the *world* and the camera is fitted to the field,
+so a taller viewport drew the same picture magnified rather than a finer one.
+Sparks now hold a roughly constant size to the eye and emission follows the
+viewport's area, so a bigger window buys both detail and density. 480 is the
+reference because 480 is what had been watched and approved.
+
+And three things only drawing the picture could have decided: particles are born
+on a **disc** rather than a sphere (a sphere is a ball that happens to be
+rotating), the first emission rates were five times too high and a saturated
+field has nowhere to put a transient, and the solid's first broadband render was
+a stack of slabs with holes punched through it -- sixty-four bands around a
+sphere are walls nearly parallel to the ray at the silhouette, so the profile is
+smoothed along the axis before it is ever marched. A bar may be a step because a
+bar is its own object; a surface may not.
+
+### What the measurements changed
+
+Decision 47's cap was set with a stopwatch and the stopwatch moved it up by a
+factor of three. Timed against the vectorscope at matching sizes so the readback
+they share cancels: 1.34ms against 1.15 at 720p, 2.78 against 2.32 at 1080p, 4.51
+against 4.57 at 1440p, 9.63 against 9.05 at 4K -- the march itself costs well
+under a millisecond even at 4K here. The first guess of 2.4 million pixels would
+have quietly softened every 1440p fullscreen window, which is *exactly* the
+complaint the live look had raised about the particle field two days earlier. The
+ceiling now sits just above 4K.
+
+### What this milestone leaves for the ones after it
+
+- **The web harness has a device budget**, and the gallery growing is what found
+  it: four `WasmRenderer`s per visual worked at four visuals and made Dawn answer
+  `E_OUTOFMEMORY` at five. The host contract now uses two per visual and every
+  per-visual section runs on one renderer reset in place. M7 adds visuals with
+  presets behind them, so this is the constraint to design that check against
+  from the start, not to rediscover.
+- **`transient` and `onset` now have an absolute scale.** Anything built on them
+  later -- M8's preset format most obviously -- inherits a figure that means the
+  same thing on a pad and on a drum kit, which was not true before this
+  milestone.
+- **Two shared pieces moved on their second caller**, as ever: `visuals/palette`
+  (centroid to hue) and `hue_to_rgb` in `shared.wgsl`.

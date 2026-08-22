@@ -478,9 +478,67 @@ little on transitions* rather than failing -- a mismatched wasm module and
 shared-buffer layout look like a performance problem from the outside. Reload
 after rebuilding; WORKFLOW.md says so at the step.
 
-**M6 (particle / raymarched scenes) is next** -- the first visuals driven by M5's
-uniforms rather than by geometry-per-sample, and this workspace's first compute
-shaders, whose WebGPU limits get checked at the milestone's start on both shells.
+**Phase 3 M6 is done and user-confirmed on both shells** (2026-08-22): the
+particle field, the raymarched solid, and the beat-reactive camera M4 deferred
+here. **95/95** `visual_smoke` (was 64/64), **104/104** at `/visualizer.html`
+(was 71/71), and **18/18** in both halves of the analysis smoke. Confirmed live:
+density right across "a lot of different types of music", the pulse "more of a
+breathing than flashing", the solid "reads as shapes and looks like it's
+breathing", the tunnel's new camera "gave no uncomfortable feelings", fullscreen
+on the solid good, and swapping between all six smooth.
+
+`visuals/particles.rs` is this workspace's **first compute shader** and the first
+scene whose state is advanced by arithmetic rather than replaced by a
+measurement. Its limits were checked before anything was built on them and were
+already in hand -- both shells request `wgpu::Limits::default()` and have had it
+since Phase 0 -- and the particle buffer is still bound as an instance vertex
+buffer rather than a vertex-stage storage binding, which is the one limit
+compatibility mode grants zero of. Three rules shape it: the simulation steps on
+its own 120Hz clock with the remainder carried, an **onset is idempotent**
+(`musical.onset` is *held* in the published snapshot until the next drain, so a
+180Hz display reads the same one three times -- it enters only through
+`max(energy - decay*dt, onset)`), and a particle is a pure function of its spawn
+ordinal. `visuals/solid.rs` is the SDF half, and decision 46 is its whole design:
+the surface's radius at a latitude **is** the analyser's band at that frequency,
+so bass-heavy material measurably draws wider at the foot than at the crown (0.50
+against 0.35, identical on both shells) and halving the band count changes the
+shape by nothing. `visuals/tunnel.rs` gained the beat as a bounded offset on the
+*eye* rather than on its ring clock -- and is byte-identical to M4's tunnel
+whenever no tempo is playing, which is what keeps M4's sixty checks meaningful.
+Nothing outside `player-render` changed for either new visual, five milestones
+running.
+
+Three bugs, and how each was found is the milestone's lesson. **A check written
+for a new visual found a clock bug in two confirmed ones**: `RowClock` counted
+seconds and divided by an `f32` reciprocal a hair too large, so a frame of
+exactly one second at 120Hz advanced 119 steps instead of 120 and three exact
+thirds of a sixtieth advanced one instead of two. It counts rows now, and the
+waterfall's and tunnel's checks pass unchanged over the fix. **A live look found
+the meter lying**: sustained organ material read a confident 142 BPM because
+`onset.rs` normalised `transient` by its own recent peak alone, so flux thirty
+times too small to be an attack still read as full strength -- the peak now has
+an absolute floor (30.0, measured) and `tempo.rs` says what a beat is (a quarter
+strength, or it counts toward nothing). Both analysis smokes gained a pad
+fixture. **And fullscreen was "smooth but blurred"** because a spark is a quad in
+the world and the camera is fitted to the field, so a bigger window magnified the
+picture instead of resolving it; sparks now hold their size to the eye and
+emission follows the viewport's area.
+
+Decision 47's resolution cap was set with a stopwatch, and it moved the number up
+threefold: timed against the vectorscope at matching sizes, the march costs under
+a millisecond even at 4K, where the cautious first guess would have softened
+every 1440p fullscreen window -- the exact complaint the live look had just
+raised about the particle field.
+
+One constraint to carry forward: **the web harness has a GPU device budget**.
+Four `WasmRenderer`s per visual worked at four visuals and made Dawn answer
+`E_OUTOFMEMORY` at five, so the host contract now uses two per visual and each
+per-visual section runs on one renderer reset in place. M7 should be designed
+against that from the start.
+
+**M7 (MilkDrop `.milk` compatibility) is next** -- the largest milestone in the
+phase and the one planned as splittable, opening with decision 7's spike.
+
 
 The certificate answer changed a finding into a fix: ureq defaults to
 webpki-roots, a bundle compiled into the binary, under which installing a
@@ -512,7 +570,9 @@ mirrored buffering threshold to `player-core`'s.
 `cargo run -p player-core --example musical_smoke` checks the tempo, the beat,
 the onsets and the brightness through the whole playback path against
 synthesized click tracks with known answers; `/musical.html` is its web half,
-generating the identical fixtures.
+generating the identical fixtures. Both report 18/18 since M6 added the
+sustained-pad fixture -- material with no attacks in it, which read as a
+confident 142 BPM until a live look caught it.
 
 `cargo run -p player-core --example seek_smoke -- <path>` checks that seeking a given file yields
 the same audio as playing through to that point — written for MP3, whose bit reservoir makes

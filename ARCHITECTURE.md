@@ -287,11 +287,50 @@ crates/
                      pixels). And the path is a pure function of ring index
                      evaluated in Rust for the camera *and* for the geometry, so
                      the eye cannot drift out through the wall it is flying down.
-                     visuals/history.rs is the GPU ring both M3 and M4 keep their
-                     past in -- the texture, the head, and `RowClock`, the
+                     visuals/particles.rs is the fifth (Phase 3 M6): PLAN.md
+                     §4's particle field, the first visual driven by what the
+                     music is *doing* rather than by its samples or its spectrum,
+                     and this workspace's first **compute shader**. Its state is
+                     advanced by arithmetic rather than replaced by a
+                     measurement, which brings three rules with it: the
+                     simulation steps on a fixed 120Hz clock with the remainder
+                     carried (so a frame rate is invisible in the motion), an
+                     onset enters only through an idempotent
+                     `max(energy - decay*dt, onset)` (because `musical.onset` is
+                     *held* in the published snapshot until the next drain
+                     replaces it, so a 180Hz display reads the same onset three
+                     times), and a particle is a pure function of its spawn
+                     ordinal -- hashed in the shader, so no random state can
+                     diverge between the shells. The sparks accumulate additively
+                     in an `Rgba16Float` texture and exactly one pass converts
+                     for the surface, because blending happens *after* the
+                     fragment shader in whatever space the target stores.
+                     visuals/solid.rs is the sixth (Phase 3 M6): PLAN.md §4's SDF
+                     raymarch, whose surface radius at a latitude **is** the
+                     analyser's band at that frequency (placed by real Hz through
+                     `band_position`), so the silhouette from foot to crown is
+                     the spectrum from low to high -- bass-heavy material
+                     measurably wider at the foot than at the crown, on both
+                     shells. It is the one visual that does not multisample and
+                     the one that caps its own resolution: a fullscreen raymarch
+                     is priced in fragments, so it marches into its own texture
+                     and upscales. Both figures were set by a stopwatch rather
+                     than by caution (the march costs under a millisecond at 4K
+                     here), because a cap chosen from caution would have softened
+                     every 1440p window.
+                     visuals/palette.rs is the centroid-to-hue mapping those two
+                     share, and visuals/history.rs is the GPU ring M3 and M4 keep
+                     their past in -- the texture, the head, and `RowClock`, the
                      arithmetic that makes a 60Hz redraw thread and a 144Hz
                      browser advance a history by the same amount. What a row
-                     *means* stays the visual's.
+                     *means* stays the visual's. `RowClock` gained M6's particle
+                     simulation as a third caller with no ring behind it at all,
+                     and that is when it was found to be counting *seconds* and
+                     dividing by an `f32` reciprocal a hair too large: a frame of
+                     exactly one second at 120Hz asked for 119 steps instead of
+                     120, and three frames of exactly a third of a sixtieth --
+                     what a 180Hz display hands over -- asked for one instead of
+                     two. It counts rows now.
                      trace.rs turns a window of played audio into
                      points (x side, y mid -- the goniometer's axes -- and z
                      their age), camera.rs is the perspective/look-at math with
@@ -300,9 +339,12 @@ crates/
                      to a chosen angle, which M1 wrote for the vectorscope and M2
                      moved here when the bars became its second caller -- and
                      attachments.rs owns the depth buffer, the 4x MSAA and the
-                     background, which are the host's business rather than each
-                     visual's: two visuals disagreeing about the sample count
-                     could not share a surface. The background is defined as the
+                     background: the *formats* are the host's business rather
+                     than each visual's, since two visuals disagreeing about them
+                     could not share a surface. Whether a given visual
+                     multisamples at all is its own -- M6's two draw soft sprites
+                     and a distance field, neither of which has a geometric edge
+                     for four samples a pixel to improve. The background is defined as the
                      colour a *screen should show* (rgb(5,5,8)) and converted to
                      whatever the surface in hand needs -- a clear value is
                      linear light, so an sRGB surface encodes it on the way out
