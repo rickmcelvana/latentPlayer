@@ -56,6 +56,35 @@ per claim, because nothing there is scarce; the two halves reaching the same
 figures by different routes is worth more than the two being written the same
 way.
 
+## A feedback visual has history from its first frame
+
+The `/visualizer.html` host-contract check used to take its "freshly built"
+baseline from a renderer that had already drawn one empty frame, on the argument
+that an empty feed measures nothing, pushes no history and steps no simulation.
+That was true of the first six visuals and is **false of MilkDrop** (Phase 3
+M7a): a feedback loop advances on every frame it is given, and its default
+preset draws a waveform from silence, so the empty frame leaves a picture
+behind.
+
+Both halves now rebuild the scene (`setVisual` / `set_visual`) before taking a
+baseline, which costs no GPU device and states the same thing on both shells. If
+you add a visual that *keeps* anything -- history, a simulation, a feedback
+buffer -- assume every frame handed to it counts, including the ones a check
+only meant as setup.
+
+## `milk_smoke` needs a folder of your own presets
+
+`cargo run --release -p player-render --example milk_smoke -- <folder>` runs
+every `.milk` file in a folder: parsed, compiled, drawn, and the worst frame
+cost reported. **No preset ships with this app** (Phase 3 decision 57) and none
+is committed to the repository, so there is no default corpus -- point it at
+your own. Release rather than debug: the EEL interpreter is a tree walk, and a
+debug build of it is slow enough to be misleading about cost.
+
+The figure that matters is not that every preset works -- against a thousand
+strangers' files they will not -- but that the count of those that do never
+falls between milestones.
+
 ## Why `--exclude player-rt-wasm`
 
 `player-rt-wasm` calls `wgpu::SurfaceTarget::Canvas`, which only exists

@@ -318,6 +318,30 @@ crates/
                      than by caution (the march costs under a millisecond at 4K
                      here), because a cap chosen from caution would have softened
                      every 1440p window.
+                     visuals/milkdrop.rs is the seventh (Phase 3 M7a): PLAN.md
+                     §4's compatibility promise, and the first visual whose
+                     *scene is data* rather than something this project wrote.
+                     The engine behind it is milk/ -- parse.rs (the `.milk`
+                     format), eel.rs (the EEL2 expression language presets are
+                     written in, interpreted rather than transpiled so one
+                     implementation serves both shells), state.rs (the ~70
+                     scalars, treated as MilkDrop treats them: the values the
+                     per-frame variables are *reset to* before each frame's code
+                     runs, not a struct the renderer consults), warp.rs (the
+                     per-vertex transform and the mesh's fixed geometry),
+                     wave.rs (the eight built-in waveform modes -- the only
+                     thing that puts new light into the loop) and frame.rs (the
+                     loop itself under wgpu: warp with decay, overlays drawn
+                     *into* the feedback buffer so this frame's waveform is next
+                     frame's trail, then a composite carrying video echo, gamma,
+                     the corner tint and the four whole-frame filters). Its
+                     arithmetic is read out of MilkDrop 2's own source, which is
+                     BSD 3-clause (see THIRD-PARTY.md, and milk/mod.rs for the
+                     files); MilkDrop *3* declares no licence and is not a source
+                     anything here derives from. One line of that transform is
+                     deliberately not copied -- the half-texel offset, which is a
+                     D3D9 rasterisation artefact and, inside a feedback loop,
+                     a half-pixel displacement applied every frame.
                      visuals/palette.rs is the centroid-to-hue mapping those two
                      share, and visuals/history.rs is the GPU ring M3 and M4 keep
                      their past in -- the texture, the head, and `RowClock`, the
@@ -1161,6 +1185,47 @@ at the correct rate, re-verified with the same probe.
   search a library by. Storing one means analysing whole files offline -- a
   schema, a scan cost and a migration -- which belongs with the library work,
   not with a real-time meter.
+- **A MilkDrop preset does not yet look like itself** (Phase 3 M7a). The loop,
+  the transform, the equations, the built-in waveform and the fixed-function
+  composite are all there; what is missing is the preset's *own* pixel shaders
+  (M7b) and its custom waves and shapes (M7c). Presets written for MilkDrop 2
+  and later lean on both heavily -- three of the five in the author's own corpus
+  switch the built-in waveform off entirely (`fWaveAlpha=0.001`, deliberately
+  under MilkDrop's own 0.004 threshold) because their picture comes from
+  somewhere M7a does not draw. `milk_smoke` reports the count that draws so the
+  next two milestones raise a figure rather than delete a claim.
+- **No preset library, and the selection is not remembered** (Phase 3 M7a).
+  A preset is loaded one file at a time, through a dialog natively and a file
+  input on the web. Scanning a folder off the audio and UI threads the way
+  `library.rs` does for music is M7c, and persistence waits for it: a stored
+  path is a path that will eventually name a file that has moved, and "point at
+  a folder" is the flow that deserves remembering.
+- **No sprites and no texture packs** (Phase 3 decision 56). Both are external
+  image files -- a content-distribution question rather than an engine one -- and
+  a preset that asks for either is *listed as asking* (`parse::Unsupported`,
+  shown beside its name) rather than silently drawing without it. The procedural
+  noise textures MilkDrop generates for itself are in scope, because generating
+  them is arithmetic.
+- **The MilkDrop feedback buffer is capped at 2048 pixels on its long edge**
+  (`visuals/milkdrop.rs`). MilkDrop's own ceiling rather than an invented
+  number: its texture-size menu stops there, and three waveform modes have
+  hard-coded behaviour for 256/512/1024/2048 and nothing beyond, so a preset is
+  written against a frame no larger. Above that the window's shape is kept and
+  the picture is upscaled. Chosen by argument rather than by stopwatch, which is
+  the weaker of the two -- M6's resolution cap moved threefold once one was
+  involved -- so it is worth a look at a real fullscreen window.
+- **`bass`/`mid`/`treb` are this build's normalisation, not MilkDrop's.**
+  MilkDrop divides its own FFT's three bands by a running average; this
+  summarises the frame's own spectrum over three frequency ranges and divides by
+  a four-second average of the same (`visuals/milkdrop.rs`). The *shape* matches
+  -- about 1.0 on ordinary material, above it on a hit, which is what presets are
+  written against -- but a preset gated on a specific threshold
+  (`fModWaveAlphaStart`, say) will open at a slightly different moment than it
+  would in MilkDrop. Measuring it the same way would mean a visual computing DSP,
+  which decision 2 forbids for good reasons.
+- **No preset blending.** MilkDrop crossfades between two presets, which needs
+  two engines live at once and a way to blend their per-vertex UVs. A real
+  feature, and M8's problem or later.
 - **No WebGL2 fallback on the web build.** `player-render` on wasm32 only
   targets wgpu's WebGPU backend; a browser/GPU without WebGPU gets a clear
   error (`webVisualizer.ts` checks `navigator.gpu` up front) rather than a

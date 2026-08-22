@@ -589,6 +589,72 @@ library scanned off the audio and UI threads like `library.rs`, and a stranger's
 program is sandboxed by an evaluation budget so a bad preset ends its own frame
 rather than the app.
 
+**Phase 3 M7a is built and is awaiting a live look** (2026-08-22): a preset
+draws. `VisualKind::MilkDrop` is the gallery's seventh entry and the first whose
+*scene is data*. Verified **112/112** `visual_smoke` (was 95/95), **123/123** at
+`/visualizer.html` (was 104/104), and **23/23** in the renamed `milk_smoke`;
+155 unit tests in `player-render`, up from 109.
+
+**The licence check decided where to read from, and the answer was not the
+obvious one.** Decision 57 had found the MilkDrop3 repository declaring no
+licence -- and that is the repository the test presets came from. **MilkDrop 2
+is Nullsoft's own and is BSD 3-clause**, so the transform, the eight waveform
+modes, the composite and every scalar default are read out of *that*
+(`milkdropfs.cpp`, `plugin.cpp`, `state.cpp`), with the attribution in
+`milk/mod.rs` and in a new `THIRD-PARTY.md`. Two repositories, two answers, and
+they look identical until someone checks.
+
+The spike's reduced transform was wrong in **ordering** as well as in terms:
+`zoomexp` makes the zoom depend on the radius (and collapses to a plain zoom at
+its default, which is why its absence was invisible); four sine terms ripple the
+picture *after* the stretch and *before* the rotation; and the whole thing runs
+in aspect-corrected space and is un-corrected at the end, which is the only
+reason a rotating preset draws circles rather than ellipses on a wide window.
+`warp=1` is MilkDrop's **default**, so a preset that writes no motion at all
+still ripples -- worth knowing before writing any check about the loop.
+
+**One line of MilkDrop's transform is deliberately not copied**: its half-texel
+offset is a Direct3D 9 rasterisation artefact, and wgpu aligns pixel and texel
+centres already. Copied into a feedback loop it is not a correction but a
+displacement applied *every frame* -- the picture crawls half a pixel up and
+left, 15px of a 128px frame in half a second, looking like nothing but slow
+drift. Found by a readback asserting where a seeded square *was* after thirty
+frames; there is now a unit test that the transform is a fixed point over a
+hundred. Fourth time in this phase a figure caught what an eye would not have.
+
+New modules, all inside `player-render`: `milk/warp.rs` (the transform and the
+mesh's fixed geometry), `milk/state.rs` (the ~70 scalars as MilkDrop actually
+treats them -- not a struct the renderer reads but the values the per-frame
+variables are *reset to*, so `q` carries from init into every frame rather than
+accumulating and `per_pixel` starts each vertex from the frame's own motion),
+`milk/wave.rs` (the eight built-in modes, the only thing putting new light into
+the loop), a rewritten `milk/frame.rs`, and `visuals/milkdrop.rs`.
+
+Decision 49's seam change landed once and deliberately: `Visual::set_preset`
+with a default body, and a selected preset beside the selected visual on the
+host, so it survives a visual swap. One command per shell -- the desktop takes a
+path and reads the file in Rust, the web takes the text because a browser has no
+path to give -- both ending at the same `Renderer::set_preset`. With nothing
+selected the visual draws MilkDrop's *defaults*, which are a real preset, since
+a fresh install has none (decision 57).
+
+**What the corpus check can claim is narrower than it looks, and that is
+right**: only 1 of the 5 presets draws through M7a's own path. Three set
+`fWaveAlpha=0.001`, deliberately under MilkDrop's own 0.004 threshold, because
+their picture comes from custom waves (M7c) and shaders (M7b); a fourth shows
+its waveform only above average loudness and is correctly invisible on a steady
+test tone. An earlier gate read the alpha off the `Runtime` and failed against
+entirely correct behaviour -- the gate and the draw have to ask the same
+question, so it asks by building the waveform.
+
+**What is still to confirm is a person watching their own presets in motion.**
+That is the only test of whether the transform is right, since its failure mode
+is exactly the one no still frame shows. Two constants also want a live look:
+the feedback buffer's 2048-pixel cap (MilkDrop's own ceiling, but M6's
+resolution cap moved threefold from its cautious guess once a stopwatch was
+involved) and whether the waveform reads at the right amplitude against real
+music.
+
 
 The certificate answer changed a finding into a fix: ureq defaults to
 webpki-roots, a bundle compiled into the binary, under which installing a
@@ -616,6 +682,12 @@ real Navidrome to verify against.
 server misbehaves -- retries, refusals, a captive portal, a token that stopped
 working; `/failing.html` is its web half and is what holds `audioSab.ts`'s
 mirrored buffering threshold to `player-core`'s.
+
+`cargo run --release -p player-render --example milk_smoke -- <folder>` runs a
+whole folder of `.milk` files: every preset parses, every block compiles, every
+one draws a frame without taking the app with it, and the worst frame cost is
+reported. There is **no default corpus in the repository** -- no preset ships
+with the app (decision 57) -- so point it at a folder of your own.
 
 `cargo run -p player-core --example musical_smoke` checks the tempo, the beat,
 the onsets and the brightness through the whole playback path against

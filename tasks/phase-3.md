@@ -2693,3 +2693,211 @@ The phase's three kinds of check apply, with one addition this milestone earns:
 - No preset editing. Reading is the whole milestone.
 - No WebGL2 fallback (decision 8, unchanged): a preset engine is the last place
   to take on a second constraint set.
+
+## M7a -- a preset draws: built 2026-08-22
+
+The first of M7's three parts. What it claims is exactly its name: a `.milk`
+file loads, its equations run, its picture moves the way its own arithmetic
+says, and the whole thing is drawn by MilkDrop's feedback loop rather than by
+something that looks like one. What it does *not* claim is that a preset looks
+like itself -- that needs the shader translator, which is M7b.
+
+Verified: **112/112** `cargo run -p player-render --example visual_smoke` (was
+95/95 at M6), **123/123** at `/visualizer.html` in a real browser (was 104/104),
+and **23/23** `cargo run --release -p player-render --example milk_smoke`
+against the author's own five-preset corpus. 155 unit tests in `player-render`,
+up from 109. Clippy (both targets), fmt, `tsc` and the web build green.
+
+### Where the arithmetic comes from, and the licence finding that made it usable
+
+Decision 57's licence check had already found the MilkDrop3 repository declaring
+no licence at all. That is the repository the test presets came from, and it
+would have been the obvious place to read the transform out of. It is the wrong
+one: **MilkDrop 2 is Nullsoft's own, and is BSD 3-clause** (`Copyright 2005-2013
+Nullsoft, Inc.`, in the header of every file in `vis_milk2/`). Reading that is
+licence-clean; assuming its successor inherited the licence would not have been,
+and the two questions look identical until someone checks.
+
+So the warp transform, the eight waveform modes, the composite and every
+scalar's default are read out of MilkDrop 2's `milkdropfs.cpp`, `plugin.cpp` and
+`state.cpp`. `crates/player-render/src/milk/mod.rs` carries the attribution and
+names the files, so any line here can be checked against its source, and
+`THIRD-PARTY.md` records it where a reader of the repository rather than of the
+crate will find it.
+
+### The transform, which was the thing not to guess
+
+The spike's reduced version -- zoom, stretch, rotate, translate -- turned out to
+be wrong in *ordering* as well as in terms:
+
+- **`zoomexp` makes the zoom depend on the radius**: `zoom2 = zoom ^ (zoomexp ^
+  (rad*2 - 1))`. At the default `zoomexp = 1` the exponent is 1 everywhere and
+  this collapses to a plain zoom, which is exactly why its absence was invisible.
+- **Four sine terms ripple the picture**, at four rates, on an animated
+  frequency set -- and they happen *after* the stretch and *before* the
+  rotation. Moving them either way is a different picture, and there is a test
+  that says which order this is: a quarter turn maps a warp displacement on u
+  onto one on v, so warp-then-rotate and rotate-then-warp disagree by exactly a
+  rotation, and only one of them is MilkDrop's.
+- **The whole transform happens in aspect-corrected space and is un-corrected at
+  the end.** That is the only reason a rotating preset draws circles rather than
+  ellipses on a wide window, and it is checked as what it actually buys: a
+  quarter turn moves a point the same number of *pixels* whatever the window
+  shape.
+
+`warp=1` is MilkDrop's **default**, so a preset that writes no motion at all
+still ripples. That is worth knowing before writing any check about the loop:
+two of `milk_smoke`'s claims set `warp=0` explicitly, because a measurement of
+one behaviour with another running underneath it is not a measurement.
+
+### The one line of MilkDrop's transform that is deliberately not copied
+
+MilkDrop ends the per-vertex transform with `u += 0.5/texsize_x`, and its own
+comment says why: without it "a 1-pixel-wide line of the image would wrap at the
+top and left edges". That is the **Direct3D 9 half-texel rule** -- in D3D9 a
+pixel centre and a texel centre are half a texel apart, and every D3D9 program
+sampling a render target one-to-one carries a correction for it. wgpu, like
+every API after D3D9, aligns them already.
+
+Copied into a feedback loop, that line is not a correction, it is a
+displacement, applied *again every frame*: the picture crawls half a pixel up
+and left per frame forever. Fifteen pixels of a 128-pixel frame in half a
+second, smeared, and looking like nothing at all except slow drift.
+
+Found by a readback asserting where a seeded square *was* after thirty frames --
+it read 48.5 where the frame's centre is 63.5, and 30 x 0.5 is exactly 15. There
+is now a unit test that the transform is a **fixed point**: feed its own output
+back in a hundred times and land where you started. Anything constant added per
+frame fails that and nothing else, because a single frame looks perfect.
+
+Fourth time in this phase that a figure caught what an eye would not have.
+
+### What else is in it
+
+`milk/state.rs` is the preset's ~70 scalars, and its shape is a claim about what
+a `.milk` file *is*. Not a program with settings attached: a set of named
+scalars, most of which are also variables the preset's own code may overwrite
+every frame. `fDecay=0.98` in the file and `decay = 0.9 + 0.1*bass` in
+`per_frame` are the same quantity reached two ways, and the renderer reads only
+the second. So the scalars are not a struct the renderer consults -- they are
+the values the per-frame variables are **reset to** before each frame's code
+runs, which is what `LoadPerFrameEvallibVars` does. Three consequences the tests
+pin: `q1..q32` carry from the init block into *every* frame rather than
+accumulating across them; `per_pixel` starts every vertex from the frame's own
+motion rather than from the previous vertex's; and a scalar the preset's code
+cannot reach (`fWarpScale`, `fShader`) stays unreachable, so a preset writing to
+it writes to a variable nothing reads.
+
+`milk/wave.rs` is the eight built-in waveform modes -- the only thing that puts
+*new light* into the loop, since everything else moves and fades what is already
+there. A preset whose waveform does not draw fades to black in a couple of
+seconds however right its warp is. Geometry only, no wgpu, because the modes are
+the part with no visual tell when they are subtly wrong: a mode-4 script with
+the momentum filter's two weights swapped still looks like a waveform.
+
+`milk/frame.rs` is the loop under wgpu, in MilkDrop's order: warp with decay and
+the preset's own wrap mode, then the overlays **into the feedback buffer** (so
+this frame's waveform is next frame's trail), then a composite carrying video
+echo, gamma, the four-corner tint and the four whole-frame filters.
+
+`visuals/milkdrop.rs` is the `Visual`. `bass`, `mid` and `treb` are summaries of
+the frame's own spectrum -- the licence `VisualFrame::peak` operates under -- so
+decision 2 still holds and no DSP happens in a visual.
+
+### Two things MilkDrop's own constants say, and both are kept
+
+- **`6.28` in mode 0 is not tau.** It is 0.0016 short, so the ring falls a fifth
+  of a degree short of closing, and the cross-fade over the first tenth of the
+  ring is what hides it. Clippy flags it as an approximate constant; "correcting"
+  it would change the shape of every mode-0 preset ever written.
+- **Three waveform modes switch on the texture size** against four power-of-two
+  cases and do nothing at all for a size that is not one of them -- which on a
+  modern window means those modes draw at full alpha instead of the faint wash
+  they are meant to be. This reads the same four points as a line in log width
+  (0.07 at 256, +0.02 an octave), so a 1440-pixel frame gets the value the table
+  implies rather than falling through.
+
+### Decision 49, in the code
+
+`VisualKind::MilkDrop` joins the registry, and the seam widens once and
+deliberately: `Visual::set_preset`, with a default body that ignores it, plus a
+selected preset beside the selected visual on both renderers. A default method
+rather than a second trait, because the alternative is downcasting -- the
+renderer holds a `BoxedVisual`, and asking it "are you the MilkDrop one" is
+exactly the shell-side type knowledge the seam exists to prevent.
+
+The selection is the *host's*, so it survives a visual swap: switching to the
+bars and back returns to the preset that was showing. And with nothing selected
+the visual draws MilkDrop's **defaults**, which are a real preset -- a slowly
+fading circular waveform. A black rectangle would be the wrong answer for a
+gallery entry someone is looking at before they have pointed the app anywhere,
+and this is the state a fresh install is in, since no preset ships (decision 57).
+
+One command per shell, and they differ for a reason neither side can avoid: the
+desktop takes a **path** and reads the file in Rust, the web takes the **text**
+because a browser has no path to give. Both end at `Renderer::set_preset`, so
+both shells parse the same file with the same code and get the same list of what
+it needs. The selection is deliberately not persisted: a stored path is a path
+that will eventually name a file that has moved, and pointing at a folder is
+M7c's flow and the one that deserves persistence.
+
+### What the corpus check can and cannot claim
+
+`milk_smoke` reports **1 of 5** presets drawing through M7a's own path, and that
+is correct rather than disappointing. Three of the five set `fWaveAlpha=0.001`,
+deliberately below MilkDrop's own 0.004 threshold, because their picture comes
+from custom waves (M7c) and preset shaders (M7b). A fourth --
+`MilkDrop2077 - Dude the walls are moving2`, which plainly sets `fWaveAlpha=0.303`
+-- shows its waveform only once the music passes `fModWaveAlphaStart=1.110`, so
+on a steady test tone sitting at exactly average by construction it is correctly
+invisible.
+
+An earlier version of that check asked the `Runtime` for the alpha and got the
+first case right and the second wrong, producing a failing check against
+entirely correct behaviour. **The gate and the draw have to ask the same
+question**, so it asks by building the waveform. Every preset is still claimed
+to load and run a whole frame without error, and the count that draws is printed
+so M7b and M7c raise a figure rather than delete a claim.
+
+### The two bugs this milestone's own checks found in it
+
+- **A uniform's field order across the WGSL boundary.** Compositing MilkDrop's
+  picture over the host background needed a new uniform field, and adding it in
+  a different position on each side left the struct exactly the same size while
+  `filters` read the background's alpha -- 1.0, which is `invert`, so every
+  frame drew pure white. A size assertion cannot see that; there is a note
+  beside it saying so.
+- **The web harness's `fresh` baseline had drifted from the native one.** It
+  reused a renderer that had already drawn one empty frame, on the stated
+  argument that an empty feed measures nothing, pushes no history and steps no
+  simulation. True of the first six visuals and **false of a feedback loop**,
+  which advances on every frame it is given. The native half never had the
+  problem because it builds a renderer per baseline; the web half rebuilds the
+  scene instead, which costs no GPU device (decision 58).
+
+### The background, which is a decision rather than a fix
+
+MilkDrop paints the whole frame, so the host's near-black field would never
+show. Its frame is **light on a dark field** -- black means "nothing here", not
+"a black object" -- so it is *added over* `attachments::BACKGROUND` rather than
+replacing it. That gives a fullscreen preset the same faint sense of a surface
+behind it the rest of the gallery has, at a two-percent lift visible only in the
+blacks, and it keeps a real cross-visual property true on both shells.
+
+### What M7a leaves for a person to confirm
+
+Everything a readback can reach is checked. What it cannot reach, and what M7b
+should not be started before hearing:
+
+- **Whether a preset looks right in motion**, on the user's own presets rather
+  than on a corpus of five. The transform is the milestone and its failure mode
+  is precisely the one no still frame shows.
+- **Whether the feedback buffer's 2048-pixel cap is the right one.** It is
+  MilkDrop's own ceiling rather than an invented number, and its rationale is
+  sound -- presets are written against a frame no larger, and the loop's content
+  is smear rather than detail -- but M6's resolution cap was set with a stopwatch
+  and moved threefold from the cautious guess, so this one deserves a look at a
+  real fullscreen window.
+- **Whether the waveform reads at the right amplitude** against real music,
+  since `bass`/`mid`/`treb` are this build's own normalisation of the frame's own
+  bands and presets are written against MilkDrop's.
