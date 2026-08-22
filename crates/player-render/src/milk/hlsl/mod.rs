@@ -16,6 +16,8 @@
 //! - [`lex`] -- tokens. Never fails; an unknown character is a token.
 //! - [`ty`] -- HLSL's type lattice, its promotion and truncation rules, and
 //!   swizzle typing.
+//! - [`env`] -- decision 55's environment: MilkDrop's `include.fx` written
+//!   down, which is what `uv`, `time`, `q17` and `GetBlur2` actually are.
 //!
 //! Still to come in M7b: the parser producing a typed tree, the WGSL emitter,
 //! decision 55's prelude (MilkDrop's `GetPixel`/`GetBlur1..3`/`lum`, the
@@ -85,8 +87,10 @@
 //! falls back to M7a's fixed-function path rather than drawing nothing. The
 //! figure that matters is the count that draws, and that it never falls.
 
+pub mod env;
 pub mod lex;
 pub mod ty;
 
+pub use env::{Alias, Pass};
 pub use lex::{lex, Tok, Token};
 pub use ty::{swizzle, Base, Fit, Shape, Ty};

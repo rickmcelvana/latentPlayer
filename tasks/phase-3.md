@@ -3028,11 +3028,52 @@ The other figures from that run, as the baseline a real corpus will replace:
 `frac`, `mul`), 66 free identifiers, 18 operators, zero preprocessor directives
 and **zero characters the lexer had no rule for**.
 
+### The environment, read from MilkDrop's source rather than from memory
+
+`milk/hlsl/env.rs`, 9 unit tests, 187 in `player-render`. Decision 55 said this
+was ours to provide and had to be written down; it is now written down, out of
+`plugin.cpp`'s `CPlugin::LoadShaderFromMemory` and `data/include.fx` under the
+same rule M7a's transform was read under. (The `.fx` files are *shipped with the
+binary* and absent from the source-only mirrors, which is worth knowing before
+looking for them.)
+
+**The shape is not what the plan assumed.** It said "the `texsize`/`aspect`
+uniforms". In fact MilkDrop declares **fourteen `float4` constant registers**
+`_c0.._c13` plus eight more `_qa.._qh`, and every named input is a `#define`
+onto a lane: `#define time _c2.x`, `#define q17 _qe.x`, `#define aspect _c0`.
+Sixty-odd names over twenty-two vectors. That is much less uniform plumbing than
+one binding per name -- and it means two names can be the same storage, which
+they are: `blur1_min` is `_c6.z` and `GetBlur3`'s bias is `_c6.y`.
+
+**A blur texture is not a blurred picture.**
+
+```text
+#define GetBlur1(uv) (tex2D(sampler_blur1, uv).xyz * _c5.x + _c5.y)
+```
+
+The blur chain stores its result remapped into the `blur1_min`/`blur1_max`
+range, and `_c5`/`_c6` carry the inverse so the shader gets the original values
+back. A blur pass writing the blurred image straight out, with a `GetBlur1` that
+merely samples it, agrees at the default settings and is wrong everywhere else.
+That is the M7b equivalent of M7a's half-texel offset: a difference that reads
+as "this preset looks a bit off" rather than as a bug, and the reason the blur
+chain is not a thing to write from memory either.
+
+**Two more facts worth having before any of it is built.** `ret` is declared by
+the wrapper as `float3 ret = 0`, so a body that never assigns it draws black --
+reaching the previous frame is what `GetPixel` is *for*, and "the warp shader
+starts from the previous frame" is the intuitive reading and is wrong. And the
+composite pass defines `uv_orig` as `_uv.xy`, the same as `uv`, where the warp
+pass has `_uv.zw`; `plugin.cpp` carries a `//[sic]` on that line, so it is
+Nullsoft's own known quirk and presets depend on it.
+
+The five helpers are `#define`s rather than functions, which means a preset
+declaring a function named `lum` does not override it -- the macro wins. That
+matters given presets do declare functions of their own.
+
 ### What is next, and what it is waiting on
 
-The grammar is not fixed until the survey has run on a real collection. What
-does not depend on that and comes next is **decision 55's prelude** -- MilkDrop's
-own shader header, which is a fixed and knowable thing and has to be read out of
-MilkDrop 2's source under the same rule M7a's transform was: `shader_body`'s
-expansion, `ret`'s declaration, the `texsize`/`aspect` uniforms, `q1..q32`, and
-`GetPixel`/`GetBlur1..3`/`lum`.
+The grammar. It is not fixed until the survey has run on a **real collection**,
+which is the one thing here that cannot be derived from MilkDrop's source: what
+twenty years of preset authors actually wrote. Everything the survey needs is
+built, so this is a single run over a folder.
