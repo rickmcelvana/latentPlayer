@@ -43,3 +43,22 @@ fn to_target(colour: vec3<f32>, srgb_target: f32) -> vec3<f32> {
         srgb_to_linear(colour.b),
     );
 }
+
+/// A hue on the full-saturation colour wheel, as RGB.
+///
+/// Here rather than in a visual since M6, when the raymarched solid became the
+/// second caller: both it and the particle field colour themselves from the
+/// spectral centroid through `visuals::palette`, and a wheel written twice is
+/// two visuals that disagree about what 3kHz looks like. Written out rather
+/// than pulled through an HSV conversion nobody here needs the other two thirds
+/// of.
+fn hue_to_rgb(hue: f32) -> vec3<f32> {
+    let h = fract(hue) * 6.0;
+    let x = 1.0 - abs(h % 2.0 - 1.0);
+    if (h < 1.0) { return vec3<f32>(1.0, x, 0.0); }
+    if (h < 2.0) { return vec3<f32>(x, 1.0, 0.0); }
+    if (h < 3.0) { return vec3<f32>(0.0, 1.0, x); }
+    if (h < 4.0) { return vec3<f32>(0.0, x, 1.0); }
+    if (h < 5.0) { return vec3<f32>(x, 0.0, 1.0); }
+    return vec3<f32>(1.0, 0.0, x);
+}

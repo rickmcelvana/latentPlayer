@@ -1018,7 +1018,7 @@ fn reads_musical(kind: VisualKind) -> bool {
         | VisualKind::SpectrumBars
         | VisualKind::SpectrogramWaterfall
         | VisualKind::OscilloscopeTunnel => false,
-        VisualKind::ParticleField => true,
+        VisualKind::ParticleField | VisualKind::RaymarchedSolid => true,
         _ => false,
     }
 }
@@ -1590,6 +1590,297 @@ fn check_the_particle_field() {
     );
 }
 
+/// A renderer showing the raymarched solid, at the usual size.
+fn solid_renderer(width: u32, height: u32) -> OffscreenRenderer {
+    pollster::block_on(OffscreenRenderer::new(
+        width,
+        height,
+        VisualKind::RaymarchedSolid,
+    ))
+    .expect("offscreen renderer for the raymarched solid")
+}
+
+/// How wide the drawn figure is across one row band, as a fraction of the
+/// image: `from` and `to` are fractions of the height, 0 at the top.
+///
+/// The measurement decision 46 is checked through. The solid's outline *is* the
+/// spectrum -- low frequencies at the foot, high at the crown -- so "is this
+/// material bass-heavy" and "is the bottom of the figure wider than the top"
+/// have to be the same question.
+fn width_between(pixels: &[u8], width: u32, height: u32, from: f32, to: f32) -> f32 {
+    let first = (height as f32 * from) as u32;
+    let last = (height as f32 * to) as u32;
+    let (mut min_x, mut max_x) = (width, 0u32);
+    for y in first..last.min(height) {
+        for x in 0..width {
+            let at = ((y * width + x) * 4) as usize;
+            if is_trace(&pixels[at..at + 4]) {
+                min_x = min_x.min(x);
+                max_x = max_x.max(x);
+            }
+        }
+    }
+    if max_x < min_x {
+        return 0.0;
+    }
+    (max_x - min_x + 1) as f32 / width as f32
+}
+
+/// A spectrum sloping from `low_db` at the bottom of the axis to `high_db` at
+/// the top -- bass-heavy one way round and treble-heavy the other.
+fn sloped(low_db: f32, high_db: f32) -> Spectrum {
+    let centres = band_centres(RATE);
+    let last = (centres.len() - 1).max(1) as f32;
+    let levels = (0..centres.len())
+        .map(|band| low_db + (high_db - low_db) * (band as f32 / last))
+        .collect();
+    Spectrum { levels, centres }
+}
+
+/// How many pixels of the image's outer border are *not* background.
+///
+/// The solid must not touch the edge at any window shape -- the opposite of the
+/// tunnel's claim, and the same arithmetic. A camera fitted in angle rather than
+/// in tangent, or one fitted to the height alone, fails this on a tall window.
+fn border_touches(pixels: &[u8], width: u32, height: u32) -> usize {
+    let mut touched = 0;
+    for x in 0..width {
+        for y in [0, height - 1] {
+            let at = ((y * width + x) * 4) as usize;
+            if is_trace(&pixels[at..at + 4]) {
+                touched += 1;
+            }
+        }
+    }
+    for y in 0..height {
+        for x in [0, width - 1] {
+            let at = ((y * width + x) * 4) as usize;
+            if is_trace(&pixels[at..at + 4]) {
+                touched += 1;
+            }
+        }
+    }
+    touched
+}
+
+/// What only the raymarched solid claims (Phase 3 M6).
+fn check_the_raymarched_solid() {
+    println!(
+        "\n{} -- its own claims:",
+        VisualKind::RaymarchedSolid.name()
+    );
+    let signal = tone(220.0, 0.6);
+
+    // Nothing measured is nothing drawn -- the bars' answer (M2 decision 10),
+    // and a different picture from a sphere resting on the display floor.
+    let mut renderer = solid_renderer(WIDTH, HEIGHT);
+    let unmeasured = measure(
+        &renderer
+            .draw_to_pixels(&frame(&signal))
+            .expect("render audio with no spectrum"),
+    );
+    check(
+        "audio with nothing measured yet draws nothing at all",
+        unmeasured.count == 0,
+        format!("{} lit pixels", unmeasured.count),
+    );
+
+    // Decision 46, and the reason this visual is a picture of the spectrum
+    // rather than a demo: the silhouette is the display. Bass-heavy material
+    // has to be wider at the foot than at the crown, and treble-heavy material
+    // the other way round -- not "different", but different in the stated
+    // direction.
+    let bass = sloped(-6.0, -66.0);
+    let treble = sloped(-66.0, -6.0);
+    let mut renderer = solid_renderer(WIDTH, HEIGHT);
+    let heavy_low = renderer
+        .draw_to_pixels(&full_frame(&signal, &bass))
+        .expect("render a bass-heavy spectrum");
+    let low_foot = width_between(&heavy_low, WIDTH, HEIGHT, 0.62, 0.88);
+    let low_crown = width_between(&heavy_low, WIDTH, HEIGHT, 0.12, 0.38);
+
+    let mut renderer = solid_renderer(WIDTH, HEIGHT);
+    let heavy_high = renderer
+        .draw_to_pixels(&full_frame(&signal, &treble))
+        .expect("render a treble-heavy spectrum");
+    let high_foot = width_between(&heavy_high, WIDTH, HEIGHT, 0.62, 0.88);
+    let high_crown = width_between(&heavy_high, WIDTH, HEIGHT, 0.12, 0.38);
+    check(
+        "the silhouette is the spectrum, bass at the foot and treble at the crown",
+        low_foot > low_crown && high_crown > high_foot,
+        format!(
+            "bass-heavy: {:.2} foot against {:.2} crown; treble-heavy: {:.2} foot against {:.2} crown",
+            low_foot, low_crown, high_foot, high_crown
+        ),
+    );
+
+    // The frequencies are placed by *Hz* through the frame's own axis, so the
+    // same measurement on a different band count is the same solid. The web
+    // shell's rows arrive at whatever width the analyser publishes, and an
+    // output rate change moves every centre.
+    let halved = Spectrum::rebanded(&bass, bass.levels.len() / 2);
+    let mut renderer = solid_renderer(WIDTH, HEIGHT);
+    let coarse = renderer
+        .draw_to_pixels(&full_frame(&signal, &halved))
+        .expect("render half as many bands");
+    let coarse_foot = width_between(&coarse, WIDTH, HEIGHT, 0.62, 0.88);
+    check(
+        "half as many bands is the same shape, because a band is placed by its frequency",
+        (coarse_foot - low_foot).abs() < 0.04,
+        format!(
+            "{coarse_foot:.2} of the frame at {} bands, {low_foot:.2} at {}",
+            halved.levels.len(),
+            bass.levels.len()
+        ),
+    );
+
+    // The frame holds it at every window shape -- M1's fit, arrived at here
+    // through the angle a ball subtends rather than through a hull, and checked
+    // the way the tunnel's enclosure is: in pixels, at the shapes a real window
+    // takes.
+    let shapes = [
+        (320u32, 320u32),
+        (800, 600),
+        (1280, 720),
+        (1920, 1080),
+        (600, 900),
+        (400, 1200),
+    ];
+    let mut worst = (0usize, shapes[0]);
+    for shape in shapes {
+        let mut renderer = solid_renderer(shape.0, shape.1);
+        let pixels = renderer
+            .draw_to_pixels(&full_frame(&signal, &bass))
+            .expect("render at this shape");
+        let touched = border_touches(&pixels, shape.0, shape.1);
+        if touched >= worst.0 {
+            worst = (touched, shape);
+        }
+    }
+    check(
+        "the solid stays inside the frame at every window shape",
+        worst.0 == 0,
+        format!(
+            "{} border pixels touched across {} shapes, worst at {}x{}",
+            worst.0,
+            shapes.len(),
+            worst.1 .0,
+            worst.1 .1
+        ),
+    );
+
+    // The beat is the size (decision 45's other half): a believed tempo swells
+    // the solid on the beat, and the same audio with no tempo does not.
+    let on_the_beat = Musical {
+        bpm: 120.0,
+        beat_confidence: 1.0,
+        beat_phase: 0.0,
+        ..Musical::default()
+    };
+    let mut renderer = solid_renderer(WIDTH, HEIGHT);
+    let swollen = measure(
+        &renderer
+            .draw_to_pixels(&full_frame(&signal, &bass).with_musical(on_the_beat))
+            .expect("render on the beat"),
+    );
+    let mut renderer = solid_renderer(WIDTH, HEIGHT);
+    let resting = measure(
+        &renderer
+            .draw_to_pixels(&full_frame(&signal, &bass))
+            .expect("render with no tempo"),
+    );
+    check(
+        "a believed beat swells the solid",
+        swollen.count > resting.count,
+        format!(
+            "{} lit pixels on the beat, {} with no tempo",
+            swollen.count, resting.count
+        ),
+    );
+
+    // And decision 45 exactly: halfway between two beats the swell is zero, so
+    // material *with* a tempo at that instant draws precisely what material
+    // with no tempo draws. Byte for byte, because there is nothing else in the
+    // frame for a tempo to touch.
+    let between_beats = Musical {
+        beat_phase: 0.5,
+        ..on_the_beat
+    };
+    let mut renderer = solid_renderer(WIDTH, HEIGHT);
+    let midway = renderer
+        .draw_to_pixels(&full_frame(&signal, &bass).with_musical(between_beats))
+        .expect("render between two beats");
+    let mut renderer = solid_renderer(WIDTH, HEIGHT);
+    let untempoed = renderer
+        .draw_to_pixels(&full_frame(&signal, &bass))
+        .expect("render with no tempo at all");
+    let differ = midway
+        .iter()
+        .zip(&untempoed)
+        .filter(|(a, b)| a != b)
+        .count();
+    check(
+        "between two beats it is exactly what material with no tempo draws",
+        differ == 0,
+        format!("{differ} of {} bytes differ", untempoed.len()),
+    );
+
+    // Display gain is decibels here, as it is for every spectrum display in
+    // this crate (M2 decision 12) -- so turning it up pushes the surface out
+    // rather than doing nothing.
+    let mut renderer = solid_renderer(WIDTH, HEIGHT);
+    let quiet = sloped(-48.0, -66.0);
+    let unity = measure(
+        &renderer
+            .draw_to_pixels(&full_frame(&signal, &quiet))
+            .expect("render at unity"),
+    );
+    let mut renderer = solid_renderer(WIDTH, HEIGHT);
+    renderer.set_gain(GainSetting::Fixed(4.0));
+    let magnified = measure(
+        &renderer
+            .draw_to_pixels(&full_frame(&signal, &quiet))
+            .expect("render at x4"),
+    );
+    check(
+        "display gain pushes the surface out",
+        magnified.count > unity.count,
+        format!(
+            "{} lit pixels at x4, {} at unity",
+            magnified.count, unity.count
+        ),
+    );
+
+    // The colour is the brightness of the moment, through the same `palette`
+    // the particle field uses -- so the two cannot disagree about 3kHz.
+    let mut renderer = solid_renderer(WIDTH, HEIGHT);
+    let dark = mean_colour(
+        &renderer
+            .draw_to_pixels(&full_frame(&signal, &bass).with_musical(Musical {
+                centroid_hz: 120.0,
+                ..Musical::default()
+            }))
+            .expect("render a dark moment"),
+    );
+    let mut renderer = solid_renderer(WIDTH, HEIGHT);
+    let bright = mean_colour(
+        &renderer
+            .draw_to_pixels(&full_frame(&signal, &bass).with_musical(Musical {
+                centroid_hz: 6_000.0,
+                ..Musical::default()
+            }))
+            .expect("render a bright moment"),
+    );
+    check(
+        "the spectral centroid colours the solid",
+        dark[2] > dark[0] && bright[0] > dark[0],
+        format!(
+            "rgb({:.0}, {:.0}, {:.0}) at 120Hz against rgb({:.0}, {:.0}, {:.0}) at 6kHz",
+            dark[0], dark[1], dark[2], bright[0], bright[1], bright[2]
+        ),
+    );
+}
+
 /// Display gain (added 2026-08-18, after the first live fullscreen run).
 ///
 /// The complaint it answers is arithmetic rather than framing: the frame is sized
@@ -1737,6 +2028,7 @@ fn main() {
     check_the_spectrogram_waterfall();
     check_the_oscilloscope_tunnel();
     check_the_particle_field();
+    check_the_raymarched_solid();
     check_display_gain();
 
     let checks = CHECKS.load(Ordering::Relaxed);

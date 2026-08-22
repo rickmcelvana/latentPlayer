@@ -32,6 +32,7 @@ use crate::camera;
 use crate::visual::{Gpu, Musical, Visual, VisualFrame};
 
 use super::history::RowClock;
+use super::palette::hue_for_centroid;
 
 /// How many particles exist. Every one of them is simulated every step whether
 /// it is alive or not, which is what makes the cost of this visual a constant
@@ -158,17 +159,8 @@ fn spark_scale(height: u32) -> f32 {
 const SPARK_BRIGHTNESS: f32 = 1.0;
 const EXPOSURE: f32 = 1.0;
 
-/// The frequencies the hue runs between, and how far two particles born in the
-/// same instant may differ.
-///
-/// Deep blue for a bass-heavy moment, warm violet for a bright one -- the app's
-/// own accent colour is the middle of that range. Read from the spectral
-/// centroid, so the colour is a *measurement* rather than a palette cycling on
-/// its own.
-const HUE_LOW_HZ: f32 = 80.0;
-const HUE_HIGH_HZ: f32 = 8_000.0;
-const HUE_AT_LOW: f32 = 0.62;
-const HUE_AT_HIGH: f32 = 0.92;
+/// How far two particles born in the same instant may differ in colour. Where
+/// that colour comes from is [`palette`]'s, shared with the raymarched solid.
 const HUE_SPREAD: f32 = 0.07;
 
 /// Where the eye sits, as a direction and a distance. Slightly above the
@@ -351,21 +343,6 @@ fn normalise(v: [f32; 3]) -> [f32; 3] {
     } else {
         [v[0] / length, v[1] / length, v[2] / length]
     }
-}
-
-/// Where a spectral centroid falls on the colour wheel.
-///
-/// Logarithmic, because pitch is: the octave from 100Hz to 200Hz has to move the
-/// colour as far as the one from 2kHz to 4kHz, which a linear map would not do.
-/// A centroid of zero means nothing is sounding, and takes the low end rather
-/// than a colour of its own -- there are no particles to paint with it.
-fn hue_for(centroid_hz: f32) -> f32 {
-    if !centroid_hz.is_finite() || centroid_hz <= 0.0 {
-        return HUE_AT_LOW;
-    }
-    let position = (centroid_hz.clamp(HUE_LOW_HZ, HUE_HIGH_HZ) / HUE_LOW_HZ).ln()
-        / (HUE_HIGH_HZ / HUE_LOW_HZ).ln();
-    HUE_AT_LOW + (HUE_AT_HIGH - HUE_AT_LOW) * position
 }
 
 /// How hard the beat pushes, at this instant of it.
@@ -683,7 +660,7 @@ impl ParticleField {
         let level = (frame.peak() * frame.gain).clamp(0.0, 1.0);
         let onset = frame.musical.onset.clamp(0.0, 1.0);
         let kick = beat_kick(&frame.musical);
-        let hue = hue_for(frame.musical.centroid_hz);
+        let hue = hue_for_centroid(frame.musical.centroid_hz);
 
         self.staging.clear();
         self.staging.resize(SIM_STRIDE as usize * steps, 0);
@@ -995,22 +972,6 @@ mod tests {
         // floor, not a ratio.
         assert_eq!(density_scale(320), 1.0);
         assert_eq!(density_scale(1), 1.0);
-    }
-
-    #[test]
-    fn the_hue_follows_the_centroid_up_the_octaves() {
-        assert!((hue_for(HUE_LOW_HZ) - HUE_AT_LOW).abs() < 1e-4);
-        assert!((hue_for(HUE_HIGH_HZ) - HUE_AT_HIGH).abs() < 1e-4);
-        // Logarithmic: the geometric middle of the range is the middle of the
-        // colour run, which a linear map would put a long way lower.
-        let middle = (HUE_LOW_HZ * HUE_HIGH_HZ).sqrt();
-        assert!((hue_for(middle) - (HUE_AT_LOW + HUE_AT_HIGH) / 2.0).abs() < 1e-3);
-        // Outside the range is the end of it, not a wrapped colour.
-        assert!((hue_for(20.0) - HUE_AT_LOW).abs() < 1e-4);
-        assert!((hue_for(20_000.0) - HUE_AT_HIGH).abs() < 1e-4);
-        // Nothing sounding is a value, not a missing one (M5 decision 36).
-        assert!((hue_for(0.0) - HUE_AT_LOW).abs() < 1e-4);
-        assert!((hue_for(f32::NAN) - HUE_AT_LOW).abs() < 1e-4);
     }
 
     #[test]

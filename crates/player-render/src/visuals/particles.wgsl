@@ -170,19 +170,6 @@ struct Spark {
     @location(1) colour: vec3<f32>,
 };
 
-fn hue_to_rgb(hue: f32) -> vec3<f32> {
-    // A full-saturation wheel, written out rather than pulled through an HSV
-    // conversion nobody here needs the other two thirds of.
-    let h = fract(hue) * 6.0;
-    let x = 1.0 - abs(h % 2.0 - 1.0);
-    if (h < 1.0) { return vec3<f32>(1.0, x, 0.0); }
-    if (h < 2.0) { return vec3<f32>(x, 1.0, 0.0); }
-    if (h < 3.0) { return vec3<f32>(0.0, 1.0, x); }
-    if (h < 4.0) { return vec3<f32>(0.0, x, 1.0); }
-    if (h < 5.0) { return vec3<f32>(x, 0.0, 1.0); }
-    return vec3<f32>(1.0, 0.0, x);
-}
-
 @vertex
 fn vs_spark(
     @builtin(vertex_index) vertex: u32,

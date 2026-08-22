@@ -296,6 +296,10 @@ pub enum VisualKind {
     /// music is *doing* rather than by what it sounds like, and the first with
     /// a compute shader behind it.
     ParticleField,
+    /// PLAN.md section 4's fifth built-in, second half (Phase 3 M6): the
+    /// analyser's own bands as the shape of a raymarched surface -- the
+    /// spectrum read around a silhouette rather than along an axis.
+    RaymarchedSolid,
 }
 
 impl VisualKind {
@@ -306,6 +310,7 @@ impl VisualKind {
         VisualKind::SpectrogramWaterfall,
         VisualKind::OscilloscopeTunnel,
         VisualKind::ParticleField,
+        VisualKind::RaymarchedSolid,
     ];
 
     /// What the gallery opens at for anyone who has never chosen.
@@ -318,6 +323,7 @@ impl VisualKind {
             VisualKind::SpectrogramWaterfall => "spectrogram-waterfall",
             VisualKind::OscilloscopeTunnel => "oscilloscope-tunnel",
             VisualKind::ParticleField => "particle-field",
+            VisualKind::RaymarchedSolid => "raymarched-solid",
         }
     }
 
@@ -328,6 +334,7 @@ impl VisualKind {
             VisualKind::SpectrogramWaterfall => "Spectrogram waterfall",
             VisualKind::OscilloscopeTunnel => "Oscilloscope tunnel",
             VisualKind::ParticleField => "Particle field",
+            VisualKind::RaymarchedSolid => "Raymarched solid",
         }
     }
 
@@ -347,6 +354,9 @@ impl VisualKind {
             }
             VisualKind::ParticleField => {
                 "Onsets throw sparks, the beat pushes them outward, the brightness colours them."
+            }
+            VisualKind::RaymarchedSolid => {
+                "The spectrum as a surface: bass at the foot, treble at the crown, breathing on the beat."
             }
         }
     }
@@ -376,6 +386,9 @@ impl VisualKind {
             }
             VisualKind::ParticleField => {
                 Box::new(crate::visuals::ParticleField::new(gpu, width, height))
+            }
+            VisualKind::RaymarchedSolid => {
+                Box::new(crate::visuals::RaymarchedSolid::new(gpu, width, height))
             }
         }
     }

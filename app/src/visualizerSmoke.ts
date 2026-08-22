@@ -1098,6 +1098,228 @@ async function checkTheParticleField(): Promise<void> {
   );
 }
 
+/// How wide the drawn figure is across one row band, as a fraction of the
+/// image: `from` and `to` are fractions of the height, 0 at the top.
+///
+/// The measurement decision 46 is checked through, and the native half's
+/// `width_between` line for line. The solid's outline *is* the spectrum -- low
+/// frequencies at the foot, high at the crown -- so "is this material
+/// bass-heavy" and "is the bottom of the figure wider than the top" have to be
+/// the same question.
+function widthBetween(
+  target: HTMLCanvasElement,
+  from: number,
+  to: number,
+): number {
+  const px = pixels(target);
+  const width = target.width;
+  const height = target.height;
+  let minX = width;
+  let maxX = -1;
+  for (let y = Math.floor(height * from); y < Math.min(Math.floor(height * to), height); y++) {
+    for (let x = 0; x < width; x++) {
+      const i = (y * width + x) * 4;
+      if (px[i] <= 40 && px[i + 1] <= 40 && px[i + 2] <= 40) continue;
+      minX = Math.min(minX, x);
+      maxX = Math.max(maxX, x);
+    }
+  }
+  if (maxX < minX) return 0;
+  return (maxX - minX + 1) / width;
+}
+
+/// A spectrum sloping from `lowDb` at the bottom of the axis to `highDb` at the
+/// top -- bass-heavy one way round and treble-heavy the other.
+function sloped(lowDb: number, highDb: number): SpectrumFeed {
+  const analyzer = WasmAnalyzer.create(RATE, 2);
+  const centres = analyzer.bandCentres();
+  analyzer.free();
+  const last = Math.max(centres.length - 1, 1);
+  const levels = new Float32Array(centres.length);
+  for (let band = 0; band < centres.length; band++) {
+    levels[band] = lowDb + (highDb - lowDb) * (band / last);
+  }
+  return { levels, centres };
+}
+
+/// How many pixels of the image's outer border are *not* background.
+function borderTouches(target: HTMLCanvasElement): number {
+  const px = pixels(target);
+  const width = target.width;
+  const height = target.height;
+  const lit = (x: number, y: number) => {
+    const i = (y * width + x) * 4;
+    return !(px[i] <= 40 && px[i + 1] <= 40 && px[i + 2] <= 40);
+  };
+  let touched = 0;
+  for (let x = 0; x < width; x++) {
+    if (lit(x, 0)) touched += 1;
+    if (lit(x, height - 1)) touched += 1;
+  }
+  for (let y = 0; y < height; y++) {
+    if (lit(0, y)) touched += 1;
+    if (lit(width - 1, y)) touched += 1;
+  }
+  return touched;
+}
+
+/// What only the raymarched solid claims (Phase 3 M6) -- the same claims, in the
+/// same order, as the native half's.
+///
+/// One renderer again, reset between claims and resized where a claim is about
+/// the window's shape: this page's GPU device budget is the particle field's
+/// story and applies here twice over.
+async function checkTheRaymarchedSolid(): Promise<void> {
+  log("\nRaymarched solid -- its own claims:");
+  const signal = tone(220, 0.6);
+  const surface = extraCanvas(320, 320);
+  const renderer = await WasmRenderer.create(
+    surface,
+    surface.width,
+    surface.height,
+    "raymarched-solid",
+  );
+  const reset = () => renderer.setVisual("raymarched-solid");
+  const draw = (feed: SpectrumFeed, musical?: Float32Array) =>
+    renderer.draw_frame(signal, 2, RATE, FRAME_SECONDS, feed.levels, feed.centres, musical);
+
+  // Nothing measured is nothing drawn -- the bars' answer (M2 decision 10), and
+  // a different picture from a sphere resting on the display floor.
+  renderer.draw_frame(signal, 2, RATE, FRAME_SECONDS, NO_SPECTRUM, NO_SPECTRUM);
+  check(
+    "audio with nothing measured yet draws nothing at all",
+    measure(surface).lit === 0,
+    `${measure(surface).lit} lit pixels`,
+  );
+
+  // Decision 46: the silhouette is the display. Bass-heavy material has to be
+  // wider at the foot than at the crown, and treble-heavy material the other
+  // way round -- not "different", but different in the stated direction.
+  const bass = sloped(-6, -66);
+  const treble = sloped(-66, -6);
+  reset();
+  draw(bass);
+  const lowFoot = widthBetween(surface, 0.62, 0.88);
+  const lowCrown = widthBetween(surface, 0.12, 0.38);
+  reset();
+  draw(treble);
+  const highFoot = widthBetween(surface, 0.62, 0.88);
+  const highCrown = widthBetween(surface, 0.12, 0.38);
+  check(
+    "the silhouette is the spectrum, bass at the foot and treble at the crown",
+    lowFoot > lowCrown && highCrown > highFoot,
+    `bass-heavy: ${lowFoot.toFixed(2)} foot against ${lowCrown.toFixed(2)} crown; treble-heavy: ${highFoot.toFixed(2)} foot against ${highCrown.toFixed(2)} crown`,
+  );
+
+  // The frequencies are placed by *Hz* through the frame's own axis, so the
+  // same measurement on a different band count is the same solid. On this shell
+  // that is not hypothetical: the rows arrive at whatever width the analyser
+  // publishes.
+  const halved: SpectrumFeed = {
+    levels: bass.levels.filter((_, band) => band % 2 === 0),
+    centres: bass.centres.filter((_, band) => band % 2 === 0),
+  };
+  reset();
+  draw(halved);
+  const coarseFoot = widthBetween(surface, 0.62, 0.88);
+  check(
+    "half as many bands is the same shape, because a band is placed by its frequency",
+    Math.abs(coarseFoot - lowFoot) < 0.04,
+    `${coarseFoot.toFixed(2)} of the frame at ${halved.levels.length} bands, ${lowFoot.toFixed(2)} at ${bass.levels.length}`,
+  );
+
+  // The frame holds it at every window shape -- M1's fit, arrived at here
+  // through the angle a ball subtends, and checked in pixels at the shapes a
+  // real window takes.
+  const shapes: [number, number][] = [
+    [320, 320],
+    [800, 600],
+    [1280, 720],
+    [600, 900],
+    [400, 1200],
+  ];
+  let worst = { touched: 0, shape: shapes[0] };
+  for (const shape of shapes) {
+    surface.width = shape[0];
+    surface.height = shape[1];
+    renderer.resize(shape[0], shape[1]);
+    reset();
+    draw(bass);
+    const touched = borderTouches(surface);
+    if (touched >= worst.touched) worst = { touched, shape };
+  }
+  check(
+    "the solid stays inside the frame at every window shape",
+    worst.touched === 0,
+    `${worst.touched} border pixels touched across ${shapes.length} shapes, worst at ${worst.shape[0]}x${worst.shape[1]}`,
+  );
+  surface.width = 320;
+  surface.height = 320;
+  renderer.resize(320, 320);
+
+  // The beat is the size (decision 45's other half): a believed tempo swells
+  // the solid on the beat, and the same audio with no tempo does not.
+  const onTheBeat = new Float32Array([120, 1, 0, 0, 0, 0]);
+  reset();
+  draw(bass, onTheBeat);
+  const swollen = measure(surface).lit;
+  reset();
+  draw(bass);
+  const resting = measure(surface).lit;
+  check(
+    "a believed beat swells the solid",
+    swollen > resting,
+    `${swollen} lit pixels on the beat, ${resting} with no tempo`,
+  );
+
+  // And decision 45 exactly: halfway between two beats the swell is zero, so
+  // material *with* a tempo at that instant draws precisely what material with
+  // no tempo draws. Byte for byte.
+  reset();
+  draw(bass, new Float32Array([120, 1, 0.5, 0, 0, 0]));
+  const midway = pixels(surface);
+  reset();
+  draw(bass);
+  const untempoed = pixels(surface);
+  check(
+    "between two beats it is exactly what material with no tempo draws",
+    differingBytes(midway, untempoed) === 0,
+    `${differingBytes(midway, untempoed)} of ${untempoed.length} bytes differ`,
+  );
+
+  // Display gain is decibels here, as it is for every spectrum display in this
+  // crate (M2 decision 12).
+  const quiet = sloped(-48, -66);
+  reset();
+  draw(quiet);
+  const unity = measure(surface).lit;
+  renderer.setGain("4");
+  reset();
+  draw(quiet);
+  const magnified = measure(surface).lit;
+  renderer.setGain("1");
+  check(
+    "display gain pushes the surface out",
+    magnified > unity,
+    `${magnified} lit pixels at x4, ${unity} at unity`,
+  );
+
+  // The colour is the brightness of the moment, through the same `palette` the
+  // particle field uses -- so the two cannot disagree about 3kHz.
+  reset();
+  draw(bass, new Float32Array([0, 0, 0, 0, 0, 120]));
+  const dark = meanColour(surface);
+  reset();
+  draw(bass, new Float32Array([0, 0, 0, 0, 0, 6000]));
+  const bright = meanColour(surface);
+  check(
+    "the spectral centroid colours the solid",
+    dark[2] > dark[0] && bright[0] > dark[0],
+    `rgb(${dark[0].toFixed(0)}, ${dark[1].toFixed(0)}, ${dark[2].toFixed(0)}) at 120Hz against rgb(${bright[0].toFixed(0)}, ${bright[1].toFixed(0)}, ${bright[2].toFixed(0)}) at 6kHz`,
+  );
+}
+
+
 /// Whether this visual reads the musical figures at all.
 ///
 /// The native half carries the same list, for the same reason: this is a claim
@@ -1105,7 +1327,7 @@ async function checkTheParticleField(): Promise<void> {
 /// use for it and the registry does not carry it. What holds the two lists
 /// together is that both smokes report the figure.
 function readsMusical(id: string): boolean {
-  return id === "particle-field";
+  return id === "particle-field" || id === "raymarched-solid";
 }
 
 /// The contract every visual in the registry has to keep, checked on **two**
@@ -1512,6 +1734,7 @@ async function run(): Promise<void> {
   await checkTheSpectrogramWaterfall();
   await checkTheOscilloscopeTunnel();
   await checkTheParticleField();
+  await checkTheRaymarchedSolid();
   await checkDisplayGain();
 
   log(
