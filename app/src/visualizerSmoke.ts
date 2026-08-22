@@ -700,6 +700,21 @@ async function tunnelRenderer(
 
 /// Flies the tunnel for `seconds` on a 60Hz feed -- which is how this shell's
 /// animation callbacks feed it, and how the tube actually accumulates.
+/// Flies for `seconds` with a beat behind the music, holding the phase where a
+/// caller wants to look at it. M6's decision 48 is checked through this: the
+/// tunnel's own clock is untouched and the *eye* is what the beat moves.
+function flyToTheBeat(
+  renderer: WasmRenderer,
+  samples: Float32Array,
+  seconds: number,
+  musical: Float32Array,
+): void {
+  const frames = Math.max(1, Math.round(seconds / FRAME_SECONDS));
+  for (let n = 0; n < frames; n++) {
+    renderer.draw_frame(samples, 2, RATE, FRAME_SECONDS, NO_SPECTRUM, NO_SPECTRUM, musical);
+  }
+}
+
 function fly(renderer: WasmRenderer, samples: Float32Array, seconds: number): void {
   const frames = Math.max(1, Math.round(seconds / FRAME_SECONDS));
   for (let n = 0; n < frames; n++) {
@@ -896,6 +911,63 @@ async function checkTheOscilloscopeTunnel(): Promise<void> {
     eightLoud > unityLoud && downTheTunnel > 0,
     `${eightLoud} loud pixels at x8 against ${unityLoud} at unity, with ${downTheTunnel} of ${TUBE_WIDTH * TUBE_HEIGHT} pixels still down the tunnel`,
   );
+
+  // Decision 48, and M4's deferred decision 27 arriving: a believed beat moves
+  // the eye along the path it was already on. The tunnel's own ring clock is
+  // untouched -- speeding *that* would change what a ring is a picture of, and
+  // how many seconds the tube holds.
+  //
+  // One renderer for all of it, reset between runs by asking for the same
+  // visual again: twelve more GPU devices is what this page answers
+  // `E_OUTOFMEMORY` to, which is the particle field's story and was this
+  // section's too until it was written this way.
+  const onTheMove = (phase: number) => new Float32Array([120, 1, phase, 0, 0, 0]);
+  const beat = await tunnelRenderer(TUBE_WIDTH, TUBE_HEIGHT);
+  const resetTube = () => beat.renderer.setVisual("oscilloscope-tunnel");
+  // Halfway between two beats, which is where the surge is largest.
+  flyToTheBeat(beat.renderer, signal, 0.4, onTheMove(0.5));
+  const beaten = pixels(beat.surface);
+  resetTube();
+  fly(beat.renderer, signal, 0.4);
+  const steady = pixels(beat.surface);
+  check(
+    "a believed beat moves the flight",
+    differingBytes(beaten, steady) > 0,
+    `${differingBytes(beaten, steady)} of ${steady.length} bytes differ at 120 BPM`,
+  );
+
+  // And exactly on the beat it is *precisely* the flight with no tempo at all:
+  // the surge is zero there, which is what stops it drifting and what keeps
+  // every M4 check above asking about the tunnel it was written for.
+  resetTube();
+  flyToTheBeat(beat.renderer, signal, 0.4, onTheMove(0));
+  const arrived = pixels(beat.surface);
+  check(
+    "on the beat it is exactly the flight with no tempo",
+    differingBytes(arrived, steady) === 0,
+    `${differingBytes(arrived, steady)} of ${steady.length} bytes differ`,
+  );
+
+  // The surge may not push the eye anywhere the tube stops enclosing it -- the
+  // one way this change could break a claim M4 confirmed live.
+  let worstBeat = { holes: 0, shape: [320, 320] as [number, number], phase: 0 };
+  for (const shape of [[320, 320], [1280, 720], [600, 900]] as [number, number][]) {
+    for (const phase of [0, 0.25, 0.5, 0.75]) {
+      beat.surface.width = shape[0];
+      beat.surface.height = shape[1];
+      beat.renderer.resize(shape[0], shape[1]);
+      resetTube();
+      flyToTheBeat(beat.renderer, signal, 0.3, onTheMove(phase));
+      const holes = borderHoles(beat.surface);
+      if (holes >= worstBeat.holes) worstBeat = { holes, shape, phase };
+    }
+  }
+  check(
+    "the tube still encloses the frame wherever the beat pushes the eye",
+    worstBeat.holes === 0,
+    `${worstBeat.holes} background pixels in the border, worst at ${worstBeat.shape[0]}x${worstBeat.shape[1]} on phase ${worstBeat.phase.toFixed(2)}`,
+  );
+
 }
 
 /// The contract the *host* depends on, asked of every visual in the registry --
@@ -1327,7 +1399,11 @@ async function checkTheRaymarchedSolid(): Promise<void> {
 /// use for it and the registry does not carry it. What holds the two lists
 /// together is that both smokes report the figure.
 function readsMusical(id: string): boolean {
-  return id === "particle-field" || id === "raymarched-solid";
+  // The tunnel joined the two new visuals in M6: decision 48 gives its camera
+  // the beat, which M4 deferred to this milestone rather than guessing at.
+  return (
+    id === "particle-field" || id === "raymarched-solid" || id === "oscilloscope-tunnel"
+  );
 }
 
 /// The contract every visual in the registry has to keep, checked on **two**

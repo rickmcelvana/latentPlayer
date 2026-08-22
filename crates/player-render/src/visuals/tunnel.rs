@@ -31,7 +31,7 @@ use crate::attachments::{
     background, shader_source, target_is_srgb, targets, BACKGROUND, DEPTH_FORMAT, SAMPLE_COUNT,
 };
 use crate::camera;
-use crate::visual::{Gpu, Visual, VisualFrame};
+use crate::visual::{Gpu, Musical, Visual, VisualFrame};
 
 use super::history::RingHistory;
 
@@ -64,6 +64,26 @@ const WAVE_DEPTH: f32 = 0.55;
 /// than as loud music.
 const MIN_SCALE: f32 = 0.35;
 const MAX_SCALE: f32 = 2.5;
+
+/// How far the beat may push the eye along its own path, in rings.
+///
+/// M4 deferred a beat-reactive camera to M6 rather than building half a beat
+/// detector inside a visual (decision 27); this is it, and the shape of it is
+/// decision 48. The obvious implementation -- speeding the ring clock on the
+/// beat -- is wrong: the clock is what makes a ring a picture of a fixed slice
+/// of audio, so changing it would let the beat alter the *measurement* and
+/// quietly change how many seconds the tube holds.
+///
+/// So the beat moves the eye along the path it was already on, by at most this
+/// many rings, and by exactly zero at every beat instant. The eye surges after
+/// a beat and eases back into the next one; it cannot drift, because the offset
+/// is a function of the phase rather than an accumulation, and it cannot leave
+/// the tube backwards, because the offset is never negative.
+///
+/// Two rings is about a fifth of the flight speed at 120 BPM. Deliberately
+/// modest: M4's live look confirmed this visual causes no discomfort, and a
+/// camera that surges hard is exactly how that answer would change.
+const BEAT_SURGE_RINGS: f32 = 2.0;
 
 /// World units between rings. With [`RING_HZ`] this is also the speed: the eye
 /// covers `RING_HZ * RING_SPACING` units a second, which is 3.6 -- a little over
@@ -369,7 +389,7 @@ impl OscilloscopeTunnel {
     /// behind is dropped (decision 26). Taken modulo [`PATH_PERIOD`], which is
     /// exact because the path is periodic there -- and necessary, because the
     /// counter climbs for as long as the app is open.
-    fn eye_parameter(&self) -> f32 {
+    fn eye_parameter(&self, musical: &Musical) -> f32 {
         let filled = self.history.filled() as u64;
         let behind = self.created.saturating_sub(filled);
         // The fraction only counts once the tube is full length. Before that the
@@ -380,7 +400,7 @@ impl OscilloscopeTunnel {
         } else {
             0.0
         };
-        (behind % PATH_PERIOD as u64) as f32 + gliding
+        (behind % PATH_PERIOD as u64) as f32 + gliding + beat_surge(musical)
     }
 }
 
@@ -428,7 +448,7 @@ impl Visual for OscilloscopeTunnel {
                     self.width,
                     self.height,
                     self.srgb,
-                    self.eye_parameter(),
+                    self.eye_parameter(&frame.musical),
                     filled,
                     self.history.head(),
                     self.history.fraction(),
@@ -501,6 +521,27 @@ fn path_at(p: f32) -> [f32; 3] {
 
 fn subtract(a: [f32; 3], b: [f32; 3]) -> [f32; 3] {
     [a[0] - b[0], a[1] - b[1], a[2] - b[2]]
+}
+
+/// How far the beat has pushed the eye along the path, in rings.
+///
+/// Zero without a tempo and quiet when the tempo is not believed (decision 45),
+/// which is what keeps M4's sixty checks meaningful: none of them feed a tempo,
+/// so all of them are still asking about exactly the tunnel they were written
+/// for.
+///
+/// Zero at every beat instant and continuous where the phase wraps, so the
+/// flight cannot drift and cannot step. Never negative, which matters more than
+/// it looks: the eye sits level with the *oldest* ring, and pushing it backwards
+/// would put it outside the tube's own mouth -- where the enclosure claim
+/// (decision 24) is simply false.
+fn beat_surge(musical: &Musical) -> f32 {
+    if musical.bpm <= 0.0 {
+        return 0.0;
+    }
+    let phase = std::f32::consts::TAU * musical.beat_phase;
+    let surge = (1.0 - phase.cos()) * 0.5;
+    BEAT_SURGE_RINGS * musical.beat_confidence.clamp(0.0, 1.0) * surge
 }
 
 /// How many rings ahead of the eye the ring of age `age` sits.
@@ -624,6 +665,65 @@ fn encloses(aspect: f32) -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// Decision 48: the beat moves the eye, bounded, zero on the beat, and
+    /// gone entirely without a tempo -- which is what keeps M4's sixty checks
+    /// asking about the tunnel they were written for.
+    #[test]
+    fn the_beat_moves_the_eye_and_nothing_else() {
+        assert_eq!(beat_surge(&Musical::default()), 0.0);
+
+        let believed = Musical {
+            bpm: 120.0,
+            beat_confidence: 1.0,
+            beat_phase: 0.0,
+            ..Musical::default()
+        };
+        // Exactly zero on the beat, so the flight arrives where the ring clock
+        // says it should and cannot drift away from it.
+        assert!(beat_surge(&believed).abs() < 1e-6);
+        // Furthest along halfway between two beats, and never further than the
+        // bound.
+        let midway = beat_surge(&Musical {
+            beat_phase: 0.5,
+            ..believed
+        });
+        assert!((midway - BEAT_SURGE_RINGS).abs() < 1e-5);
+        for step in 0..=100 {
+            let phase = step as f32 / 100.0;
+            let surge = beat_surge(&Musical {
+                beat_phase: phase,
+                ..believed
+            });
+            assert!(
+                (0.0..=BEAT_SURGE_RINGS).contains(&surge),
+                "at phase {phase} the eye moved {surge} rings"
+            );
+        }
+        // Continuous where the phase wraps: a step at the bar line would be a
+        // teleport rather than a flight.
+        let nearly = beat_surge(&Musical {
+            beat_phase: 0.999,
+            ..believed
+        });
+        assert!(nearly < 0.001, "the wrap steps by {nearly} rings");
+
+        // A tempo nobody believes moves it as little as no tempo at all
+        // (decision 45).
+        let unsure = Musical {
+            beat_confidence: 0.0,
+            beat_phase: 0.5,
+            ..believed
+        };
+        assert_eq!(beat_surge(&unsure), 0.0);
+        // And half-believed is half as much, rather than on or off.
+        let half = beat_surge(&Musical {
+            beat_confidence: 0.5,
+            beat_phase: 0.5,
+            ..believed
+        });
+        assert!((half - BEAT_SURGE_RINGS / 2.0).abs() < 1e-5);
+    }
 
     /// Window shapes worth checking, from a small panel to an ultrawide
     /// fullscreen and a window taller than it is wide -- the same spread the

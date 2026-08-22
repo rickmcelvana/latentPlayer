@@ -770,6 +770,25 @@ fn tunnel_renderer(width: u32, height: u32) -> OffscreenRenderer {
 
 /// Flies the tunnel for `seconds` on a 60Hz feed of `samples` -- which is how
 /// the desktop shell feeds it, and how the tube actually accumulates.
+/// Flies for `seconds` with a beat behind the music, holding the phase where a
+/// caller wants to look at it. M6's decision 48 is checked through this: the
+/// tunnel's own clock is untouched and the *eye* is what the beat moves.
+fn fly_to_the_beat(
+    renderer: &mut OffscreenRenderer,
+    samples: &[f32],
+    seconds: f32,
+    musical: Musical,
+) -> Vec<u8> {
+    let frames = (seconds / FRAME_SECONDS).round().max(1.0) as usize;
+    let mut pixels = Vec::new();
+    for _ in 0..frames {
+        pixels = renderer
+            .draw_to_pixels(&frame(samples).with_musical(musical))
+            .expect("a frame of the tunnel with a beat");
+    }
+    pixels
+}
+
 fn fly(renderer: &mut OffscreenRenderer, samples: &[f32], seconds: f32) -> Vec<u8> {
     let frames = (seconds / FRAME_SECONDS).round().max(1.0) as usize;
     let mut pixels = Vec::new();
@@ -998,6 +1017,78 @@ fn check_the_oscilloscope_tunnel() {
         ),
     );
     gained.set_gain(GainSetting::Fixed(1.0));
+
+    // Decision 48, and M4's deferred decision 27 arriving: a believed beat
+    // moves the eye along the path it was already on. The tunnel's own ring
+    // clock is untouched -- speeding *that* would change what a ring is a
+    // picture of, and how many seconds the tube holds.
+    let on_the_move = Musical {
+        bpm: 120.0,
+        beat_confidence: 1.0,
+        // Halfway between two beats, which is where the surge is largest.
+        beat_phase: 0.5,
+        ..Musical::default()
+    };
+    let mut with_beat = tunnel_renderer(TUBE_WIDTH, TUBE_HEIGHT);
+    let beaten = fly_to_the_beat(&mut with_beat, &signal, 0.4, on_the_move);
+    let mut without_beat = tunnel_renderer(TUBE_WIDTH, TUBE_HEIGHT);
+    let steady = fly(&mut without_beat, &signal, 0.4);
+    let moved = beaten.iter().zip(&steady).filter(|(a, b)| a != b).count();
+    check(
+        "a believed beat moves the flight",
+        moved > 0,
+        format!("{moved} of {} bytes differ at 120 BPM", steady.len()),
+    );
+
+    // And exactly on the beat it is *precisely* the flight with no tempo at
+    // all: the surge is zero there, which is what stops it drifting and what
+    // keeps every M4 check above asking about the tunnel it was written for.
+    let mut on_the_beat = tunnel_renderer(TUBE_WIDTH, TUBE_HEIGHT);
+    let arrived = fly_to_the_beat(
+        &mut on_the_beat,
+        &signal,
+        0.4,
+        Musical {
+            beat_phase: 0.0,
+            ..on_the_move
+        },
+    );
+    let differ = arrived.iter().zip(&steady).filter(|(a, b)| a != b).count();
+    check(
+        "on the beat it is exactly the flight with no tempo",
+        differ == 0,
+        format!("{differ} of {} bytes differ", steady.len()),
+    );
+
+    // The surge may not push the eye anywhere the tube stops enclosing it --
+    // the one way this change could break a claim M4 confirmed live.
+    let mut worst = (0usize, (0u32, 0u32), 0.0f32);
+    for shape in [(320u32, 320u32), (1280, 720), (600, 900)] {
+        for phase in [0.0, 0.25, 0.5, 0.75] {
+            let mut renderer = tunnel_renderer(shape.0, shape.1);
+            let pixels = fly_to_the_beat(
+                &mut renderer,
+                &signal,
+                0.3,
+                Musical {
+                    beat_phase: phase,
+                    ..on_the_move
+                },
+            );
+            let holes = border_holes(&pixels, shape.0, shape.1);
+            if holes >= worst.0 {
+                worst = (holes, shape, phase);
+            }
+        }
+    }
+    check(
+        "the tube still encloses the frame wherever the beat pushes the eye",
+        worst.0 == 0,
+        format!(
+            "{} background pixels in the border, worst at {}x{} on phase {:.2}",
+            worst.0, worst.1 .0, worst.1 .1, worst.2
+        ),
+    );
 }
 
 /// The contract the *host* depends on, asked of every registered visual.
@@ -1014,11 +1105,14 @@ fn check_the_oscilloscope_tunnel() {
 /// two are held together by the figures they report.
 fn reads_musical(kind: VisualKind) -> bool {
     match kind {
-        VisualKind::Vectorscope
-        | VisualKind::SpectrumBars
-        | VisualKind::SpectrogramWaterfall
-        | VisualKind::OscilloscopeTunnel => false,
-        VisualKind::ParticleField | VisualKind::RaymarchedSolid => true,
+        VisualKind::Vectorscope | VisualKind::SpectrumBars | VisualKind::SpectrogramWaterfall => {
+            false
+        }
+        // The tunnel joined them in M6: decision 48 gives its camera the beat,
+        // which M4 deferred to this milestone rather than guessing at.
+        VisualKind::OscilloscopeTunnel
+        | VisualKind::ParticleField
+        | VisualKind::RaymarchedSolid => true,
         _ => false,
     }
 }
