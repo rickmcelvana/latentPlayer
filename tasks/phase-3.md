@@ -2901,3 +2901,138 @@ should not be started before hearing:
 - **Whether the waveform reads at the right amplitude** against real music,
   since `bass`/`mid`/`treb` are this build's own normalisation of the frame's own
   bands and presets are written against MilkDrop's.
+
+### M7a confirmed, 2026-08-22
+
+All three, on both shells: *"some of the ones that load look right. Waveform
+matches the real music on the ones that read it. Fullscreen looks good."*
+
+The transform is right in motion, which is the milestone's own claim and the one
+no still frame can make. The waveform reads at the right amplitude against real
+music, which is what licenses this build's `bass`/`mid`/`treb` normalisation
+standing in for MilkDrop's -- the shape matches where it matters, so decision 2
+holds without a visual computing DSP. And the 2048-pixel feedback cap survives a
+real fullscreen window, so it is now settled by observation rather than only by
+MilkDrop's precedent.
+
+*"Some of the ones that load"* is the honest figure and the expected one. A
+preset drawing without its own pixel shaders is a preset drawing approximately;
+`milk_smoke` reports the count and M7b's job is to raise it.
+
+## The corpus, which is bigger than the spike measured and changes M7b
+
+The live look produced a fact worth more than the confirmation. The user's
+collection is **the MilkDrop3 set plus collections gathered over the years -- a
+wide mix from every version of the format** -- and that is reported as the
+normal way to have one: almost nobody who did not build a collection themselves,
+years ago, assembles it file by file. They download collections. The format is
+also **still alive**: presets are still written, still discussed, still expanded
+on.
+
+Three things follow, and they are corrections to the plan rather than additions
+to it.
+
+**The spike's construct inventory is a sample, not a specification.** 244 shader
+lines and 15 distinct constructs came from *five* presets, all from one era and
+one source. Designing the translator's grammar against that number is designing
+against a sample of five, and the failure mode is discovering the sixteenth
+construct after the emitter's shape is settled. So **M7b begins with a survey of
+the real corpus** -- every shader body tokenized, every function, type,
+statement form, swizzle and declaration shape counted across hundreds of files --
+and the grammar is drawn from the measurement. The tokenizer is the translator's
+own first component, so this costs nothing that was not already going to be
+built; it just runs before the parser rather than after it.
+
+**An era is a compatibility axis the plan had not named.** A collection spanning
+every version means presets written against MilkDrop 1's fixed-function
+pipeline (`PSVERSION 0`), MilkDrop 2's shader model 2, its later 3, and whatever
+MilkDrop 3 added. M7a already handles the first. The survey should report the
+distribution, because it says where the value is: if a third of a large
+collection is `PSVERSION 0`, M7a is worth more than its five-preset corpus
+suggested, and if the shader presets cluster in one model, that is the one to be
+exact about first.
+
+**A translator meets unknown constructs as a matter of course, not as an
+exception.** Against thousands of strangers' files written across two decades,
+"this preset uses something this build does not know" is a normal Tuesday. It
+already has the right shape to land in -- `parse::Unsupported`, decision 56's
+list the app can show -- and the requirement is that an unknown construct names
+itself, falls back to M7a's fixed-function path for that preset, and takes
+neither the frame nor the app with it. The figure that matters, per decision
+50's index and the corpus check, is the count that draws, and that it never
+falls.
+
+## M7b -- a preset draws as itself: started 2026-08-22
+
+The largest single piece in the phase, and the one the M7 split exists for.
+Order of work: **survey, then grammar, then emitter**, which is a change from
+the plan's shape and is the corpus finding above cashed out.
+
+### The lexer and the type lattice, which the survey needed anyway
+
+`milk/hlsl/lex.rs` and `milk/hlsl/ty.rs`, 23 unit tests, 178 in `player-render`
+(was 155).
+
+The lexer never fails -- an unknown character is a token carrying the character,
+not an error -- for the same reason `parse::Unsupported` exists one layer up: a
+collection of thousands has no useful notion of "rejecting" a file, only of
+naming what it could not read. Two rules in it are the kind that are silent when
+wrong. A `.` is an accessor after anything that can *end* an expression and the
+start of a number anywhere else, which is what tells `texsize.zw` from
+`ret.y += .11` -- both in the corpus, and the wrong reading turns an ordinary
+file into an unsupported one. And comments are dropped while their newlines are
+kept, because a line number is how a report tells an author which line lost, and
+the corpus commonly carries a screen of commented-out shader.
+
+`ty.rs` is decision 54's actual content: HLSL's promotion (a scalar takes the
+other side's shape), its **truncation** (two vectors of different width reduce to
+the narrower, silently -- which is why `float d = texsize.zw` compiles), its base
+widening, and swizzle typing with the three ways a swizzle can be wrong. HLSL
+writes matrices rows-by-columns and WGSL columns-by-rows, so `float3x4` is
+`mat4x3<f32>`; square matrices hide that and the corpus's are square, so a test
+is the only thing between here and a silent transpose the day one is not.
+
+### The survey, and what it found before the grammar was written
+
+`cargo run --release -p player-render --example milk_survey -- <folder>`
+recurses a collection and reports rather than asserts: era distribution, every
+call, every free identifier, every type, operator, swizzle, directive and
+unknown character. It reproduces the spike's 244 shader lines exactly, which is
+the tooling agreeing with the previous measurement before being trusted past it.
+
+On its first run, against the same five presets the spike measured, it found
+**three constructs the spike's inventory of fifteen did not contain**:
+
+- **A shader body is not a statement list.** It is `sampler sampler_fw_clouds;`
+  then `shader_body { ... }`. `shader_body` is a macro from MilkDrop's own
+  prepended header -- which is where `ret` is declared too -- so the grammar's
+  top level is global declarations followed by a wrapper block, and the loose
+  `sampler` declaration is how a preset asks for a texture by name. That is
+  decision 56's texture packs arriving through the shader rather than through a
+  key, which the decision did not say.
+- **Presets define their own functions.** `float sigmoid(float t, float c){...}`
+  and a `vortex` beside it, in two of five files. Parameters, `return`, and a
+  call graph, not a statement list.
+- **A bool is a number.** `-(lum(ret)<sin(time*90))*ret*blur` multiplies a
+  comparison by a `float3`. HLSL promotes silently; WGSL has no implicit
+  conversion and no arithmetic on `bool` at all.
+
+Three misses in five files is the argument for the survey, made by the sample
+that prompted it. Against a collection spanning twenty years the sixteenth
+construct is not a risk, it is a certainty, and the cheap time to meet it is
+before the emitter has a shape.
+
+The other figures from that run, as the baseline a real corpus will replace:
+5/5 parsed, 10/10 shader blocks present, 2243 tokens, 20 distinct calls
+(`GetPixel` 25, `GetBlur2` 15, `tex2D` 15, then `lum`, `saturate`, `lerp`,
+`frac`, `mul`), 66 free identifiers, 18 operators, zero preprocessor directives
+and **zero characters the lexer had no rule for**.
+
+### What is next, and what it is waiting on
+
+The grammar is not fixed until the survey has run on a real collection. What
+does not depend on that and comes next is **decision 55's prelude** -- MilkDrop's
+own shader header, which is a fixed and knowable thing and has to be read out of
+MilkDrop 2's source under the same rule M7a's transform was: `shader_body`'s
+expansion, `ret`'s declaration, the `texsize`/`aspect` uniforms, `q1..q32`, and
+`GetPixel`/`GetBlur1..3`/`lum`.

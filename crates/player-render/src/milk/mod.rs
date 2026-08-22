@@ -48,6 +48,7 @@
 
 pub mod eel;
 pub mod frame;
+pub mod hlsl;
 pub mod parse;
 pub mod state;
 pub mod warp;

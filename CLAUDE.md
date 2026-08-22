@@ -589,7 +589,7 @@ library scanned off the audio and UI threads like `library.rs`, and a stranger's
 program is sandboxed by an evaluation budget so a bad preset ends its own frame
 rather than the app.
 
-**Phase 3 M7a is built and is awaiting a live look** (2026-08-22): a preset
+**Phase 3 M7a is done and user-confirmed on both shells** (2026-08-22): a preset
 draws. `VisualKind::MilkDrop` is the gallery's seventh entry and the first whose
 *scene is data*. Verified **112/112** `visual_smoke` (was 95/95), **123/123** at
 `/visualizer.html` (was 104/104), and **23/23** in the renamed `milk_smoke`;
@@ -647,13 +647,28 @@ test tone. An earlier gate read the alpha off the `Runtime` and failed against
 entirely correct behaviour -- the gate and the draw have to ask the same
 question, so it asks by building the waveform.
 
-**What is still to confirm is a person watching their own presets in motion.**
-That is the only test of whether the transform is right, since its failure mode
-is exactly the one no still frame shows. Two constants also want a live look:
-the feedback buffer's 2048-pixel cap (MilkDrop's own ceiling, but M6's
-resolution cap moved threefold from its cautious guess once a stopwatch was
-involved) and whether the waveform reads at the right amplitude against real
-music.
+**Confirmed live on both shells** (2026-08-22): *"some of the ones that load look
+right. Waveform matches the real music on the ones that read it. Fullscreen looks
+good."* That settles the three things no readback could reach -- the transform in
+motion, which is the milestone and whose failure mode no still frame shows; the
+waveform's amplitude against real music, which is what licenses this build's own
+`bass`/`mid`/`treb` normalisation; and the 2048-pixel feedback cap at a real
+fullscreen window. *"Some of the ones that load"* is the honest figure and the
+expected one: a preset drawing without its own shaders is a preset drawing
+approximately, which is exactly what M7b is for.
+
+That look also produced the fact that reshapes the rest of M7. The corpus is not
+five presets, it is **the MilkDrop3 collection plus collections gathered over the
+years -- a wide mix from every version of the format**, which the user reports is
+how essentially everyone who did not build a collection themselves comes to have
+one. The format is also still alive: presets are still being written and the
+collections are still growing. Two consequences. The construct inventory the
+spike measured (244 shader lines, 15 distinct constructs) is a sample of five and
+is not a specification, so **M7b begins by surveying the real corpus** rather than
+by designing against that sample. And a translator meeting a construct it does
+not know must *say so per preset and keep the app running*, because against
+thousands of strangers' files written across two decades that case is normal
+rather than exceptional.
 
 
 The certificate answer changed a finding into a fix: ureq defaults to
