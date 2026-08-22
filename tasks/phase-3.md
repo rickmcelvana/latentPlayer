@@ -2614,14 +2614,25 @@ one that plays none exactly.
     question rather than an engine one, and the procedural noise textures
     MilkDrop generates for itself are *in* scope because generating them is
     arithmetic.
-57. **No preset ships with the app until its provenance is established.**
-    Checked, not assumed: the MilkDrop3 repository declares no license -- no
-    SPDX field, no `LICENSE` file. The engine's licence cleanliness (decision 7:
-    Butterchurn-guided, never projectM) says nothing about `.milk` files. So
-    `milkdrop/` is local test data, kept out of the repository, and the app
-    ships pointing at a folder the user chooses. If a bundled starter set is
-    ever wanted it needs provenance per preset, which is a separate piece of
-    work with a separate answer.
+57. **No preset ever ships with the app** (user decision, 2026-08-22 -- "We
+    won't ship any presets. I added those for testing only"). Not "none until
+    provenance is established": none. The engine's licence cleanliness
+    (decision 7: Butterchurn-guided, never projectM) says nothing about `.milk`
+    files, and the check that prompted the question found the MilkDrop3
+    repository declaring no licence at all -- no SPDX field, no `LICENSE` file.
+    So `milkdrop/` is local test data, gitignored alongside the audio for the
+    same reason, and the corpus a check runs against is always whichever folder
+    it is handed.
+
+    Two consequences, both of which shape the milestone rather than following
+    it. **The library of decision 50 is not a convenience, it is the only way a
+    preset ever arrives** -- so "point at a folder" is a first-class flow with a
+    first-run state, not a setting buried behind a working default. And **the
+    gallery entry has to be honest when it is empty**: `VisualKind::MilkDrop`
+    with no presets loaded must say what it needs and where such files come
+    from, rather than appearing as a visual that draws nothing. Naming where to
+    find presets is editorial content, not a licence question, and costs
+    nothing.
 58. **The web checks are designed against M6's device budget from the start.**
     `/visualizer.html` gets one `WasmRenderer` per section, reset in place with
     `setVisual` between claims -- the rule WORKFLOW.md already records. M7 adds a

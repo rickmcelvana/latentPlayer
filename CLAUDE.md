@@ -540,10 +540,14 @@ against that from the start.
 and M7 is planned against what it reported** -- see `tasks/phase-3.md` for the
 findings and for the three-way split and ten decisions (49-58) they support.
 `cargo run -p player-render --example milk_spike` is the report, run against the
-user's own presets in `milkdrop/` (local test data, gitignored -- decision 57:
-the MilkDrop3 repository those came from declares no licence, so supporting the
-format is licence-clean but shipping a preset is a separate unanswered
-question).
+user's own presets in `milkdrop/` -- local test data, gitignored, because
+**decision 57 is that no preset ever ships with the app** (user decision
+2026-08-22; the licence check that raised the question found the MilkDrop3
+repository declaring none at all). Supporting the format is licence-clean;
+distributing someone's `.milk` file is simply not something this app does. Two
+consequences: the preset library is the *only* way a preset arrives, so
+"point at a folder" is a first-class flow rather than a setting, and the gallery
+entry has to say what it needs when no presets are loaded.
 
 The short version. **The format and the equations are nearly done and were the
 smaller risks**: `milk/parse.rs` reads 5/5 presets and `milk/eel.rs` compiles
