@@ -48,6 +48,16 @@ pub struct Renderer {
     /// Display gain, and the automatic mode's memory (`gain.rs`). Host state
     /// rather than a visual's: one control, one meaning, every visual.
     gain: gain::Gain,
+    /// The selected preset, beside the selected visual (decision 49).
+    ///
+    /// Host state rather than the MilkDrop visual's, for the same reason
+    /// [`GainSetting`] is: it has to survive a visual swap, so that switching
+    /// away to the bars and back returns to the preset that was showing rather
+    /// than to nothing. Shared rather than cloned because a preset is a parsed
+    /// program and a gallery flips through them.
+    preset: Option<std::sync::Arc<milk::Preset>>,
+    /// What is wrong with [`Self::preset`], settled once when it loads.
+    preset_faults: Vec<milk::state::Fault>,
     /// Set when the surface told us its texture no longer matches it, so
     /// the *next* frame reconfigures before drawing. Deferred rather than
     /// done on the spot because the surface texture is still in hand at
@@ -110,6 +120,8 @@ impl Renderer {
             visual,
             kind,
             gain: gain::Gain::new(GainSetting::DEFAULT),
+            preset: None,
+            preset_faults: Vec::new(),
             needs_reconfigure: false,
         })
     }
@@ -152,7 +164,69 @@ impl Renderer {
     /// would exist purely to be a second way of doing this.
     pub fn set_visual(&mut self, kind: VisualKind) {
         self.visual = kind.create(&self.gpu(), self.config.width, self.config.height);
+        let gpu = Gpu {
+            device: &self.device,
+            queue: &self.queue,
+            format: self.config.format,
+        };
+        self.visual.set_preset(&gpu, self.preset.clone());
         self.kind = kind;
+    }
+
+    /// Loads a MilkDrop preset from its `.milk` text, or clears the selection.
+    ///
+    /// Parsed here rather than by a shell, so that both shells get the same
+    /// answer about the same file -- including the same list of what the preset
+    /// needs and this build does not do, which is what a library UI shows
+    /// beside it (decision 56).
+    ///
+    /// Takes effect whether or not the MilkDrop visual is the one showing: the
+    /// selection is the host's, and applying it only when visible would make
+    /// the order a person clicks things in matter.
+    pub fn set_preset(&mut self, text: Option<&str>) -> Result<(), milk::ParseError> {
+        self.preset = match text {
+            Some(text) => Some(std::sync::Arc::new(milk::Preset::parse(text)?)),
+            None => None,
+        };
+        // Compiled once here so the report exists whether or not the MilkDrop
+        // visual is the one showing -- which is what a library listing needs,
+        // since a person browsing a folder is looking at presets they have not
+        // selected. It costs one extra run of the preset's init block, which
+        // the spike measured at 2ms on the heaviest preset in the corpus and
+        // nothing at all on an ordinary one.
+        self.preset_faults = match &self.preset {
+            Some(preset) => milk::Runtime::new(preset).faults().to_vec(),
+            None => Vec::new(),
+        };
+        let gpu = Gpu {
+            device: &self.device,
+            queue: &self.queue,
+            format: self.config.format,
+        };
+        self.visual.set_preset(&gpu, self.preset.clone());
+        Ok(())
+    }
+
+    /// The preset in effect, for a shell that wants to show what it needs.
+    pub fn preset(&self) -> Option<&milk::Preset> {
+        self.preset.as_deref()
+    }
+
+    /// What the loaded preset asks for that this build does not do, and what
+    /// went wrong compiling it -- one line each, ready to show beside its name
+    /// (decision 56).
+    pub fn preset_report(&self) -> Vec<String> {
+        let mut report = Vec::new();
+        if let Some(preset) = self.preset.as_deref() {
+            report.extend(
+                preset
+                    .unsupported
+                    .iter()
+                    .map(|u| format!("{}: {}", u.what, u.why)),
+            );
+        }
+        report.extend(self.preset_faults.iter().map(|f| f.to_string()));
+        report
     }
 
     /// Reconfigures the surface for a new window/canvas size. Callers must
@@ -262,6 +336,7 @@ pub struct OffscreenRenderer {
     queue: wgpu::Queue,
     visual: BoxedVisual,
     gain: gain::Gain,
+    preset: Option<std::sync::Arc<milk::Preset>>,
     texture: wgpu::Texture,
     width: u32,
     height: u32,
@@ -313,6 +388,7 @@ impl OffscreenRenderer {
             queue,
             visual,
             gain: gain::Gain::new(GainSetting::DEFAULT),
+            preset: None,
             texture,
             width,
             height,
@@ -323,15 +399,29 @@ impl OffscreenRenderer {
     /// way the on-screen one does, so the check can exercise a *switch* rather
     /// than only a freshly built renderer per kind (decision 6).
     pub fn set_visual(&mut self, kind: VisualKind) {
-        self.visual = kind.create(
-            &Gpu {
-                device: &self.device,
-                queue: &self.queue,
-                format: Self::FORMAT,
-            },
-            self.width,
-            self.height,
-        );
+        let gpu = Gpu {
+            device: &self.device,
+            queue: &self.queue,
+            format: Self::FORMAT,
+        };
+        self.visual = kind.create(&gpu, self.width, self.height);
+        self.visual.set_preset(&gpu, self.preset.clone());
+    }
+
+    /// Loads a preset, exactly as the on-screen renderer does -- so the checks
+    /// exercise the path the app draws through rather than a shortcut.
+    pub fn set_preset(&mut self, text: Option<&str>) -> Result<(), milk::ParseError> {
+        self.preset = match text {
+            Some(text) => Some(std::sync::Arc::new(milk::Preset::parse(text)?)),
+            None => None,
+        };
+        let gpu = Gpu {
+            device: &self.device,
+            queue: &self.queue,
+            format: Self::FORMAT,
+        };
+        self.visual.set_preset(&gpu, self.preset.clone());
+        Ok(())
     }
 
     /// Sets the display gain, as the on-screen renderer does -- so the checks

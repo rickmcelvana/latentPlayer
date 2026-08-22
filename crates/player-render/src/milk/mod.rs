@@ -16,6 +16,12 @@
 pub mod eel;
 pub mod frame;
 pub mod parse;
+pub mod state;
+pub mod warp;
+pub mod wave;
 
-pub use frame::{MilkFrame, WarpParams, WarpVertex};
+pub use frame::{CompositeSettings, MilkFrame, WarpVertex, DEFAULT_MESH};
 pub use parse::{CustomShape, CustomWave, ParseError, Preset, Unsupported};
+pub use state::{Fault, FrameState, Inputs, Motion, Runtime};
+pub use warp::{Aspect, Grid, GridPoint, Warp};
+pub use wave::{Wave, WaveInput};

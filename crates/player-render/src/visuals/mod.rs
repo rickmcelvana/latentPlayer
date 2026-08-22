@@ -9,6 +9,7 @@
 
 mod bars;
 mod history;
+mod milkdrop;
 mod palette;
 mod particles;
 mod scale;
@@ -18,6 +19,7 @@ mod vectorscope;
 mod waterfall;
 
 pub use bars::SpectrumBars;
+pub use milkdrop::MilkDropVisual;
 pub use particles::ParticleField;
 pub use solid::RaymarchedSolid;
 pub use tunnel::{OscilloscopeTunnel, TUNNEL_SECONDS};

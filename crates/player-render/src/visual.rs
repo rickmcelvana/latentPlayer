@@ -252,6 +252,22 @@ pub trait Visual {
         target: &wgpu::TextureView,
         frame: &VisualFrame,
     ) -> wgpu::CommandBuffer;
+
+    /// Hands this visual the selected preset, if it is the kind that draws
+    /// presets. Ignored by default, which is every visual but one.
+    ///
+    /// **The one place M7a widens M1's seam, and deliberately once** (decision
+    /// 49). Six milestones running, a visual's whole selection was its
+    /// [`VisualKind`] -- but a MilkDrop preset cannot be an enum variant, and
+    /// a build that ships with none at all (decision 57) cannot enumerate them
+    /// either. So the host carries a *second* piece of selection state beside
+    /// the kind, and this is how it reaches the scene.
+    ///
+    /// A default body rather than a second trait, because the alternative is
+    /// downcasting: the renderer holds a [`BoxedVisual`] and asking it "are you
+    /// the MilkDrop one" would be exactly the shell-side type knowledge the
+    /// seam exists to prevent.
+    fn set_preset(&mut self, _gpu: &Gpu, _preset: Option<std::sync::Arc<crate::milk::Preset>>) {}
 }
 
 /// The boxed form the renderer holds.
@@ -300,6 +316,10 @@ pub enum VisualKind {
     /// analyser's own bands as the shape of a raymarched surface -- the
     /// spectrum read around a silhouette rather than along an axis.
     RaymarchedSolid,
+    /// PLAN.md section 4's compatibility promise (Phase 3 M7): a MilkDrop
+    /// `.milk` preset, interpreted. The one entry whose selection carries a
+    /// second piece of state -- see [`Visual::set_preset`].
+    MilkDrop,
 }
 
 impl VisualKind {
@@ -311,6 +331,7 @@ impl VisualKind {
         VisualKind::OscilloscopeTunnel,
         VisualKind::ParticleField,
         VisualKind::RaymarchedSolid,
+        VisualKind::MilkDrop,
     ];
 
     /// What the gallery opens at for anyone who has never chosen.
@@ -324,6 +345,7 @@ impl VisualKind {
             VisualKind::OscilloscopeTunnel => "oscilloscope-tunnel",
             VisualKind::ParticleField => "particle-field",
             VisualKind::RaymarchedSolid => "raymarched-solid",
+            VisualKind::MilkDrop => "milkdrop",
         }
     }
 
@@ -335,6 +357,7 @@ impl VisualKind {
             VisualKind::OscilloscopeTunnel => "Oscilloscope tunnel",
             VisualKind::ParticleField => "Particle field",
             VisualKind::RaymarchedSolid => "Raymarched solid",
+            VisualKind::MilkDrop => "MilkDrop",
         }
     }
 
@@ -357,6 +380,13 @@ impl VisualKind {
             }
             VisualKind::RaymarchedSolid => {
                 "The spectrum as a surface: bass at the foot, treble at the crown, breathing on the beat."
+            }
+            // Says what it needs, because no preset ships with the app
+            // (decision 57) -- so this entry is empty until someone points it
+            // at a folder, and a gallery that did not say so would read as
+            // broken.
+            VisualKind::MilkDrop => {
+                "A MilkDrop .milk preset, interpreted. Load your own presets -- none ship with the app."
             }
         }
     }
@@ -389,6 +419,9 @@ impl VisualKind {
             }
             VisualKind::RaymarchedSolid => {
                 Box::new(crate::visuals::RaymarchedSolid::new(gpu, width, height))
+            }
+            VisualKind::MilkDrop => {
+                Box::new(crate::visuals::MilkDropVisual::new(gpu, width, height))
             }
         }
     }
@@ -431,7 +464,7 @@ mod tests {
 
     #[test]
     fn an_unknown_id_is_not_quietly_substituted() {
-        assert_eq!(VisualKind::from_id("milkdrop"), None);
+        assert_eq!(VisualKind::from_id("butterchurn"), None);
         assert_eq!(VisualKind::from_id(""), None);
     }
 
