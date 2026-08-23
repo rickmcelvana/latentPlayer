@@ -671,6 +671,82 @@ thousands of strangers' files written across two decades that case is normal
 rather than exceptional.
 
 
+**Phase 3 M7b is built and awaiting a live look** (2026-08-23): a preset draws
+*as itself*. **118/118** `visual_smoke` (was 112/112), **129/129** at
+`/visualizer.html` in a real browser (was 123/123), 266 unit tests in
+`player-render` (was 155 at M7a).
+
+The milestone was designed against a **measurement rather than a sample**. The
+user's own collection -- 11,217 presets, ~6,100 distinct shader programs -- is
+in `milkdrop/collection` (gitignored, decision 57), and
+`cargo run --release -p player-render --example milk_survey -- <folder>` is what
+reports on it. Every figure below comes from that run, and the survey is why
+they are figures at all: the M7 spike's inventory of "15 distinct constructs"
+was five files from one era, and six of the fifteen constructs the grammar
+actually needed were absent from it.
+
+**The corpus reads: 11,214 of 11,217 presets parse whole.** The three that do
+not are genuine syntax errors MilkDrop rejects too. Built in the order the
+corpus dictated rather than the usual one -- statements first, preprocessor
+last (it was ranked at 3.1% and turned out to be 523 of the final 528
+refusals). `milk/hlsl/` is lexer, type lattice, environment, preprocessor,
+grammar and emitter; the environment (`env.rs`, `prelude.wgsl`) is MilkDrop's
+`include.fx` written down, which turned out to be **macros over fourteen
+constant registers** rather than the uniforms the plan assumed.
+
+**The corpus translates: 99.5% of shader bodies, and 98.2% of presets draw
+through their own shaders.** The first run compiled *nothing* -- every shader
+failed on `invalid left-hand side of assignment`, because the emitter
+parenthesised the base of every accessor. One defensive habit, right for
+reading an expression and fatal for writing to one, taking the whole corpus
+down at once. Nine more followed, and what they share is the point: **each is
+invisible at five presets and obvious at eleven thousand.** WGSL forbids
+assigning to a swizzle at all; parameters are immutable there and mutable
+copies in HLSL (presets assign to `uv` constantly); HLSL's uniforms are
+writable globals (`q25 = 1;` is in 504 bodies); `float2x2(_qb)` is a
+constructor rather than a conversion; a bool is a number in three separate
+places.
+
+**The matrix mapping is the one the folklore gets backwards.** Both languages
+put the first constructor group at index 0 -- HLSL's first *row*, WGSL's first
+*column* -- so taking HLSL's rows to be WGSL's columns keeps the two numbers in
+order and makes construction and indexing agree. The entire price is that
+`mul(a, b)` emits `b * a`.
+
+**And it runs.** `milk/shaders.rs` is the environment on the GPU and
+`milk/noise.rs` is MilkDrop's procedural noise, read from `AddNoiseTex` rather
+than invented. The blur chain is not decoration -- `GetBlur1` is the corpus's
+second-commonest call after `tex2D`, and a build that bound black there would
+have passed every other check. A blur texture holds a *remapped* image, so the
+chain's `fscale`/`fbias` and the prelude's `GetBlur` constants are one mapping
+and its inverse. MilkDrop's blur offsets are deliberately **not** copied: they
+are the D3D9 half-texel rule again, recognisable only because M7a had already
+met it in the warp transform.
+
+Four divergences, each written down: `textureSampleLevel` rather than
+`textureSample` (a quarter of the corpus branches, and WGSL forbids implicit
+derivatives under non-uniform control flow); every preset name prefixed `p_`;
+**a guard counter on every loop**, because a runaway loop in a fragment shader
+is a hung display rather than a slow frame; and a texture this build does not
+load drawing a placeholder while being *named* through `Visual::preset_report`.
+
+Compilation is **per pass**, because 605 presets give one pass a shader and
+leave the other fixed-function. A warp shader owns its own fading (so `fDecay`
+is not applied twice) and a composite shader replaces the fixed-function
+composite (so the video echo and gamma are not applied over it).
+
+The six new pixel claims are the chain end to end, and the two shells agree:
+a composite shader paints r=255 on both, a warp shader owns the feedback at
+g=255 on both, `q1` from `per_frame` arrives on both, the blur spreads
+32079/2328 against 31708/2279, and the 3D noise volume reads **mean 198, spread
+30.4 on both** -- identical rather than close, which is the deterministic
+generator proving itself byte for byte across two GPUs.
+
+`cargo run --release -p player-render --example milk_wgsl -- <preset> [warp|comp]`
+prints what one preset's shader became and runs naga over it; it is what found
+most of those ten bugs. **What is still to confirm is a person watching their
+own presets** -- the same thing M7a needed, for the same reason.
+
 The certificate answer changed a finding into a fix: ureq defaults to
 webpki-roots, a bundle compiled into the binary, under which installing a
 self-hosted server's CA in the OS store does nothing -- so the obvious advice
