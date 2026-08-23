@@ -3303,6 +3303,7 @@ name = "player-render"
 version = "0.1.0"
 dependencies = [
  "bytemuck",
+ "naga",
  "player-core",
  "pollster 0.4.0",
  "thiserror 1.0.69",

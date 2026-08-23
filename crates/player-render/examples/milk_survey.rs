@@ -37,7 +37,7 @@ use std::collections::{BTreeMap, BTreeSet, HashSet};
 use std::fs;
 use std::path::{Path, PathBuf};
 
-use player_render::milk::hlsl::{lex, parse as parse_hlsl, Tok, Ty};
+use player_render::milk::hlsl::{emit, lex, parse as parse_hlsl, Pass, Tok, Ty};
 use player_render::milk::Preset;
 
 /// Statement and declaration keywords, which are `Tok::Ident` to the lexer.
@@ -113,11 +113,28 @@ struct Survey {
     refusal_detail: Tally,
     presets_fully_read: usize,
     distinct_parsed: usize,
+    /// Shader bodies whose WGSL naga accepts. Decision 54 own standard:
+    /// the emitter is checked by *compiling* what it wrote.
+    shaders_emitted: usize,
+    shaders_compiled: usize,
+    emit_refused: Tally,
+    emit_detail: Tally,
+    emit_example: BTreeMap<String, String>,
+    invalid_wgsl: Tally,
+    invalid_example: BTreeMap<String, String>,
+    presets_fully_compiled: usize,
+    textures_wanted: Tally,
     /// Distinct shader programs, by their text. A large collection is largely
     /// variants of a smaller number of presets, so this is the honest
     /// denominator for "how much of the corpus does the translator reach".
     distinct_shaders: HashSet<String>,
     presets_needing_texture: usize,
+}
+
+/// One line of a message, trimmed, so a tally groups by the actual cause.
+fn short(s: &str) -> String {
+    let line = s.lines().next().unwrap_or("").trim();
+    line.chars().take(110).collect()
 }
 
 fn collect(dir: &Path, out: &mut Vec<PathBuf>) {
@@ -141,16 +158,44 @@ fn collect(dir: &Path, out: &mut Vec<PathBuf>) {
 }
 
 impl Survey {
-    fn shader(&mut self, src: &str, features: &mut BTreeSet<&'static str>, path: &Path) -> bool {
+    fn shader(
+        &mut self,
+        src: &str,
+        pass: Pass,
+        features: &mut BTreeSet<&'static str>,
+        path: &Path,
+    ) -> (bool, bool) {
         if src.trim().is_empty() {
-            return true;
+            return (true, true);
         }
         let fresh = self.distinct_shaders.insert(src.to_owned());
+        let mut compiled = false;
         let read = match parse_hlsl(src) {
-            Ok(_) => {
+            Ok(shader) => {
                 self.shaders_parsed += 1;
                 if fresh {
                     self.distinct_parsed += 1;
+                }
+                match emit(&shader, pass) {
+                    Ok(out) => {
+                        self.shaders_emitted += 1;
+                        for name in &out.wants_textures {
+                            self.textures_wanted.add(name);
+                        }
+                        // Decision 54: the emitter output is checked by
+                        // compiling it. naga is the same front end wgpu uses,
+                        // so this is the acceptance a device would apply --
+                        // without needing a device per shader.
+                        compiled = self.validate(&out.source, path);
+                    }
+                    Err(e) => {
+                        self.emit_refused.add(e.construct);
+                        let why = format!("{}: {}", e.construct, short(&e.detail));
+                        self.emit_detail.add(&why);
+                        self.emit_example
+                            .entry(why)
+                            .or_insert_with(|| format!("{}:{}", path.display(), e.line));
+                    }
                 }
                 true
             }
@@ -274,7 +319,40 @@ impl Survey {
                 }
             }
         }
-        read
+        (read, compiled)
+    }
+
+    /// True when naga accepts the emitted module.
+    fn validate(&mut self, source: &str, path: &Path) -> bool {
+        let module = match naga::front::wgsl::parse_str(source) {
+            Ok(m) => m,
+            Err(e) => {
+                let why = short(e.message());
+                self.invalid_wgsl.add(&why);
+                self.invalid_example
+                    .entry(why)
+                    .or_insert_with(|| path.display().to_string());
+                return false;
+            }
+        };
+        let mut v = naga::valid::Validator::new(
+            naga::valid::ValidationFlags::all(),
+            naga::valid::Capabilities::empty(),
+        );
+        match v.validate(&module) {
+            Ok(_) => {
+                self.shaders_compiled += 1;
+                true
+            }
+            Err(e) => {
+                let why = short(&format!("{}", e.into_inner()));
+                self.invalid_wgsl.add(&why);
+                self.invalid_example
+                    .entry(why)
+                    .or_insert_with(|| path.display().to_string());
+                false
+            }
+        }
     }
 
     fn preset(&mut self, path: &Path) {
@@ -322,10 +400,13 @@ impl Survey {
         self.with_neither += usize::from(!has_warp && !has_comp);
 
         let mut features: BTreeSet<&'static str> = BTreeSet::new();
-        let warp_ok = self.shader(&preset.warp, &mut features, path);
-        let comp_ok = self.shader(&preset.comp, &mut features, path);
+        let (warp_ok, warp_built) = self.shader(&preset.warp, Pass::Warp, &mut features, path);
+        let (comp_ok, comp_built) = self.shader(&preset.comp, Pass::Comp, &mut features, path);
         if warp_ok && comp_ok {
             self.presets_fully_read += 1;
+        }
+        if warp_built && comp_built {
+            self.presets_fully_compiled += 1;
         }
         if !preset.unsupported.is_empty() {
             self.presets_needing_texture += 1;
@@ -406,6 +487,52 @@ impl Survey {
         for (construct, count) in self.shaders_refused.ranked() {
             println!("  {count:>7}  {construct}");
         }
+
+        println!();
+        println!("=== the emitter ===");
+        println!(
+            "  {} of {} read bodies translated ({:.1}%)",
+            self.shaders_emitted,
+            self.shaders_parsed,
+            100.0 * self.shaders_emitted as f64 / self.shaders_parsed.max(1) as f64
+        );
+        println!(
+            "  {} of those compile as WGSL ({:.1}%)",
+            self.shaders_compiled,
+            100.0 * self.shaders_compiled as f64 / self.shaders_emitted.max(1) as f64
+        );
+        println!(
+            "  {} of {} presets draw through their own shaders ({:.1}%)",
+            self.presets_fully_compiled,
+            self.files,
+            100.0 * self.presets_fully_compiled as f64 / n as f64
+        );
+        println!();
+        println!(
+            "  why the emitter refused -- {} distinct",
+            self.emit_detail.0.len()
+        );
+        for (why, count) in self.emit_detail.ranked().iter().take(15) {
+            println!("  {count:>7}  {why}");
+            println!(
+                "           {}",
+                self.emit_example.get(*why).map_or("", |s| s.as_str())
+            );
+        }
+        println!();
+        println!(
+            "  why the WGSL did not compile -- {} distinct",
+            self.invalid_wgsl.0.len()
+        );
+        for (why, count) in self.invalid_wgsl.ranked().iter().take(15) {
+            println!("  {count:>7}  {why}");
+            println!(
+                "           {}",
+                self.invalid_example.get(*why).map_or("", |s| s.as_str())
+            );
+        }
+        self.textures_wanted
+            .report("Textures asked for that this build does not load", 20);
 
         println!(
             "

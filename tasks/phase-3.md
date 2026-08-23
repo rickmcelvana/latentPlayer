@@ -3245,9 +3245,121 @@ trailing comma before a closing brace, a `sampler` declaration missing its
 semicolon, and an unmatched parenthesis. Nothing is gained by accepting them,
 and accepting them would mean inventing tolerance HLSL does not have.
 
+### The emitter: 98.2% of presets draw through their own shaders
+
+`milk/hlsl/emit.rs` and `milk/hlsl/prelude.wgsl`. 254 unit tests in
+`player-render`, up from 227.
+
+Decision 54's standard is that the output is checked by **compiling it**, and
+that is what the corpus run now does -- through `naga`, wgpu's own front end,
+already in the lock file at the version wgpu uses, so the acceptance is the
+device's without needing a device per shader.
+
+| | bodies translated | of those, compile | presets drawing their own shaders |
+| --- | ---: | ---: | ---: |
+| first run | 91.3% | 0.0% | 45.9% |
+| places are not parenthesised | 91.3% | 64.7% | 47.5% |
+| mutable parameters, swizzle assignment | 89.7% | 75.1% | 56.4% |
+| decompose on the *emitted* place | 88.6% | 95.9% | 77.6% |
+| matrices, constants, registers, `lum` | 96.1% | 93.8% | 84.8% |
+| arrays, mutable registers, comma | 99.5% | 94.0% | 89.9% |
+| compose swizzles, promote bools | 99.5% | 96.3% | 93.4% |
+| fit `mul`, matrix-scalar operators | 99.5% | 96.5% | 93.7% |
+| a matrix from a vector | 99.5% | 98.4% | 96.7% |
+| promote bools everywhere else | **99.5%** | **99.4%** | **98.2%** |
+
+### The first run compiled nothing, and one habit was the reason
+
+Every shader failed on `invalid left-hand side of assignment`, because the
+emitter parenthesised the base of every accessor -- `(p_ret).x = 1;`. That is a
+defensive habit which is right for reading an expression and fatal for writing
+to one, and it took the whole corpus down at once. `Value` now carries whether
+it is a *place*, and parentheses go only where an accessor could not follow.
+
+That was the first of a set, and what they have in common is worth more than
+any one of them: **every single one is invisible at small scale and obvious at
+eleven thousand.** None of them would have been found by writing more unit
+tests against the five-preset sample.
+
+- **WGSL has no assignment to a swizzle at all** -- not `v.xy = a`, which every
+  other shading language accepts. Decomposed into a bound temporary and one
+  assignment per lane; binding first matters, because `v.xy = v.yx` is a swap
+  rather than a duplication.
+- **Function parameters are immutable in WGSL and mutable copies in HLSL.**
+  Presets assign to `uv` constantly -- `uv = 0.05 + 0.95*uv;` is how one insets
+  the picture -- so the entry point and every preset function copy their
+  parameters into `var`s.
+- **The swizzled target usually is not one in the tree.** `uv` is a plain name
+  that resolves to `in_uv.xy`, so the decomposition had to test the *emitted*
+  place rather than the AST. Same for `uv.x`, which must compose to `in_uv.x`
+  rather than chain to `in_uv.xy.x`.
+- **HLSL's uniforms are writable globals.** `q25 = 1;` is ordinary, 504 shader
+  bodies do it, and WGSL's uniform buffer is read-only. Registers a shader
+  writes get a mutable mirror -- and the decision has to be global, since a
+  register written anywhere must be read from the mirror everywhere or the
+  write is lost.
+- **Indexing an array of vectors is not indexing a vector.** `samples[i].w` was
+  reported as a bad swizzle because `Ty` has no array-ness, so a declared name
+  now carries it.
+- **`float2x2(_qb)` is a constructor, not a conversion.** A `float4` and a
+  `float2x2` hold four floats each, so a components-match test called it a free
+  conversion, typed a vector as a matrix, and left the code untouched -- which
+  compiles right up to the next multiply.
+- **A bool is a number in three separate places**, and each had to be found on
+  its own: multiplying two comparisons (`(a>=b)*(c<d)` as a branch-free and),
+  negating one (`-(a<b)`), and handing one to `pow` or `max`.
+- **`all()` answers a bool**, and typed as a number it emitted
+  `all(x) != 0.0` -- a comparison between a bool and a float.
+- **`lum` truncates**, because it is a macro over `dot` and `dot` truncates.
+  A fixed `float3` signature refuses `lum(roam_sin.xy)`, which is legal.
+- **A matrix and a scalar have no `+` in WGSL**, only `*` and `/`. HLSL
+  broadcasts every operator, so `m - 0.01` is ordinary there.
+
+### The matrix mapping, which the folklore gets backwards
+
+The received wisdom is that HLSL's `float{R}x{C}` is GLSL's `mat{C}x{R}`, and
+following it here was wrong. Both languages lay a scalar constructor out so
+that the first group is index 0: HLSL's `float2x2(a,b,c,d)` has `m[0] == (a,b)`
+as its first *row*, WGSL's `mat2x2(a,b,c,d)` has `m[0] == (a,b)` as its first
+*column*. So taking HLSL's rows to be WGSL's columns makes construction and
+indexing agree exactly, and the two numbers stay in the same order.
+
+What it costs is one flip: `mul(a, b)` emits `b * a`, in every combination of
+vector and matrix. That is the whole price, and it is in one function.
+
+### Four divergences from what MilkDrop compiles, each deliberate
+
+- **`tex2D` becomes `textureSampleLevel`, never `textureSample`.** WGSL forbids
+  implicit-derivative sampling under non-uniform control flow, and a quarter of
+  the corpus branches -- a `tex2D` inside an `if` is entirely ordinary here.
+  The feedback and blur targets have one mip level, so an explicit LOD of zero
+  reads what `tex2D` read anyway. `tex2Dlod` and `tex2Dbias` drop their level
+  for the same reason.
+- **Every name a preset writes is prefixed `p_`.** A preset may declare a
+  function called `lum` or a variable called `loop`. Prefixing also preserves
+  HLSL's own rule that the environment's *macros* beat a preset's function of
+  the same name.
+- **Every loop carries a guard counter**, capped at 4096. A runaway loop in a
+  fragment shader is not a slow frame, it is a hung display. Decision 51's
+  reasoning, one layer out, for the cost of an integer compare.
+- **A texture this build does not load draws a placeholder** and is named,
+  rather than refusing the shader. 19.6% of the corpus asks for a texture pack
+  (decision 56), and drawing approximately while saying what is missing beats
+  drawing nothing.
+
+### What the last 1.8% is
+
+A long tail, none of it over sixteen shader bodies: `modf` and `sincos` (which
+return through out-parameters), `get_fft` (a MilkDrop 3 extension), assignments
+used as values, and a handful of presets whose own arithmetic does not
+type-check under any reading. All of them named, with a line number, and
+falling back per pass rather than per preset.
+
 ### What is next
 
-The emitter: WGSL out of the tree, with decision 55's prelude behind it and the
-types from `ty.rs` deciding every truncation and promotion. Decision 54 says its
-output is checked by **compiling it**, which wgpu does for free -- so the
-corpus figure to beat next is not "parses" but "compiles".
+Wiring it in: the translated shaders have to *run*, which means `milk/frame.rs`
+building the uniform block and the bind group this prelude declares, the blur
+chain that `GetBlur1..3` reads, and MilkDrop's procedural noise textures --
+`tex3D` is 20.7% of the corpus and every one of those reads a volume this build
+does not yet generate. Then the pixel checks both shells owe the gallery, and a
+person watching their own presets.

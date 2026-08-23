@@ -154,6 +154,32 @@ pub const ALIASES: &[Alias] = &[
     // resolves them like everything else.
     f4("rand_frame", "rand_frame"),
     f4("rand_preset", "rand_preset"),
+    // The noise textures' sizes, in the same `(w, h, 1/w, 1/h)` shape as
+    // `texsize`. Declared directly rather than aliased, and used more than
+    // their obscurity suggests -- `texsize_noisevol_hq` appears 3,709 times in
+    // the corpus, because sampling a noise volume by pixel needs its size.
+    f4("texsize_noise_lq", "texsize_noise_lq"),
+    f4("texsize_noise_lq_lite", "texsize_noise_lq_lite"),
+    f4("texsize_noise_mq", "texsize_noise_mq"),
+    f4("texsize_noise_hq", "texsize_noise_hq"),
+    f4("texsize_noisevol_lq", "texsize_noisevol_lq"),
+    f4("texsize_noisevol_hq", "texsize_noisevol_hq"),
+];
+
+/// The mathematical constants `include.fx` defines.
+///
+/// `M_PI_2` is **two pi**, not pi over two. MilkDrop's naming, and reading it
+/// the C way would halve every rotation a preset writes with it.
+/// These are `include.fx`'s literal digits, not Rust's constants. Clippy is
+/// right that they approximate PI and TAU and wrong that the exact values
+/// would be better: a preset's arithmetic was written against *these*, and
+/// substituting a closer value changes what it draws by a hair everywhere.
+/// Same reasoning as `wave.rs`'s 6.28.
+#[allow(clippy::approx_constant)]
+pub const CONSTANTS: &[(&str, f64)] = &[
+    ("M_PI", 3.141_592_653_59),
+    ("M_PI_2", 6.283_185_307_18),
+    ("M_INV_PI_2", 0.159_154_943_091_895),
 ];
 
 /// The rotation matrices, all `float4x3`.
@@ -312,6 +338,20 @@ pub const FIRST_LINE: &str = "float3 ret = 0;";
 /// controls three channels and the fourth is the pipeline's.
 pub const LAST_LINE: &str = "_return_value = float4(ret.xyz, _vDiffuse.w);";
 
+/// The registers themselves, which presets reach for directly.
+///
+/// `q1` is an alias for `_qa.x`, and a preset may equally write `_qa.x` --
+/// or `_qa.xyzw` to take four at once, which 468 shader bodies in the corpus
+/// do. The alias is the documented spelling; the register is the real one.
+pub fn register(name: &str) -> Option<Ty> {
+    let rest = name.strip_prefix('_')?;
+    let known = rest
+        .strip_prefix('c')
+        .is_some_and(|n| n.parse::<u32>().is_ok_and(|n| n <= 13))
+        || matches!(rest, "qa" | "qb" | "qc" | "qd" | "qe" | "qf" | "qg" | "qh");
+    known.then_some(Ty::FLOAT4)
+}
+
 /// Look a name up in the environment for `pass`.
 ///
 /// Per-pass names shadow the shared ones, which is the order
@@ -330,6 +370,9 @@ pub fn type_of(pass: Pass, name: &str) -> Option<Ty> {
     if let Some(alias) = lookup(pass, name) {
         return Some(alias.ty);
     }
+    if CONSTANTS.iter().any(|(n, _)| *n == name) {
+        return Some(Ty::FLOAT);
+    }
     if MATRICES.contains(&name) {
         return Some(Ty::Mat {
             base: super::ty::Base::Float,
@@ -340,7 +383,7 @@ pub fn type_of(pass: Pass, name: &str) -> Option<Ty> {
     if SAMPLERS.iter().any(|(s, _)| *s == name) {
         return Some(Ty::Sampler);
     }
-    None
+    register(name)
 }
 
 #[cfg(test)]
@@ -372,7 +415,9 @@ mod tests {
                     reg,
                     "_qa" | "_qb" | "_qc" | "_qd" | "_qe" | "_qf" | "_qg" | "_qh"
                 )
-                || matches!(reg, "rand_frame" | "rand_preset");
+                // A name that is its own target is declared directly in
+                // `include.fx` rather than aliased onto a register.
+                || reg == alias.name;
             assert!(known, "{} points at {reg}", alias.name);
         }
     }
@@ -427,6 +472,8 @@ mod tests {
             "q30",
             "sampler_main",
             "sampler_fw_main",
+            "texsize_noisevol_hq",
+            "texsize_noise_lq",
         ] {
             assert!(
                 type_of(Pass::Warp, name).is_some(),
@@ -447,6 +494,28 @@ mod tests {
             .collect();
         assert_eq!(volume, vec!["sampler_noisevol_lq", "sampler_noisevol_hq"]);
         assert_eq!(type_of(Pass::Warp, "sampler_blur2"), Some(Ty::Sampler));
+    }
+
+    #[test]
+    fn a_preset_may_name_a_register_directly() {
+        // 468 shader bodies write `_qa` or `_qb` rather than `q1`..`q8`,
+        // usually to take four values at once.
+        assert_eq!(register("_qa"), Some(Ty::FLOAT4));
+        assert_eq!(register("_c13"), Some(Ty::FLOAT4));
+        assert_eq!(register("_c14"), None);
+        assert_eq!(register("_qi"), None);
+        assert_eq!(register("uv"), None);
+        assert_eq!(type_of(Pass::Warp, "_qe"), Some(Ty::FLOAT4));
+    }
+
+    #[test]
+    #[allow(clippy::approx_constant)]
+    fn m_pi_2_is_two_pi_rather_than_half_of_it() {
+        // MilkDrop's own naming. Read the C way it would halve every rotation
+        // written with it.
+        let two_pi = CONSTANTS.iter().find(|(n, _)| *n == "M_PI_2").unwrap().1;
+        assert!((two_pi - 6.283_185_307_18).abs() < 1e-9);
+        assert_eq!(type_of(Pass::Warp, "M_INV_PI_2"), Some(Ty::FLOAT));
     }
 
     #[test]

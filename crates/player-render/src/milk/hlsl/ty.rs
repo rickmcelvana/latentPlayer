@@ -200,12 +200,20 @@ impl Ty {
             Ty::Vec { base, n: 1 } => base.wgsl().into(),
             Ty::Vec { base, n } => format!("vec{n}<{}>", base.wgsl()),
             Ty::Mat { base, rows, cols } => {
-                // HLSL writes rows x columns and WGSL writes columns x rows.
-                // A `float3x4` is three rows of four, which WGSL spells
-                // `mat4x3` -- four columns of three. Getting this backwards
-                // compiles fine on square matrices and silently transposes
-                // everything else.
-                format!("mat{cols}x{rows}<{}>", base.wgsl())
+                // The spelling is identity, and that is worth explaining
+                // because the folklore says otherwise.
+                //
+                // HLSL's `float{R}x{C}` is R rows of C, indexed by row, and
+                // built row-major: `float2x2(a,b,c,d)` has `m[0] == (a,b)`.
+                // WGSL's `mat{A}x{B}` is A columns of B, indexed by column,
+                // and built column-major: `mat2x2(a,b,c,d)` has `m[0] ==
+                // (a,b)` too. So taking HLSL's *rows* to be WGSL's *columns*
+                // makes construction and indexing agree exactly, with A = R
+                // and B = C -- the same two numbers in the same order.
+                //
+                // What that costs is one flip elsewhere: `mul` multiplies the
+                // other way round. See `emit::Emitter::mul`.
+                format!("mat{rows}x{cols}<{}>", base.wgsl())
             }
         }
     }
@@ -253,6 +261,14 @@ impl Ty {
             });
         }
         let (from_base, to_base) = (self.base()?, to.base()?);
+        // A vector and a matrix never fit into one another, however their
+        // component counts line up. HLSL's `float2x2(v)` with a `float4` is a
+        // *constructor* rather than a conversion, and treating it as one here
+        // would type a vector as a matrix and leave the code untouched --
+        // which compiles as far as the next multiply and then does not.
+        if matches!(self, Ty::Mat { .. }) != matches!(to, Ty::Mat { .. }) {
+            return None;
+        }
         let base = (from_base != to_base).then_some(to_base);
         let shape = match (self, to) {
             _ if self.components() == to.components() && self.is_scalar() == to.is_scalar() => {
@@ -384,14 +400,15 @@ mod tests {
     }
 
     #[test]
-    fn a_matrix_is_transposed_between_the_two_spellings() {
-        // HLSL's rows x columns against WGSL's columns x rows. Square
-        // matrices hide this and the corpus's matrices are square, so the
-        // test is the only thing standing between here and a silent
-        // transpose the day one is not.
+    fn a_matrix_keeps_its_two_numbers_because_hlsls_rows_are_wgsls_columns() {
+        // The folklore is that HLSL's `RxC` is GLSL's `CxR`, and following it
+        // here is wrong: both languages lay a scalar constructor out so that
+        // `m[0]` is the first group, so HLSL's rows *are* WGSL's columns and
+        // the two numbers stay put. The price is that `mul` multiplies the
+        // other way round, which `emit` does.
         let m = Ty::from_name("float3x4").unwrap();
         assert_eq!(m.to_string(), "float3x4");
-        assert_eq!(m.wgsl(), "mat4x3<f32>");
+        assert_eq!(m.wgsl(), "mat3x4<f32>");
         assert_eq!(Ty::from_name("float4x4").unwrap().wgsl(), "mat4x4<f32>");
     }
 
@@ -461,6 +478,15 @@ mod tests {
                 base: None
             })
         );
+    }
+
+    #[test]
+    fn a_vector_and_a_matrix_never_fit_into_one_another() {
+        // `float2x2` and `float4` both hold four floats, and HLSL's
+        // `float2x2(v)` is a constructor rather than a conversion.
+        let m = Ty::from_name("float2x2").unwrap();
+        assert_eq!(Ty::FLOAT4.fit_to(m), None);
+        assert_eq!(m.fit_to(Ty::FLOAT4), None);
     }
 
     #[test]

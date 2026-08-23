@@ -22,3 +22,9 @@ pollster = "0.4"
 # A dev-dependency, deliberately: the library still knows nothing about
 # player-core, which is what keeps a visual from computing DSP (decision 2).
 player-core = { path = "../player-core" }
+# The HLSL-to-WGSL translator's output is checked by *compiling* it
+# (Phase 3 decision 54). wgpu does that on `create_shader_module`, but a
+# corpus run compiles thousands of shaders and does not want a GPU device
+# per check, so the checks call naga -- wgpu's own front end, already in the
+# lock file at the version wgpu uses -- directly.
+naga = { version = "30", features = ["wgsl-in"] }
