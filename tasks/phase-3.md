@@ -3071,9 +3071,97 @@ The five helpers are `#define`s rather than functions, which means a preset
 declaring a function named `lum` does not override it -- the macro wins. That
 matters given presets do declare functions of their own.
 
-### What is next, and what it is waiting on
+### The survey has run on a real collection: 11,217 presets
 
-The grammar. It is not fixed until the survey has run on a **real collection**,
-which is the one thing here that cannot be derived from MilkDrop's source: what
-twenty years of preset authors actually wrote. Everything the survey needs is
-built, so this is a single run over a folder.
+Three collections the user supplied -- Cream of the Crop, the MilkDrop3 set, and
+a DeepField collection -- in nested folders, 2026-08-23. (A larger one exists,
+around 150,000 files; this is already two thousand times the spike's sample and
+the tail flattened long before the end of it.)
+
+**Two things held that had to hold.** All 11,217 files **parsed, none failed**,
+and across **4,359,378 tokens the lexer met zero characters it had no rule
+for**. The parser was written against nine presets and the lexer against five;
+neither has a corpus-shaped hole in it.
+
+**The denominator is not the file count.** There are **6,104 distinct shader
+programs** behind those 11,217 files -- a large collection is largely variants of
+a smaller number of presets, so "how much of the corpus does the translator
+reach" honestly means the 6,104.
+
+**M7a is worth more than five presets suggested.** 1,764 presets -- **15.7%** --
+have no shader at all (`PSVERSION 0`, `MILKDROP_PRESET_VERSION 0`), and M7a
+already draws every one of them *as itself* rather than approximately. A sixth
+of a real collection was finished when M7a closed.
+
+**Per-shader profiles are mixed more often than not.** 4,684 presets are
+PSVERSION 2 and 2,107 are 3, but 2,203 more set the two passes differently --
+including 605 with **one pass fixed-function and the other a shader**
+(`warp 0, comp 2` and its mirror). So the fallback when a shader cannot be
+translated has to be **per pass**, not per preset. That is a design constraint
+the plan did not have.
+
+### What the corpus actually uses, by share of presets
+
+Occurrence counts cannot size work -- an operator appearing 1,247 times in one
+preset and in a thousand are different facts -- so the survey counts presets:
+
+| construct | presets | share |
+| --- | ---: | ---: |
+| branches (`if`/`else`) | 2,816 | 25.1% |
+| 3D texture sampling (`tex3D`) | 2,318 | 20.7% |
+| loops (`for`/`while`) | 1,146 | 10.2% |
+| `++`/`--` | 1,132 | 10.1% |
+| `tex2d`, miscased | 746 | 6.7% |
+| `static`/`const` globals | 677 | 6.0% |
+| preset-defined functions | 644 | 5.7% |
+| modulo | 633 | 5.6% |
+| matrices | 379 | 3.4% |
+| `#define` | 343 | 3.1% |
+| array indexing | 323 | 2.9% |
+| conditional compilation (`#if`) | 145 | 1.3% |
+| non-float vectors | 55 | 0.5% |
+| ternary `?:` | 54 | 0.5% |
+| non-square matrices | 6 | 0.1% |
+
+Six of those fifteen are constructs the spike's inventory did not contain at
+all, and the top two are the expensive ones. **A quarter of the corpus
+branches** and **a fifth samples a 3D texture** -- neither appears once in the
+five presets M7 was planned against.
+
+That sets the order of work, and it is not the order a translator is usually
+built in. Statements before expressions get exotic: branches, loops, functions
+and declarations are 25%, 10%, 5.7% and 6% of the corpus, and the preprocessor
+-- which feels like it must come first because it is textually first -- is worth
+3.1% and 1.3% and comes **last**.
+
+It also promotes the noise textures from a footnote to required work. `tex3D` at
+20.7% is `sampler_noisevol_lq`/`_hq`, which MilkDrop generates procedurally --
+in scope by decision 56 precisely because generating them is arithmetic -- so
+"the procedural noise textures are in scope" turns out to be a fifth of the
+corpus rather than a nicety.
+
+### Two things the corpus raised that are decisions rather than findings
+
+**`tex2d` is not `tex2D`, and 746 presets write it.** HLSL is case-sensitive, so
+those presets do not compile under MilkDrop either -- they fall back to its
+default shader, and evidently nobody noticed, because a preset still draws.
+Accepting the miscased spelling as an alias costs one line and makes 6.7% of the
+corpus draw *better here than in MilkDrop*. Taken: the alias is worth more than
+bug-compatibility with a compile error, and this is recorded rather than silent
+because it is a deliberate divergence.
+
+**2,204 presets -- 19.6% -- ask for a texture or a sprite this build does not
+load.** 137 distinct names, led by `worms` (550), `clouds` (250), `rand00` (182)
+and `seaweed` (124), plus 71 sprites. Decision 56 put both out of scope as a
+content-distribution question rather than an engine one, and that stands -- but
+the cost is now measured rather than guessed, and it is a fifth of a real
+collection. Worth revisiting once the preset library exists, since "point at a
+folder of textures" is the same shape as the flow decision 57 already forces for
+presets themselves.
+
+### What is next
+
+The grammar, in the order the table gives: statements and declarations
+(branches, loops, preset-defined functions, `static`/`const` globals), then the
+expression forms, then `tex3D` and the procedural noise textures, then the
+preprocessor last.

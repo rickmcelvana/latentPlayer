@@ -41,6 +41,42 @@
 //! own first component either way; it just runs before the parser rather than
 //! after it.
 //!
+//! # What the survey found on a real collection
+//!
+//! 11,217 presets, three collections, 2026-08-23. Two things held: every file
+//! **parsed**, and across **4,359,378 tokens the lexer met zero characters it
+//! had no rule for**. Behind those files are **6,104 distinct shader
+//! programs** -- a large collection is largely variants -- which is the honest
+//! denominator for how much of a corpus the translator reaches.
+//!
+//! The constructs, by share of *presets* rather than by occurrence, because an
+//! operator used 1,247 times in one preset and in a thousand are different
+//! facts:
+//!
+//! ```text
+//! branches (if/else)          25.1%      #define                  3.1%
+//! 3D texture sampling         20.7%      array indexing           2.9%
+//! loops (for/while)           10.2%      conditional compilation  1.3%
+//! ++ / --                     10.1%      non-float vectors        0.5%
+//! tex2d, miscased              6.7%      ternary ?:               0.5%
+//! static/const globals         6.0%      non-square matrices      0.1%
+//! preset-defined functions     5.7%
+//! modulo                       5.6%
+//! matrices                     3.4%
+//! ```
+//!
+//! Six of those the spike's inventory of fifteen did not contain, and the two
+//! largest are among them. That sets the order of work, and it is not the
+//! usual one: **statements first** -- branches, loops, functions, `static`
+//! globals -- and the **preprocessor last**, despite being textually first,
+//! because it is worth 3.1% and 1.3%.
+//!
+//! Two consequences beyond the grammar. `tex3D` at 20.7% is the procedural
+//! volume noise, so "the noise textures MilkDrop generates for itself are in
+//! scope" (decision 56) is a fifth of the corpus rather than a footnote. And
+//! **605 presets set one pass to a shader and the other to fixed-function**,
+//! so the fallback when a shader cannot be translated has to be *per pass*.
+//!
 //! # What the survey found on its first run, which the spike's list had not
 //!
 //! Three constructs, all in the same five presets the spike measured, none of

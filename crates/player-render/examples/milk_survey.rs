@@ -33,7 +33,7 @@
 //! - **Unknown characters and preprocessor lines.** Two things a translator
 //!   plan tends to forget until a file has one.
 
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet, HashSet};
 use std::fs;
 use std::path::{Path, PathBuf};
 
@@ -98,6 +98,15 @@ struct Survey {
     unknown_chars: Tally,
     defines_functions: usize,
     unsupported: Tally,
+    /// How many *presets* use each construct, as against how many times it
+    /// occurs. The planning figure: an operator appearing 1247 times in one
+    /// preset and in a thousand are very different facts.
+    features: Tally,
+    /// Distinct shader programs, by their text. A large collection is largely
+    /// variants of a smaller number of presets, so this is the honest
+    /// denominator for "how much of the corpus does the translator reach".
+    distinct_shaders: HashSet<String>,
+    presets_needing_texture: usize,
 }
 
 fn collect(dir: &Path, out: &mut Vec<PathBuf>) {
@@ -121,10 +130,11 @@ fn collect(dir: &Path, out: &mut Vec<PathBuf>) {
 }
 
 impl Survey {
-    fn shader(&mut self, src: &str) {
+    fn shader(&mut self, src: &str, features: &mut BTreeSet<&'static str>) {
         if src.trim().is_empty() {
             return;
         }
+        self.distinct_shaders.insert(src.to_owned());
         self.shader_lines += src.lines().count();
         let tokens = lex(src);
         self.tokens += tokens.len();
@@ -136,18 +146,60 @@ impl Survey {
             let after_dot = prev.is_some_and(|p| p.kind == Tok::Op && p.text == ".");
 
             match t.kind {
-                Tok::Op => self.operators.add(t.text),
+                Tok::Op => {
+                    self.operators.add(t.text);
+                    match t.text {
+                        "[" => {
+                            features.insert("array indexing");
+                        }
+                        "++" | "--" => {
+                            features.insert("increment/decrement");
+                        }
+                        "?" => {
+                            features.insert("ternary ?:");
+                        }
+                        "%" => {
+                            features.insert("modulo");
+                        }
+                        _ => {}
+                    }
+                }
                 Tok::Directive => {
                     // The first word only: `#define X 1` and `#define Y 2` are
                     // one construct, not two.
-                    self.directives
-                        .add(t.text.split_whitespace().next().unwrap_or("#"))
+                    let word = t.text.split_whitespace().next().unwrap_or("#");
+                    self.directives.add(word);
+                    features.insert(if word == "#define" {
+                        "#define"
+                    } else {
+                        "conditional compilation"
+                    });
                 }
                 Tok::Unknown => self.unknown_chars.add(t.text),
                 Tok::Number => {}
                 Tok::Ident => {
                     if after_dot {
                         self.swizzles.add(t.text);
+                    } else if KEYWORDS.contains(&t.text) {
+                        // Before the call test, because `if (`, `while (` and
+                        // `return (` all look like calls and control flow is
+                        // the more interesting fact about them.
+                        self.keywords.add(t.text);
+                        match t.text {
+                            "if" | "else" => {
+                                features.insert("branches");
+                            }
+                            "for" | "while" | "do" => {
+                                features.insert("loops");
+                            }
+                            "static" | "const" => {
+                                features.insert("static/const globals");
+                            }
+                            "struct" => {
+                                features.insert("struct");
+                            }
+                            _ => {}
+                        }
                     } else if is_call {
                         if Ty::from_name(t.text).is_some() {
                             self.constructors.add(t.text);
@@ -159,12 +211,28 @@ impl Survey {
                             // corpus sample already contains.
                             if prev.is_some_and(|p| Ty::from_name(p.text).is_some()) {
                                 self.defines_functions += 1;
+                                features.insert("preset-defined functions");
+                            }
+                            if t.text == "tex3D" {
+                                features.insert("3D texture sampling");
+                            }
+                            if t.text == "tex2d" {
+                                features.insert("tex2d, miscased");
                             }
                         }
-                    } else if Ty::from_name(t.text).is_some() {
+                    } else if let Some(ty) = Ty::from_name(t.text) {
                         self.declared_types.add(t.text);
-                    } else if KEYWORDS.contains(&t.text) {
-                        self.keywords.add(t.text);
+                        if let player_render::milk::hlsl::ty::Ty::Mat { rows, cols, .. } = ty {
+                            features.insert("matrices");
+                            if rows != cols {
+                                features.insert("non-square matrices");
+                            }
+                        }
+                        if matches!(ty, player_render::milk::hlsl::ty::Ty::Vec { base, n }
+                            if n > 1 && base != player_render::milk::hlsl::ty::Base::Float)
+                        {
+                            features.insert("non-float vectors");
+                        }
                     } else if prev.is_some_and(|p| Ty::from_name(p.text).is_some()) {
                         // A name being declared, not a name being used.
                     } else {
@@ -223,8 +291,15 @@ impl Survey {
         self.with_comp += usize::from(has_comp);
         self.with_neither += usize::from(!has_warp && !has_comp);
 
-        self.shader(&preset.warp);
-        self.shader(&preset.comp);
+        let mut features: BTreeSet<&'static str> = BTreeSet::new();
+        self.shader(&preset.warp, &mut features);
+        self.shader(&preset.comp, &mut features);
+        if !preset.unsupported.is_empty() {
+            self.presets_needing_texture += 1;
+        }
+        for f in features {
+            self.features.add(f);
+        }
     }
 
     fn report(&self) {
@@ -248,6 +323,29 @@ impl Survey {
 
         for (path, why) in self.parse_failed.iter().take(10) {
             println!("  parse failed: {} -- {why}", path.display());
+        }
+
+        println!(
+            "  {} distinct shader programs behind those {} files",
+            self.distinct_shaders.len(),
+            self.files
+        );
+        println!(
+            "  {} presets ask for a texture or sprite this build does not load",
+            self.presets_needing_texture
+        );
+
+        let n = self.files.max(1);
+        println!(
+            "
+Constructs, by how many PRESETS use them -- {} distinct",
+            self.features.0.len()
+        );
+        for (name, count) in self.features.ranked() {
+            println!(
+                "  {count:>7}  {:>5.1}%  {name}",
+                100.0 * count as f64 / n as f64
+            );
         }
 
         self.preset_version.report("MILKDROP_PRESET_VERSION", 12);
