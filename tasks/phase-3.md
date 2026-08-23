@@ -3159,9 +3159,95 @@ collection. Worth revisiting once the preset library exists, since "point at a
 folder of textures" is the same shape as the flow decision 57 already forces for
 presets themselves.
 
+### The grammar, built against the measurement: 11,214 of 11,217
+
+`milk/hlsl/ast.rs`, `milk/hlsl/parse.rs` and `milk/hlsl/pre.rs`. 227 unit tests
+in `player-render`, up from 187.
+
+Built in the order the table gave rather than the order a translator usually
+takes, and measured against the whole corpus after each step. The figure is
+presets whose every shader pass reads whole:
+
+| step | presets read | share |
+| --- | ---: | ---: |
+| statements, declarations, functions, expressions | 9,986 | 89.0% |
+| initializer lists, and MilkDrop's trailing-text discard | 10,100 | 90.0% |
+| `sampler_state` blocks | 10,153 | 90.5% |
+| the comma operator | 10,604 | 94.5% |
+| `double` as `float` | 10,732 | 95.7% |
+| the preprocessor | 11,209 | 99.9% |
+| a lexer bug the last three files exposed | **11,214** | **100.0%** |
+
+Every step after the first was a construct the corpus named and the plan did
+not. **Six new constructs, none of them in the spike's inventory of fifteen and
+none of them in the survey's first table either** -- because a table of what
+presets *use* cannot show what a grammar *lacks*, and only running the grammar
+over the corpus does.
+
+- **Initializer lists.** `static const float2 offsets[10] = { sin(...), ... };`
+  -- twenty scalars for ten pairs, so the emitter must regroup by the target's
+  shape rather than trust the writer's grouping.
+- **MilkDrop discards everything after the last `}`.**
+  `LoadShaderFromMemory` overwrites from `strrchr(text, '}')` to the end, so
+  presets that sign off after the brace -- "written by martin", "END" --
+  compile there. 28 files, and reading MilkDrop's source is the only way to
+  know this is legal rather than broken.
+- **`sampler_state` blocks.** `sampler foo = sampler_state { AddressU = WRAP;
+  };` -- the address and filter modes a wgpu sampler descriptor needs, so they
+  are read rather than skipped.
+- **The comma operator**, 457 shader bodies, almost always a `for`'s update
+  clause. WGSL has none, so the emitter will have to unfold it.
+- **`double`.** 136 shader bodies declare `double3 blur = GetBlur1(uv)`,
+  plainly meaning a colour. `ty.rs` had said `double` was deliberately not
+  modelled; the corpus disagreed. It folds to `float`, as the legacy D3DX
+  compiler folded it, and as WGSL requires -- there is no `f64` in a fragment
+  shader to be faithful to.
+- **The preprocessor**, which the survey had ranked last at 3.1% and which
+  turned out to be **523 of the last 528 refusals** -- the entire gap between
+  95.7% and all of it. Ranking it last was right; the ranking just could not
+  say that everything above it would be cleared first.
+
+**The preprocessor is smaller than it sounds**, which the corpus also settled.
+The commonest directives are `#define sat saturate`, `#if 1`, `#define MyGet
+GetPixel`, `#define sampler_pic sampler_prayerwheel`, `#define PI 3.14159` --
+object-like macros standing for one name or one number, and conditionals on
+constants. So `pre.rs` is C's preprocessor in that shape: `#define`/`#undef`,
+the full `#if` family with a constant-expression evaluator, and function-like
+macros because they cost little once object-like ones exist. It works on
+**tokens rather than text**, so the lexer runs once and no `.` has to be
+re-judged as swizzle or number.
+
+### The three bugs this stage found, and how
+
+**A macro bomb test found a real expansion bug.** `#define A A` must be a fixed
+point, so a name being expanded is not expanded again inside itself -- but the
+first implementation kept that set flat for a whole top-level token, so
+`#define SQ(x) x*x` over `SQ(A)` expanded the *first* `A` and left the second
+standing. Silently: the output is still valid HLSL, just missing an expansion.
+The set is now a region, closed by a marker pushed under each macro's body, and
+the bomb test that was supposed to check the token cap is what exposed it.
+
+**The lexer read `return .8` as a member access.** Its rule is that a `.` after
+anything that can end an expression is an accessor -- and `return` is an
+identifier to a lexer. `float dist (float2 uvi) {return .8*(uvi.y-.4);}` is in
+the corpus and reported as an unsupported construct. Keywords are not values,
+and the lexer now knows the short list that never are.
+
+**The survey's own classifier counted `if` as a function call**, because `if (`
+looks like one. 13,395 branches were hiding in the call list until keywords
+were tested first. A measurement tool gets the same scrutiny as the thing it
+measures.
+
+### What the last three files are
+
+Genuine syntax errors, in presets that do not compile in MilkDrop either: a
+trailing comma before a closing brace, a `sampler` declaration missing its
+semicolon, and an unmatched parenthesis. Nothing is gained by accepting them,
+and accepting them would mean inventing tolerance HLSL does not have.
+
 ### What is next
 
-The grammar, in the order the table gives: statements and declarations
-(branches, loops, preset-defined functions, `static`/`const` globals), then the
-expression forms, then `tex3D` and the procedural noise textures, then the
-preprocessor last.
+The emitter: WGSL out of the tree, with decision 55's prelude behind it and the
+types from `ty.rs` deciding every truncation and promotion. Decision 54 says its
+output is checked by **compiling it**, which wgpu does for free -- so the
+corpus figure to beat next is not "parses" but "compiles".

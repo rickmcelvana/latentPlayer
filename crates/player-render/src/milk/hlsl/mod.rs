@@ -18,6 +18,8 @@
 //!   swizzle typing.
 //! - [`env`] -- decision 55's environment: MilkDrop's `include.fx` written
 //!   down, which is what `uv`, `time`, `q17` and `GetBlur2` actually are.
+//! - [`ast`] and [`parse`] -- the grammar, built in the order the corpus
+//!   table gives rather than the order a translator is usually built in.
 //!
 //! Still to come in M7b: the parser producing a typed tree, the WGSL emitter,
 //! decision 55's prelude (MilkDrop's `GetPixel`/`GetBlur1..3`/`lum`, the
@@ -123,10 +125,15 @@
 //! falls back to M7a's fixed-function path rather than drawing nothing. The
 //! figure that matters is the count that draws, and that it never falls.
 
+pub mod ast;
 pub mod env;
 pub mod lex;
+pub mod parse;
+pub mod pre;
 pub mod ty;
 
+pub use ast::{Block, Expr, ExprKind, Function, Shader, Stmt};
 pub use env::{Alias, Pass};
 pub use lex::{lex, Tok, Token};
+pub use parse::{parse, HlslError};
 pub use ty::{swizzle, Base, Fit, Shape, Ty};

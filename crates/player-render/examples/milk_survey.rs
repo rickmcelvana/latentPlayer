@@ -37,7 +37,7 @@ use std::collections::{BTreeMap, BTreeSet, HashSet};
 use std::fs;
 use std::path::{Path, PathBuf};
 
-use player_render::milk::hlsl::{lex, Tok, Ty};
+use player_render::milk::hlsl::{lex, parse as parse_hlsl, Tok, Ty};
 use player_render::milk::Preset;
 
 /// Statement and declaration keywords, which are `Tok::Ident` to the lexer.
@@ -102,6 +102,17 @@ struct Survey {
     /// occurs. The planning figure: an operator appearing 1247 times in one
     /// preset and in a thousand are very different facts.
     features: Tally,
+    /// Shader bodies the grammar reads, and the ones it refuses -- tallied by
+    /// the construct that stopped it, which is what turns "347 failed" into
+    /// "347 need the preprocessor".
+    shaders_parsed: usize,
+    shaders_refused: Tally,
+    refusal_example: BTreeMap<String, String>,
+    /// The exact messages, so a class as broad as "syntax" can be split into
+    /// the several different things it actually is.
+    refusal_detail: Tally,
+    presets_fully_read: usize,
+    distinct_parsed: usize,
     /// Distinct shader programs, by their text. A large collection is largely
     /// variants of a smaller number of presets, so this is the honest
     /// denominator for "how much of the corpus does the translator reach".
@@ -130,11 +141,29 @@ fn collect(dir: &Path, out: &mut Vec<PathBuf>) {
 }
 
 impl Survey {
-    fn shader(&mut self, src: &str, features: &mut BTreeSet<&'static str>) {
+    fn shader(&mut self, src: &str, features: &mut BTreeSet<&'static str>, path: &Path) -> bool {
         if src.trim().is_empty() {
-            return;
+            return true;
         }
-        self.distinct_shaders.insert(src.to_owned());
+        let fresh = self.distinct_shaders.insert(src.to_owned());
+        let read = match parse_hlsl(src) {
+            Ok(_) => {
+                self.shaders_parsed += 1;
+                if fresh {
+                    self.distinct_parsed += 1;
+                }
+                true
+            }
+            Err(e) => {
+                self.shaders_refused.add(e.construct);
+                self.refusal_detail
+                    .add(format!("{}: {}", e.construct, e.detail));
+                self.refusal_example
+                    .entry(format!("{}: {}", e.construct, e.detail))
+                    .or_insert_with(|| format!("{}:{}", path.display(), e.line));
+                false
+            }
+        };
         self.shader_lines += src.lines().count();
         let tokens = lex(src);
         self.tokens += tokens.len();
@@ -245,6 +274,7 @@ impl Survey {
                 }
             }
         }
+        read
     }
 
     fn preset(&mut self, path: &Path) {
@@ -292,8 +322,11 @@ impl Survey {
         self.with_neither += usize::from(!has_warp && !has_comp);
 
         let mut features: BTreeSet<&'static str> = BTreeSet::new();
-        self.shader(&preset.warp, &mut features);
-        self.shader(&preset.comp, &mut features);
+        let warp_ok = self.shader(&preset.warp, &mut features, path);
+        let comp_ok = self.shader(&preset.comp, &mut features, path);
+        if warp_ok && comp_ok {
+            self.presets_fully_read += 1;
+        }
         if !preset.unsupported.is_empty() {
             self.presets_needing_texture += 1;
         }
@@ -336,6 +369,44 @@ impl Survey {
         );
 
         let n = self.files.max(1);
+        println!(
+            "
+=== the grammar ===
+  {} of {} shader bodies read ({:.1}%)",
+            self.shaders_parsed,
+            self.shaders_parsed + self.shaders_refused.0.values().sum::<usize>(),
+            100.0 * self.shaders_parsed as f64
+                / (self.shaders_parsed + self.shaders_refused.0.values().sum::<usize>()).max(1)
+                    as f64
+        );
+        println!(
+            "  {} of {} distinct shader programs read ({:.1}%)",
+            self.distinct_parsed,
+            self.distinct_shaders.len(),
+            100.0 * self.distinct_parsed as f64 / self.distinct_shaders.len().max(1) as f64
+        );
+        println!(
+            "  {} of {} presets read whole -- every pass they have ({:.1}%)",
+            self.presets_fully_read,
+            self.files,
+            100.0 * self.presets_fully_read as f64 / n as f64
+        );
+        println!(
+            "
+  why, exactly -- {} distinct",
+            self.refusal_detail.0.len()
+        );
+        for (why, count) in self.refusal_detail.ranked().iter().take(12) {
+            println!(
+                "  {count:>7}  {why}
+           {}",
+                self.refusal_example.get(*why).map_or("", |s| s.as_str())
+            );
+        }
+        for (construct, count) in self.shaders_refused.ranked() {
+            println!("  {count:>7}  {construct}");
+        }
+
         println!(
             "
 Constructs, by how many PRESETS use them -- {} distinct",

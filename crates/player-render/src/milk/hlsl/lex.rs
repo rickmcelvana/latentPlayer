@@ -88,11 +88,21 @@ fn is_ident_continue(c: char) -> bool {
     c.is_ascii_alphanumeric() || c == '_'
 }
 
+/// Words that are never values, so a `.` after one begins a number.
+///
+/// Without this, `return .8*x;` reads as `return` with a member called `8`.
+/// The corpus has exactly that line, and the failure is quiet: it is a
+/// perfectly ordinary file that reports as using an unsupported construct.
+const NOT_VALUES: &[&str] = &[
+    "return", "else", "do", "case", "if", "while", "for", "in", "out", "inout", "discard",
+];
+
 /// True when a token can end an expression, which is what makes a following
 /// `.` an accessor rather than the start of a number.
 fn ends_an_expression(t: &Token) -> bool {
     match t.kind {
-        Tok::Ident | Tok::Number => true,
+        Tok::Ident => !NOT_VALUES.contains(&t.text),
+        Tok::Number => true,
         Tok::Op => t.text == ")" || t.text == "]",
         _ => false,
     }
@@ -308,6 +318,22 @@ mod tests {
                 (Tok::Op, "."),
                 (Tok::Ident, "xy"),
             ]
+        );
+    }
+
+    #[test]
+    fn a_keyword_is_not_a_value_so_a_dot_after_one_starts_a_number() {
+        // `float dist (float2 uvi) {return .8*(uvi.y-.4);}` is in the corpus,
+        // and reading `.8` as a member of `return` turns an ordinary file
+        // into one that reports an unsupported construct.
+        assert_eq!(
+            kinds("return .8"),
+            vec![(Tok::Ident, "return"), (Tok::Number, ".8")]
+        );
+        // A name, by contrast, really can be swizzled.
+        assert_eq!(
+            kinds("uv .8"),
+            vec![(Tok::Ident, "uv"), (Tok::Op, "."), (Tok::Number, "8")]
         );
     }
 

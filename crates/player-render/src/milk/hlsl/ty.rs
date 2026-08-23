@@ -31,11 +31,11 @@
 //!
 //! # What is deliberately not modelled
 //!
-//! `min16float`, `double`, arrays, `struct` and texture objects. None appears
-//! in a MilkDrop preset -- the environment a preset is compiled in has no way
-//! to give it one -- and a type this module cannot name is reported by the
-//! parser as an unsupported construct with its own line number, which is the
-//! behaviour a collection of strangers' files needs anyway.
+//! `min16float`, `struct` and texture objects. None appears in a MilkDrop
+//! preset -- the environment a preset is compiled in has no way to give it one
+//! -- and a type this module cannot name is reported by the parser as an
+//! unsupported construct with its own line number, which is the behaviour a
+//! collection of strangers' files needs anyway.
 
 use std::fmt;
 
@@ -110,9 +110,15 @@ impl Ty {
     /// `float2x2`..`float4x4`, the `half`/`int`/`bool` families, `void` and
     /// the sampler names.
     ///
-    /// `half` is `float`. Presets use it as a hint that a value is small, and
-    /// no GPU this app targets has a distinct half pipeline through wgpu, so
-    /// treating it as anything else would be inventing a difference.
+    /// `half` and `double` are both `float`, and both for the same reason:
+    /// nothing downstream can be anything else. WGSL has no `f16` on the
+    /// targets this app builds for, and no `f64` in a fragment shader at all,
+    /// so a distinction here is one the emitter could not keep.
+    ///
+    /// `double` is not a rounding-off either -- 136 shader bodies in the
+    /// corpus declare `double3 blur = GetBlur1(uv)`, plainly meaning a colour,
+    /// and the legacy D3DX compiler those presets were written against folded
+    /// it to `float` with a warning rather than refusing it.
     pub fn from_name(name: &str) -> Option<Ty> {
         if name == "void" {
             return Some(Ty::Void);
@@ -128,6 +134,7 @@ impl Ty {
         // future `float16_t` cannot be read as `float` followed by `16_t`.
         const PREFIXES: &[(&str, Base)] = &[
             ("float", Base::Float),
+            ("double", Base::Float),
             ("half", Base::Float),
             ("uint", Base::Int),
             ("int", Base::Int),
@@ -355,6 +362,12 @@ mod tests {
         assert_eq!(Ty::from_name("float1"), Some(Ty::FLOAT));
         assert_eq!(Ty::from_name("float3"), Some(Ty::FLOAT3));
         assert_eq!(Ty::from_name("half3"), Some(Ty::FLOAT3), "half is float");
+        // 136 shader bodies in the corpus write `double3` for a colour.
+        assert_eq!(
+            Ty::from_name("double3"),
+            Some(Ty::FLOAT3),
+            "double is float"
+        );
         assert_eq!(Ty::from_name("bool"), Some(Ty::BOOL));
         assert_eq!(Ty::from_name("void"), Some(Ty::Void));
         assert_eq!(Ty::from_name("sampler2D"), Some(Ty::Sampler));
