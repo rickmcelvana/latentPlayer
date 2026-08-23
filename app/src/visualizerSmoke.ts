@@ -1461,6 +1461,55 @@ function meanBrightness(target: HTMLCanvasElement): number {
   return sum / (px.length / 4);
 }
 
+/// A shader block written the way a `.milk` file carries one: numbered lines,
+/// each behind the backtick MilkDrop's INI writer puts there. The same text
+/// the native half builds, so the two can be compared figure for figure.
+function milkShaderLines(key: string, body: string): string {
+  return body
+    .split("\n")
+    .map((line, i) => `${key}_${i + 1}=\`${line}\n`)
+    .join("");
+}
+
+/// A preset whose composite shader is exactly `body`.
+function milkComp(body: string): string {
+  return milkPreset(milkShaderLines("comp", `shader_body\n{\n${body}\n}`));
+}
+
+/// The mean of one channel across the canvas, 0..255.
+function meanChannel(target: HTMLCanvasElement, channel: number): number {
+  const px = pixels(target);
+  let sum = 0;
+  for (let i = 0; i < px.length; i += 4) {
+    sum += px[i + channel];
+  }
+  return sum / (px.length / 4);
+}
+
+/// How much the frame varies, as the mean absolute deviation of its
+/// brightness -- what tells a flat fill from a texture.
+function spread(target: HTMLCanvasElement): number {
+  const px = pixels(target);
+  const mean = meanBrightness(target);
+  let sum = 0;
+  for (let i = 0; i < px.length; i += 4) {
+    sum += Math.abs(Math.max(px[i], px[i + 1], px[i + 2]) - mean);
+  }
+  return sum / (px.length / 4);
+}
+
+/// Pixels carrying light above the background field.
+function litPixels(target: HTMLCanvasElement): number {
+  const px = pixels(target);
+  let count = 0;
+  for (let i = 0; i < px.length; i += 4) {
+    if (Math.max(px[i], px[i + 1], px[i + 2]) > BACKGROUND_BYTES[2] + 12) {
+      count++;
+    }
+  }
+  return count;
+}
+
 /// Mean brightness inside a centred box of `fraction` of the canvas.
 function meanCentre(target: HTMLCanvasElement, fraction: number): number {
   const px = pixels(target);
@@ -1655,6 +1704,79 @@ async function checkMilkdrop(): Promise<void> {
     "a file with no preset section is refused rather than silently ignored",
     refused,
     refused ? "threw, as it should" : "was accepted",
+  );
+
+  // --- M7b: a preset's own shaders, translated and run. Everything above this
+  // point is M7a's fixed-function path; everything below only draws if HLSL
+  // became WGSL, compiled, bound and ran -- in a browser, through the same
+  // Rust the desktop shell runs. ---
+
+  run(milkComp("ret = float3(1,0,0);"), 4);
+  const paintedR = meanChannel(surface, 0);
+  const paintedG = meanChannel(surface, 1);
+  check(
+    "a composite shader paints the colour it asks for",
+    paintedR > 200 && paintedG < 40,
+    `r ${paintedR.toFixed(0)}, g ${paintedG.toFixed(0)}`,
+  );
+
+  // The warp shader writes into the feedback buffer rather than to the screen,
+  // so this is read through the *fixed-function* composite -- a different
+  // claim from the one above.
+  run(
+    milkPreset(milkShaderLines("warp", "shader_body\n{\nret = float3(0,1,0);\n}")),
+    4,
+  );
+  const warpedG = meanChannel(surface, 1);
+  const warpedR = meanChannel(surface, 0);
+  check(
+    "a warp shader owns the feedback buffer",
+    warpedG > 150 && warpedR < 60,
+    `r ${warpedR.toFixed(0)}, g ${warpedG.toFixed(0)}`,
+  );
+
+  run(milkComp("ret = float3(q1, 0, 0);") + "per_frame_1=q1 = 1;\n", 4);
+  const throughQ = meanChannel(surface, 0);
+  check(
+    "a value set in per_frame reaches the shader as q1",
+    throughQ > 200,
+    `r ${throughQ.toFixed(0)}`,
+  );
+
+  // The blur chain: `GetBlur1` is the corpus's second-commonest call, and a
+  // build that bound black there would pass every check above.
+  run(milkComp("ret = GetBlur3(uv)*4;"), 30);
+  const blurred = litPixels(surface);
+  run(milkComp("ret = GetPixel(uv)*4;"), 30);
+  const sharp = litPixels(surface);
+  check(
+    "the blur chain runs, and spreads the picture wider than a plain read",
+    blurred > sharp * 2,
+    `${blurred} lit through GetBlur3 against ${sharp}`,
+  );
+
+  // The procedural noise volumes -- `tex3D` is 20.7% of the corpus.
+  run(milkComp("ret = tex3D(sampler_noisevol_hq, float3(uv, 0.5)).xyz;"), 4);
+  const noiseMean = meanBrightness(surface);
+  const noiseSpread = spread(surface);
+  check(
+    "a 3D noise volume is bound and is not flat",
+    noiseSpread > 5 && noiseMean > 40,
+    `mean ${noiseMean.toFixed(0)}, spread ${noiseSpread.toFixed(1)}`,
+  );
+
+  // Per pass, not per preset: 605 presets in the corpus give one pass a shader
+  // and leave the other fixed-function.
+  run(
+    milkPreset(milkShaderLines("warp", "shader_body\n{\nret = float3(0,1,0);\n}")) +
+      milkShaderLines("comp", "shader_body\n{\nret = nosuchfunction(uv);\n}"),
+    4,
+  );
+  const halfG = meanChannel(surface, 1);
+  check(
+    "a composite that will not translate does not cost the preset its warp",
+    halfG > 150,
+    `g ${halfG.toFixed(0)} through the fallback composite`,
   );
 }
 

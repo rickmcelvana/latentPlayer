@@ -3355,11 +3355,83 @@ used as values, and a handful of presets whose own arithmetic does not
 type-check under any reading. All of them named, with a line number, and
 falling back per pass rather than per preset.
 
-### What is next
+### Wired in: a preset draws as itself, on both shells
 
-Wiring it in: the translated shaders have to *run*, which means `milk/frame.rs`
-building the uniform block and the bind group this prelude declares, the blur
-chain that `GetBlur1..3` reads, and MilkDrop's procedural noise textures --
-`tex3D` is 20.7% of the corpus and every one of those reads a volume this build
-does not yet generate. Then the pixel checks both shells owe the gallery, and a
-person watching their own presets.
+**118/118** `visual_smoke` (was 112/112) and **129/129** at `/visualizer.html`
+in a real browser (was 123/123). Six new claims, and they are the whole chain
+end to end -- nothing below draws unless HLSL became WGSL, compiled, bound and
+ran:
+
+| claim | native | web |
+| --- | --- | --- |
+| a composite shader paints the colour it asks for | r 255, g 5 | r 255, g 5 |
+| a warp shader owns the feedback buffer | r 6, g 255 | r 6, g 255 |
+| a `per_frame` value reaches the shader as `q1` | r 255 | r 255 |
+| the blur chain spreads the picture | 32079 / 2328 | 31708 / 2279 |
+| a 3D noise volume is bound and is not flat | mean 198, spread 30.4 | mean 198, spread 30.4 |
+| a composite that will not translate keeps the warp | g 255 | g 255 |
+
+The noise figures being *identical* rather than merely close is the
+deterministic generator proving itself: the same texture, byte for byte, from
+the same seed on two different GPUs through two different shells.
+
+`milk/shaders.rs` is the environment: the uniform block filled from the
+preset's own runtime, the sixteen bindings `prelude.wgsl` declares, and the
+passes that fill them. `milk/noise.rs` is MilkDrop's procedural noise.
+
+### The blur chain is not decoration, and neither is the noise
+
+`GetBlur1` is the corpus's second-commonest call after `tex2D` -- 27,921 uses,
+and all three levels together outnumber `GetPixel`. **A build that bound black
+there would have passed every other check in this milestone.** Two passes per
+level from `blur1_ps.fx`, `blur2_ps.fx` and `BlurPasses`, over MilkDrop's own
+weights `{4.0, 3.8, 3.5, 2.9, 1.9, 1.2, 0.7, 0.3}`, paired so four samples do
+the work of eight, each level half the size of the last.
+
+**A blur texture holds a remapped image.** The chain normalises into the
+preset's `blur1_min`/`blur1_max` range, and the prelude's `GetBlur1` undoes it
+-- one mapping and its inverse, written in two files, which is exactly the kind
+of pair that agrees at the default settings and nowhere else if either half is
+guessed.
+
+`tex3D` is 20.7% of the corpus and every one of those reads a volume nothing
+ships. Read from `AddNoiseTex` rather than invented, down to the cubic
+interpolant, which is not a Catmull-Rom and would have been substituted for one
+from memory.
+
+### The offsets MilkDrop's blur carries are deliberately not copied
+
+`blur1_ps.fx` offsets its reads by a whole source texel and `blur2_ps.fx` by
+one in x. Both are the Direct3D 9 half-texel rule in disguise: a destination
+half-texel is `0.5/dest`, and with the destination at half the source's size
+that is exactly `1.0/src`. wgpu aligns pixel and texel centres already.
+
+Same finding as M7a's warp transform, one pass along -- and worth noting that
+it was recognisable *because* of M7a. A constant added to a sampling coordinate
+inside a loop is the shape to be suspicious of.
+
+### Two things the wiring itself had to decide
+
+**A warp shader owns its own fading.** `fDecay` is not applied on top of one,
+because `ret *= 0.94` is how a preset spells it and doing both would fade
+twice. **A composite shader replaces MilkDrop's fixed-function composite** --
+the video echo and the gamma are the non-shader path, and the shader is handed
+the corner tint as `hue_shader` instead. The four whole-frame filters are
+separate passes in MilkDrop and still apply.
+
+Compilation is **per pass**, because 605 presets give one pass a shader and
+leave the other fixed-function. Whatever does not take falls back to M7a's
+path, and what it needed is reported through `Visual::preset_report`, which the
+library UI already shows.
+
+`naga` moves from a dev-dependency to a real one. wgpu answers a bad module
+through an error scope, which is a future, and a translated preset has to be
+accepted or rejected *now* so the other pass can still be built.
+
+### What is left
+
+The corpus figure that must not fall is in `milk_smoke`: presets drawing
+through their own shaders, and the passes behind them. What is left of M7b is
+a person watching their own presets -- which is the only test of whether a
+preset drawing *as itself* looks like itself, and the same thing M7a needed.
+Custom waves and shapes, and the preset library, are M7c.
