@@ -2175,6 +2175,45 @@ fn run_preset(renderer: &mut OffscreenRenderer, text: &str, frames: usize) -> Ve
     last
 }
 
+/// A shader block written the way a `.milk` file carries one: numbered lines,
+/// each behind the backtick MilkDrop's INI writer puts there.
+fn milk_shader_lines(key: &str, body: &str) -> String {
+    body.lines()
+        .enumerate()
+        .map(|(i, line)| format!("{key}_{}=`{line}\n", i + 1))
+        .collect()
+}
+
+/// A preset whose composite shader is exactly `body`.
+fn milk_comp(body: &str) -> String {
+    milk_preset(&milk_shader_lines(
+        "comp",
+        &format!("shader_body\n{{\n{body}\n}}"),
+    ))
+}
+
+/// The mean of one channel across the frame, 0..255.
+fn mean_channel(pixels: &[u8], channel: usize) -> f32 {
+    let mut sum = 0.0f32;
+    for pixel in pixels.chunks_exact(4) {
+        sum += f32::from(pixel[channel]);
+    }
+    sum / (pixels.len() / 4) as f32
+}
+
+/// How much a frame varies, as the mean absolute deviation of its brightness.
+///
+/// The figure that tells a flat fill from a texture: a bound noise volume has
+/// a large one and an unbound (black) sampler has none at all.
+fn spread(pixels: &[u8]) -> f32 {
+    let mean = mean_brightness(pixels);
+    let mut sum = 0.0f32;
+    for pixel in pixels.chunks_exact(4) {
+        sum += (f32::from(pixel[0].max(pixel[1]).max(pixel[2])) - mean).abs();
+    }
+    sum / (pixels.len() / 4) as f32
+}
+
 /// The near-black field every visual draws on, as the bytes a readback sees.
 /// Named here because the MilkDrop checks measure light *against* it.
 const BACKGROUND_BYTES: [u8; 3] = [5, 5, 8];
@@ -2401,6 +2440,111 @@ fn check_milkdrop() {
         "clearing the preset falls back to MilkDrop's defaults rather than to nothing",
         measure(&defaults).count > 100,
         format!("{} lit pixels", measure(&defaults).count),
+    );
+
+    // --- M7b: a preset's own shaders, translated and run. Everything above
+    // this point is M7a's fixed-function path; everything below only draws if
+    // HLSL became WGSL, compiled, bound and ran. ---
+
+    let painted = run_preset(&mut renderer, &milk_comp("ret = float3(1,0,0);"), 4);
+    check(
+        "a composite shader paints the colour it asks for",
+        mean_channel(&painted, 0) > 200.0 && mean_channel(&painted, 1) < 40.0,
+        format!(
+            "r {:.0}, g {:.0}, b {:.0}",
+            mean_channel(&painted, 0),
+            mean_channel(&painted, 1),
+            mean_channel(&painted, 2)
+        ),
+    );
+
+    // The warp shader writes into the feedback buffer rather than to the
+    // screen, so this is read through the *fixed-function* composite -- which
+    // is what makes it a different claim from the one above.
+    let warped = run_preset(
+        &mut renderer,
+        &milk_preset(&milk_shader_lines(
+            "warp",
+            "shader_body\n{\nret = float3(0,1,0);\n}",
+        )),
+        4,
+    );
+    check(
+        "a warp shader owns the feedback buffer",
+        mean_channel(&warped, 1) > 150.0 && mean_channel(&warped, 0) < 60.0,
+        format!(
+            "r {:.0}, g {:.0}",
+            mean_channel(&warped, 0),
+            mean_channel(&warped, 1)
+        ),
+    );
+
+    // `q1..q32` are the widest channel between a preset's equations and its
+    // shaders, and they run through the uniform block this milestone built.
+    let mut through_q = milk_comp("ret = float3(q1, 0, 0);");
+    through_q.push_str("per_frame_1=q1 = 1;\n");
+    let through_q = run_preset(&mut renderer, &through_q, 4);
+    check(
+        "a value set in per_frame reaches the shader as q1",
+        mean_channel(&through_q, 0) > 200.0,
+        format!("r {:.0}", mean_channel(&through_q, 0)),
+    );
+
+    // The blur chain: `GetBlur1` is the corpus's second-commonest call, and a
+    // build that bound black there would pass every check above.
+    let blurred = run_preset(&mut renderer, &milk_comp("ret = GetBlur3(uv)*4;"), 30);
+    let sharp = run_preset(&mut renderer, &milk_comp("ret = GetPixel(uv)*4;"), 30);
+    let lit = |px: &[u8]| {
+        px.chunks_exact(4)
+            .filter(|p| p[0].max(p[1]).max(p[2]) > BACKGROUND_BYTES[2] + 12)
+            .count()
+    };
+    check(
+        "the blur chain runs, and spreads the picture wider than a plain read",
+        lit(&blurred) > lit(&sharp) * 2,
+        format!(
+            "{} lit through GetBlur3 against {}",
+            lit(&blurred),
+            lit(&sharp)
+        ),
+    );
+
+    // The procedural noise volumes -- `tex3D` is 20.7% of the corpus, and
+    // every one of those reads a texture this build has to generate.
+    let noise = run_preset(
+        &mut renderer,
+        &milk_comp("ret = tex3D(sampler_noisevol_hq, float3(uv, 0.5)).xyz;"),
+        4,
+    );
+    check(
+        "a 3D noise volume is bound and is not flat",
+        spread(&noise) > 5.0 && mean_brightness(&noise) > 40.0,
+        format!(
+            "mean {:.0}, spread {:.1}",
+            mean_brightness(&noise),
+            spread(&noise)
+        ),
+    );
+
+    // Per pass, not per preset: 605 presets in the corpus give one pass a
+    // shader and leave the other fixed-function, and a composite that will not
+    // translate must not cost a preset its warp.
+    let mut half = milk_preset(&milk_shader_lines(
+        "warp",
+        "shader_body\n{\nret = float3(0,1,0);\n}",
+    ));
+    half.push_str(&milk_shader_lines(
+        "comp",
+        "shader_body\n{\nret = nosuchfunction(uv);\n}",
+    ));
+    let half = run_preset(&mut renderer, &half, 4);
+    check(
+        "a composite that will not translate does not cost the preset its warp",
+        mean_channel(&half, 1) > 150.0,
+        format!(
+            "g {:.0} through the fallback composite",
+            mean_channel(&half, 1)
+        ),
     );
 }
 

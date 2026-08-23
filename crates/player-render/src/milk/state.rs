@@ -311,6 +311,10 @@ pub struct FrameState {
     pub wave: WaveState,
     pub outer_border: Border,
     pub inner_border: Border,
+    /// The range each blur level is normalised into, which the chain writes
+    /// with and a preset's `GetBlur1..3` reads back through.
+    pub blur_min: [f32; 3],
+    pub blur_max: [f32; 3],
 }
 
 impl Default for FrameState {
@@ -342,6 +346,8 @@ impl Default for FrameState {
                 additive: false,
                 brighten: true,
             },
+            blur_min: [0.0; 3],
+            blur_max: [1.0; 3],
             outer_border: Border {
                 size: 0.01,
                 colour: [0.0, 0.0, 0.0, 0.0],
@@ -702,6 +708,19 @@ impl Runtime {
         }
     }
 
+    /// `q1..q32` as they stand after this frame's `per_frame` block.
+    ///
+    /// The widest channel between a preset's equations and its shaders: the
+    /// same numbers `env.rs` maps onto `_qa.._qh`.
+    pub fn q(&self) -> [f32; 32] {
+        let mut out = [0.0; 32];
+        for (i, slot) in self.slots.q.iter().enumerate().take(32) {
+            let v = self.ctx.get(*slot) as f32;
+            out[i] = if v.is_finite() { v } else { 0.0 };
+        }
+        out
+    }
+
     fn read_frame_state(&self) -> FrameState {
         let d = FrameState::default();
         // Index arithmetic against SCALARS' order, checked by the test below
@@ -749,6 +768,16 @@ impl Runtime {
             darken: flag("darken", d.darken),
             solarize: flag("solarize", d.solarize),
             invert: flag("invert", d.invert),
+            blur_min: [
+                num("blur1min", d.blur_min[0]),
+                num("blur2min", d.blur_min[1]),
+                num("blur3min", d.blur_min[2]),
+            ],
+            blur_max: [
+                num("blur1max", d.blur_max[0]),
+                num("blur2max", d.blur_max[1]),
+                num("blur3max", d.blur_max[2]),
+            ],
             wave: WaveState {
                 mode: (num("wave_mode", 0.0) as i32).rem_euclid(NUM_WAVES),
                 alpha: num("wave_a", d.wave.alpha),

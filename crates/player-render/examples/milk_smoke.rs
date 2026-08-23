@@ -25,6 +25,7 @@ use player_render::milk::state::{Inputs, Runtime};
 use player_render::milk::warp::{Aspect, Grid, Warp};
 use player_render::milk::wave::{self, WaveInput, WAVE_SAMPLES};
 use player_render::milk::{eel, MilkFrame, Preset};
+use player_render::milk::{hlsl, shaders};
 
 fn main() {
     let root = std::env::args()
@@ -802,6 +803,54 @@ fn render_leg(files: &[PathBuf], checks: &mut Checks) {
     println!(
         "  worst frame: {:.2}ms ({}) -- readback included",
         worst.0, worst.1
+    );
+
+    // M7b's own figure, and the one the phase says must never fall: how many
+    // of these presets draw through their *own* shaders rather than through
+    // MilkDrop's fixed-function path. Counted by translating each pass and
+    // asking naga -- the same acceptance the device applies, which is what
+    // `PresetPasses::set_shaders` does at load time.
+    let mut own_shaders = 0usize;
+    let mut passes_built = 0usize;
+    let mut passes_present = 0usize;
+    for path in files {
+        let Ok(text) = std::fs::read_to_string(path) else {
+            continue;
+        };
+        let Ok(preset) = Preset::parse(text.as_str()) else {
+            continue;
+        };
+        let mut all = true;
+        let mut any = false;
+        for (body, pass) in [
+            (&preset.warp, hlsl::Pass::Warp),
+            (&preset.comp, hlsl::Pass::Comp),
+        ] {
+            if body.trim().is_empty() {
+                continue;
+            }
+            any = true;
+            passes_present += 1;
+            let built = hlsl::parse(body)
+                .and_then(|shader| hlsl::emit(&shader, pass))
+                .ok()
+                .map(|out| match pass {
+                    hlsl::Pass::Warp => shaders::warp_module(&out.source),
+                    hlsl::Pass::Comp => shaders::comp_module(&out.source),
+                })
+                .is_some_and(|module| shaders::valid_wgsl(&module));
+            if built {
+                passes_built += 1;
+            } else {
+                all = false;
+            }
+        }
+        if any && all {
+            own_shaders += 1;
+        }
+    }
+    println!(
+        "  drawing through their own shaders: {own_shaders} presets, {passes_built}/{passes_present} passes"
     );
     println!(
         "  drawing through M7a's own path: {lit_presets}; waiting on shaders or custom waves: {dark_presets}"

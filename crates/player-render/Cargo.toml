@@ -11,6 +11,14 @@ edition.workspace = true
 wgpu = "30"
 bytemuck = { version = "1", features = ["derive"] }
 thiserror = "1"
+# The HLSL-to-WGSL translator's output is checked by *compiling* it (Phase 3
+# decision 54). wgpu does that on `create_shader_module` -- but it reports the
+# result through an error scope, which is a future, and a translated preset has
+# to be accepted or rejected *now* so the other pass can still be built. naga is
+# wgpu's own front end, already in the lock file at the version wgpu uses, so
+# calling it directly is the same acceptance taken synchronously. It is also
+# what lets the corpus check thousands of shaders without a GPU device.
+naga = { version = "30", features = ["wgsl-in"] }
 
 [dev-dependencies]
 # Only the offscreen smoke check needs to block on the async device request --
@@ -22,9 +30,4 @@ pollster = "0.4"
 # A dev-dependency, deliberately: the library still knows nothing about
 # player-core, which is what keeps a visual from computing DSP (decision 2).
 player-core = { path = "../player-core" }
-# The HLSL-to-WGSL translator's output is checked by *compiling* it
-# (Phase 3 decision 54). wgpu does that on `create_shader_module`, but a
-# corpus run compiles thousands of shaders and does not want a GPU device
-# per check, so the checks call naga -- wgpu's own front end, already in the
-# lock file at the version wgpu uses -- directly.
-naga = { version = "30", features = ["wgsl-in"] }
+

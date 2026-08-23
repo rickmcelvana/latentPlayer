@@ -49,7 +49,9 @@
 pub mod eel;
 pub mod frame;
 pub mod hlsl;
+pub mod noise;
 pub mod parse;
+pub mod shaders;
 pub mod state;
 pub mod warp;
 pub mod wave;

@@ -54,7 +54,20 @@ pub struct WarpVertex {
     pub position: [f32; 2],
     /// Where to sample the previous frame, in texture space 0..1.
     pub source: [f32; 2],
+    /// The grid point's own uv, un-warped.
+    ///
+    /// MilkDrop hands a warp shader both -- `uv` is where this vertex reads
+    /// *from* and `uv_orig` is where it *is* -- and a preset that mixes them
+    /// is comparing the motion against the still frame.
+    pub original: [f32; 2],
+    /// This grid point's radius and angle, read as `rad` and `ang`.
+    pub rad_ang: [f32; 2],
 }
+
+/// The four attributes a warp mesh vertex carries, shared by the built-in
+/// pipeline and a preset's own translated one, so the two cannot drift apart.
+pub const WARP_ATTRIBUTES: [wgpu::VertexAttribute; 4] =
+    wgpu::vertex_attr_array![0 => Float32x2, 1 => Float32x2, 2 => Float32x2, 3 => Float32x2];
 
 /// A coloured vertex, for everything drawn on top of the warp.
 #[repr(C)]
@@ -273,18 +286,7 @@ impl MilkFrame {
                 buffers: &[Some(wgpu::VertexBufferLayout {
                     array_stride: std::mem::size_of::<WarpVertex>() as u64,
                     step_mode: wgpu::VertexStepMode::Vertex,
-                    attributes: &[
-                        wgpu::VertexAttribute {
-                            format: wgpu::VertexFormat::Float32x2,
-                            offset: 0,
-                            shader_location: 0,
-                        },
-                        wgpu::VertexAttribute {
-                            format: wgpu::VertexFormat::Float32x2,
-                            offset: 8,
-                            shader_location: 1,
-                        },
-                    ],
+                    attributes: &WARP_ATTRIBUTES,
                 })],
                 compilation_options: Default::default(),
             },
@@ -532,6 +534,10 @@ impl MilkFrame {
             .map(|point| WarpVertex {
                 position: [point.x, point.y],
                 source: source_for(point),
+                // The grid runs -1..1 in clip space and a shader wants 0..1
+                // with y downward -- the same flip the warp transform makes.
+                original: [point.x * 0.5 + 0.5, 0.5 - point.y * 0.5],
+                rad_ang: [point.rad, point.ang],
             })
             .collect();
         queue.write_buffer(&self.vertices, 0, bytemuck::cast_slice(&data));
@@ -632,6 +638,139 @@ impl MilkFrame {
             pass.draw_indexed(0..self.index_count, 0, 0..1);
         }
         self.current = destination;
+    }
+
+    /// The composite uniform, filled the same way whichever composite runs.
+    fn write_composite_uniform(
+        &self,
+        queue: &wgpu::Queue,
+        state: &FrameState,
+        settings: &CompositeSettings,
+    ) {
+        let shade = corner_tints(settings.time, settings.shader);
+        queue.write_buffer(
+            &self.comp_uniform,
+            0,
+            bytemuck::bytes_of(&CompositeUniform {
+                shade,
+                echo: [
+                    state.echo_zoom,
+                    state.echo_alpha.clamp(0.0, 1.0),
+                    f32::from(u8::from(state.echo_orientation % 2 != 0)),
+                    f32::from(u8::from(state.echo_orientation >= 2)),
+                ],
+                misc: [
+                    state.gamma.max(0.0),
+                    attachments::target_is_srgb(self.target_format),
+                    0.0,
+                    0.0,
+                ],
+                filters: [
+                    f32::from(u8::from(state.brighten)),
+                    f32::from(u8::from(state.darken)),
+                    f32::from(u8::from(state.solarize)),
+                    f32::from(u8::from(state.invert)),
+                ],
+                background: {
+                    let [r, g, b] = attachments::BACKGROUND;
+                    [r as f32, g as f32, b as f32, 1.0]
+                },
+            }),
+        );
+    }
+
+    /// The view holding the picture as it currently stands.
+    ///
+    /// What a preset's own shaders read as `sampler_main`, and what the blur
+    /// chain runs over.
+    pub fn current_view(&self) -> &wgpu::TextureView {
+        &self.views[self.current]
+    }
+
+    /// The buffer a preset's composite reads its extra state from.
+    pub fn composite_uniform(&self) -> &wgpu::Buffer {
+        &self.comp_uniform
+    }
+
+    /// One turn of the loop, drawn by a preset's own translated warp shader.
+    ///
+    /// The same mesh and the same ping-pong as [`Self::advance`]; only the
+    /// fragment stage differs. **`fDecay` is not applied here**, because a
+    /// warp shader owns its own fading -- `ret *= 0.94` is how a preset spells
+    /// it, and doing both would fade twice.
+    pub fn advance_with(
+        &mut self,
+        encoder: &mut wgpu::CommandEncoder,
+        pipeline: &wgpu::RenderPipeline,
+        bind: &wgpu::BindGroup,
+    ) {
+        let destination = 1 - self.current;
+        {
+            let mut pass = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
+                label: Some("milk-warp-preset-pass"),
+                color_attachments: &[Some(wgpu::RenderPassColorAttachment {
+                    view: &self.views[destination],
+                    depth_slice: None,
+                    resolve_target: None,
+                    ops: wgpu::Operations {
+                        load: wgpu::LoadOp::Clear(wgpu::Color::TRANSPARENT),
+                        store: wgpu::StoreOp::Store,
+                    },
+                })],
+                depth_stencil_attachment: None,
+                timestamp_writes: None,
+                occlusion_query_set: None,
+                multiview_mask: None,
+            });
+            pass.set_pipeline(pipeline);
+            pass.set_bind_group(0, bind, &[]);
+            pass.set_vertex_buffer(0, self.vertices.slice(..));
+            pass.set_index_buffer(self.indices.slice(..), wgpu::IndexFormat::Uint32);
+            pass.draw_indexed(0..self.index_count, 0, 0..1);
+        }
+        self.current = destination;
+    }
+
+    /// The composite, drawn by a preset's own translated shader.
+    ///
+    /// The video echo and the gamma are **not** applied on top: those are
+    /// MilkDrop's fixed-function composite, and a preset with a composite
+    /// shader replaces them -- it is handed the corner tint as `hue_shader`
+    /// instead. The four whole-frame filters are separate passes in MilkDrop
+    /// and still apply, inside the entry wrapper.
+    #[allow(clippy::too_many_arguments)]
+    pub fn composite_with(
+        &self,
+        queue: &wgpu::Queue,
+        encoder: &mut wgpu::CommandEncoder,
+        target: &wgpu::TextureView,
+        state: &FrameState,
+        settings: &CompositeSettings,
+        pipeline: &wgpu::RenderPipeline,
+        environment: &wgpu::BindGroup,
+        extra: &wgpu::BindGroup,
+    ) {
+        self.write_composite_uniform(queue, state, settings);
+        let mut pass = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
+            label: Some("milk-comp-preset-pass"),
+            color_attachments: &[Some(wgpu::RenderPassColorAttachment {
+                view: target,
+                depth_slice: None,
+                resolve_target: None,
+                ops: wgpu::Operations {
+                    load: wgpu::LoadOp::Clear(attachments::background(self.target_format)),
+                    store: wgpu::StoreOp::Store,
+                },
+            })],
+            depth_stencil_attachment: None,
+            timestamp_writes: None,
+            occlusion_query_set: None,
+            multiview_mask: None,
+        });
+        pass.set_pipeline(pipeline);
+        pass.set_bind_group(0, environment, &[]);
+        pass.set_bind_group(1, extra, &[]);
+        pass.draw(0..3, 0..1);
     }
 
     /// Draws the waveform, the centre darkening and the borders into the
@@ -756,36 +895,7 @@ impl MilkFrame {
         state: &FrameState,
         settings: &CompositeSettings,
     ) {
-        let shade = corner_tints(settings.time, settings.shader);
-        queue.write_buffer(
-            &self.comp_uniform,
-            0,
-            bytemuck::bytes_of(&CompositeUniform {
-                shade,
-                echo: [
-                    state.echo_zoom,
-                    state.echo_alpha.clamp(0.0, 1.0),
-                    f32::from(u8::from(state.echo_orientation % 2 != 0)),
-                    f32::from(u8::from(state.echo_orientation >= 2)),
-                ],
-                misc: [
-                    state.gamma.max(0.0),
-                    attachments::target_is_srgb(self.target_format),
-                    0.0,
-                    0.0,
-                ],
-                filters: [
-                    f32::from(u8::from(state.brighten)),
-                    f32::from(u8::from(state.darken)),
-                    f32::from(u8::from(state.solarize)),
-                    f32::from(u8::from(state.invert)),
-                ],
-                background: {
-                    let [r, g, b] = attachments::BACKGROUND;
-                    [r as f32, g as f32, b as f32, 1.0]
-                },
-            }),
-        );
+        self.write_composite_uniform(queue, state, settings);
 
         let bind = device.create_bind_group(&wgpu::BindGroupDescriptor {
             label: Some("milk-comp-bind"),

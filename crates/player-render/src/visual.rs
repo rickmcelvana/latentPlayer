@@ -268,6 +268,15 @@ pub trait Visual {
     /// the MilkDrop one" would be exactly the shell-side type knowledge the
     /// seam exists to prevent.
     fn set_preset(&mut self, _gpu: &Gpu, _preset: Option<std::sync::Arc<crate::milk::Preset>>) {}
+
+    /// What this visual made of the preset it was given: what translated, what
+    /// did not, and what it asked for that this build does not have.
+    ///
+    /// Empty for every visual whose scene is not data, which is all of them
+    /// but one.
+    fn preset_report(&self) -> Vec<String> {
+        Vec::new()
+    }
 }
 
 /// The boxed form the renderer holds.

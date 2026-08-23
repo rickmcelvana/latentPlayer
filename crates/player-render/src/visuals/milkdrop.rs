@@ -23,6 +23,8 @@
 use std::sync::Arc;
 
 use crate::milk::frame::{CompositeSettings, MilkFrame, DEFAULT_MESH};
+use crate::milk::hlsl::{self, Pass};
+use crate::milk::shaders::{PresetInputs, PresetPasses};
 use crate::milk::state::{FrameState, Inputs, Runtime};
 use crate::milk::warp::{Grid, Warp};
 use crate::milk::wave::{self, WaveInput, WAVE_SAMPLES};
@@ -152,6 +154,13 @@ pub struct MilkDropVisual {
     /// Cleared on the next draw, so the loop never warps the previous preset's
     /// picture under the new one's equations.
     needs_clear: bool,
+    /// The environment a preset's own shaders read, and the pipelines they
+    /// compile to. Present whether or not this preset has any -- the blur
+    /// chain and the noise textures live here too.
+    passes: PresetPasses,
+    /// What the translator made of this preset, for a report: which passes
+    /// took, and what each one asked for that this build does not have.
+    report: Vec<String>,
 }
 
 impl MilkDropVisual {
@@ -163,7 +172,10 @@ impl MilkDropVisual {
         let (w, h) = feedback_size(width, height);
         let frame = MilkFrame::new(gpu.device, gpu.format, w, h, DEFAULT_MESH.0, DEFAULT_MESH.1);
         let grid = Grid::new(DEFAULT_MESH.0, DEFAULT_MESH.1, frame.aspect());
+        let passes = PresetPasses::new(gpu.device, gpu.queue, w, h, gpu.format);
         Self {
+            passes,
+            report: Vec::new(),
             runtime: Runtime::new(&preset),
             preset,
             frame,
@@ -193,8 +205,55 @@ impl MilkDropVisual {
         self.needs_clear = true;
     }
 
+    /// Translate this preset's shaders and build what compiles.
+    ///
+    /// Per pass, not per preset: **605 presets in the corpus give one pass a
+    /// shader and leave the other fixed-function**, and a composite that will
+    /// not translate should not cost a preset its warp. Whatever does not take
+    /// falls back to M7a's path, which is a picture rather than nothing.
+    fn translate(&mut self, device: &wgpu::Device) {
+        self.report.clear();
+        let build = |source: &str, pass: Pass, name: &str, report: &mut Vec<String>| {
+            if source.trim().is_empty() {
+                return None;
+            }
+            match hlsl::parse(source).and_then(|shader| hlsl::emit(&shader, pass)) {
+                Ok(out) => {
+                    for texture in &out.wants_textures {
+                        report.push(format!(
+                            "texture:{texture}: named by the {name} shader;                              texture packs ship separately from presets"
+                        ));
+                    }
+                    Some(out.source)
+                }
+                Err(e) => {
+                    report.push(format!("{name} shader, line {}: {}", e.line, e.detail));
+                    None
+                }
+            }
+        };
+        let warp = build(&self.preset.warp, Pass::Warp, "warp", &mut self.report);
+        let comp = build(&self.preset.comp, Pass::Comp, "composite", &mut self.report);
+        let (warp_ok, comp_ok) = self
+            .passes
+            .set_shaders(device, warp.as_deref(), comp.as_deref());
+        if warp.is_some() && !warp_ok {
+            self.report
+                .push("warp shader: translated but would not compile".into());
+        }
+        if comp.is_some() && !comp_ok {
+            self.report
+                .push("composite shader: translated but would not compile".into());
+        }
+    }
+
     fn rebuild(&mut self, gpu: &Gpu, width: u32, height: u32) {
         let (w, h) = feedback_size(width, height);
+        // The blur chain's targets are sized from the feedback buffer, so a
+        // resize rebuilds both together -- and the preset's pipelines with
+        // them, since they are bound to this layout.
+        self.passes = PresetPasses::new(gpu.device, gpu.queue, w, h, gpu.format);
+        self.translate(gpu.device);
         self.frame = MilkFrame::new(gpu.device, gpu.format, w, h, DEFAULT_MESH.0, DEFAULT_MESH.1);
         self.grid = Grid::new(DEFAULT_MESH.0, DEFAULT_MESH.1, self.frame.aspect());
         self.needs_clear = true;
@@ -307,6 +366,11 @@ impl Visual for MilkDropVisual {
         // selection names a file that has since moved. MilkDrop's defaults are
         // the honest picture for that.
         MilkDropVisual::set_preset(self, preset.unwrap_or_else(|| Arc::new(Preset::default())));
+        self.translate(_gpu.device);
+    }
+
+    fn preset_report(&self) -> Vec<String> {
+        self.report.clone()
     }
 
     fn resize(&mut self, gpu: &Gpu, width: u32, height: u32) {
@@ -364,21 +428,100 @@ impl Visual for MilkDropVisual {
         if std::mem::take(&mut self.needs_clear) {
             self.frame.clear(&mut encoder);
         }
-        self.frame
-            .advance(gpu.device, gpu.queue, &mut encoder, state.decay, state.wrap);
+
+        let (fw, fh) = self.frame.size();
+        let inputs = PresetInputs {
+            time: self.time,
+            fps: self.fps,
+            frame: self.frames,
+            progress: 0.0,
+            bass: self.levels.relative[0],
+            mid: self.levels.relative[1],
+            treb: self.levels.relative[2],
+            vol: (self.levels.relative[0] + self.levels.relative[1] + self.levels.relative[2])
+                / 3.0,
+            bass_att: self.levels.attenuated[0],
+            mid_att: self.levels.attenuated[1],
+            treb_att: self.levels.attenuated[2],
+            vol_att: (self.levels.attenuated[0]
+                + self.levels.attenuated[1]
+                + self.levels.attenuated[2])
+                / 3.0,
+            q: self.runtime.q(),
+            blur_min: state.blur_min,
+            blur_max: state.blur_max,
+            aspect,
+            width: fw,
+            height: fh,
+        };
+        self.passes.write_uniforms(gpu.queue, &inputs);
+
+        // The blur runs on the picture as it stands *before* this frame's
+        // warp, which is what a warp shader reading `GetBlur1` expects: the
+        // blur of what it is about to move, not of what it has just drawn.
+        if self.passes.wants_blur() {
+            self.passes.run_blur(
+                gpu.device,
+                gpu.queue,
+                &mut encoder,
+                self.frame.current_view(),
+                &inputs,
+            );
+        }
+
+        match self.passes.warp_pipeline() {
+            Some(pipeline) => {
+                let bind = self
+                    .passes
+                    .bind_group(gpu.device, self.frame.current_view());
+                self.frame.advance_with(&mut encoder, pipeline, &bind);
+            }
+            None => {
+                self.frame
+                    .advance(gpu.device, gpu.queue, &mut encoder, state.decay, state.wrap)
+            }
+        }
+
         self.frame
             .draw_overlays(gpu.device, gpu.queue, &mut encoder, &state, wave.as_ref());
-        self.frame.composite(
-            gpu.device,
-            gpu.queue,
-            &mut encoder,
-            target,
-            &state,
-            &CompositeSettings {
-                time: self.time,
-                shader: fixed.shader,
-            },
-        );
+
+        let settings = CompositeSettings {
+            time: self.time,
+            shader: fixed.shader,
+        };
+        match self.passes.comp_pipeline() {
+            Some(pipeline) => {
+                let bind = self
+                    .passes
+                    .bind_group(gpu.device, self.frame.current_view());
+                let extra = gpu.device.create_bind_group(&wgpu::BindGroupDescriptor {
+                    label: Some("milk-comp-extra"),
+                    layout: self.passes.comp_extra_layout(),
+                    entries: &[wgpu::BindGroupEntry {
+                        binding: 0,
+                        resource: self.frame.composite_uniform().as_entire_binding(),
+                    }],
+                });
+                self.frame.composite_with(
+                    gpu.queue,
+                    &mut encoder,
+                    target,
+                    &state,
+                    &settings,
+                    pipeline,
+                    &bind,
+                    &extra,
+                );
+            }
+            None => self.frame.composite(
+                gpu.device,
+                gpu.queue,
+                &mut encoder,
+                target,
+                &state,
+                &settings,
+            ),
+        }
         encoder.finish()
     }
 }

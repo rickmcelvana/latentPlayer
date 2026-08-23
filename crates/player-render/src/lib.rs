@@ -226,6 +226,10 @@ impl Renderer {
             );
         }
         report.extend(self.preset_faults.iter().map(|f| f.to_string()));
+        // And what the shader translator made of it -- a pass that would not
+        // translate is the difference between a preset drawing as itself and
+        // drawing approximately, so it belongs in the same list a person reads.
+        report.extend(self.visual.preset_report());
         report
     }
 
