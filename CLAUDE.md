@@ -776,6 +776,26 @@ already done: `index.css` is re-tokenized to the latentbeats.com palette
 the `prefers-color-scheme` split is dropped, and the hard-coded colours in
 `App.css` became tokens. D2 (two-column layout) is next.
 
+**Phase 3 M7c first item is done and user-confirmed on both shells**
+(2026-09-01): custom waves and custom shapes. `milk/custom.rs` is `WaveRig` and
+`ShapeRig`, each with its own variable pool (its own `Symbols`/`Context`,
+MilkDrop's three-pool rule). The format was confirmed against the corpus rather
+than guessed -- `wavecode_N_<field>` scalars beside `wave_N_per_point1..N` code
+(and `shapecode_N_*` + `shape_N_per_frame`) -- and `value1`/`value2` are the
+waveform samples, or the spectrum when `bSpectrum` is set. `q1..q32` seed from
+the preset's per-frame result and `t1..t8` from each rig's own init; a wave's
+per-point block runs on one context so `x`/`y`/colour carry point-to-point.
+`frame.rs`'s `draw_overlays` now takes `waves: &[Wave]` + `shapes: &[ShapeGeom]`
+with a new additive shape pipeline; shapes are instanced n-gon fans (centre-to-
+rim colour) plus an optional border. A shape with no per-frame code draws at the
+file's defaults, and a disabled wave/shape draws nothing. Textured shapes are
+deferred. Verified: **122/122** `visual_smoke` (four new M7c checks: the wave's
+`y` orientation -- 0 bottom/1 top, `value1` carrying the waveform sample, the
+shape's centre/radius, and the `enabled=0` gate) and **133/133** at
+`/visualizer.html`, agreeing figure for figure; 272 unit tests, `milk_smoke`
+168/168 over 150 real presets, clippy/fmt clean on both targets. **Confirmed
+live on both shells: some presets work well and are not mirrored.**
+
 The certificate answer changed a finding into a fix: ureq defaults to
 webpki-roots, a bundle compiled into the binary, under which installing a
 self-hosted server's CA in the OS store does nothing -- so the obvious advice

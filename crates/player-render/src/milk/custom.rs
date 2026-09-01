@@ -537,10 +537,6 @@ impl ShapeRig {
         q_seed: &[f64; Q_COUNT],
         aspect: Aspect,
     ) -> Vec<ShapeGeom> {
-        let per_frame = match self.per_frame.as_ref() {
-            Some(p) => p,
-            None => return Vec::new(),
-        };
         if !self.enabled {
             return Vec::new();
         }
@@ -581,9 +577,13 @@ impl ShapeRig {
             self.ctx.set(self.border_b, self.file_border[2]);
             self.ctx.set(self.border_a, self.file_border[3]);
 
-            if self.ctx.run(per_frame).is_err() {
-                self.faults.push("per_frame ran past its budget".into());
-                continue;
+            // A shape with no per-frame code draws once, at the file's
+            // defaults; the block is optional, unlike a wave's per-point.
+            if let Some(per_frame) = self.per_frame.as_ref() {
+                if self.ctx.run(per_frame).is_err() {
+                    self.faults.push("per_frame ran past its budget".into());
+                    continue;
+                }
             }
 
             let x = self.ctx.get(self.x);

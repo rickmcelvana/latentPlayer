@@ -3526,3 +3526,27 @@ M7c, ordered by "how many presets stop looking wrong":
 - Preset editing. (The "new MilkDrop lets people create presets in-app" fact
   is noted as a Phase 6 hook -- see PLAN.md §7 -- not started here.)
 - WebGL2 fallback (decision 8).
+
+## M7c first item -- custom waves and custom shapes: done, user-confirmed 2026-09-01
+
+The first item of the re-planned M7c, and the fix for "most of the others did
+not work": the non-shader presets that draw through their own code. `milk/
+custom.rs` is `WaveRig` and `ShapeRig`, each with its own variable pool (its
+own `Symbols`/`Context`, MilkDrop's three-pool rule). The format was confirmed
+against the corpus rather than guessed -- `wavecode_N_<field>` scalars beside
+`wave_N_per_point1..N` code (and `shapecode_N_*` + `shape_N_per_frame`) -- and
+`value1`/`value2` are the waveform samples, or the spectrum when `bSpectrum` is
+set. `q1..q32` seed from the preset's per-frame result and `t1..t8` from each
+rig's own init; a wave's per-point block runs on one context so `x`/`y`/colour
+carry point-to-point. `frame.rs`'s `draw_overlays` now takes `waves: &[Wave]` +
+`shapes: &[ShapeGeom]` with a new additive shape pipeline; shapes are instanced
+n-gon fans (centre-to-rim colour) plus an optional border. A shape with no
+per-frame code draws at the file's defaults, and a disabled wave/shape draws
+nothing. Textured shapes are deferred.
+
+Verified: **122/122** `visual_smoke` (four new M7c checks: the wave's `y`
+orientation -- 0 bottom/1 top, `value1` carrying the waveform sample, the
+shape's centre/radius, and the `enabled=0` gate) and **133/133** at
+`/visualizer.html`, agreeing figure for figure; 272 unit tests, `milk_smoke`
+168/168 over 150 real presets, clippy/fmt clean on both targets. **Confirmed
+live on both shells: some presets work well and are not mirrored.**

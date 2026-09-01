@@ -1476,6 +1476,36 @@ function milkComp(body: string): string {
   return milkPreset(milkShaderLines("comp", `shader_body\n{\n${body}\n}`));
 }
 
+/// A preset that draws only a custom wave: a horizontal white line at the given
+/// `y` (0..1), the built-in waveform switched off. `value1` plays no part, so
+/// the line's position is exactly what the per-point code wrote.
+function customWaveLine(y: number): string {
+  return milkPreset(
+    "fWaveAlpha=0\n" +
+      "wavecode_0_enabled=1\n" +
+      "wavecode_0_samples=64\n" +
+      "wave_0_per_point1=x=sample;\n" +
+      `wave_0_per_point2=y=${y};\n` +
+      "wave_0_per_point3=a=1;\n",
+  );
+}
+
+/// A preset that draws only an opaque white 4-sided shape at the centre, of the
+/// given radius (0..1), with no per-frame code -- the shape form with the least
+/// to go wrong.
+function customSquare(rad: number): string {
+  return milkPreset(
+    "fWaveAlpha=0\n" +
+      "shapecode_0_enabled=1\n" +
+      "shapecode_0_sides=4\n" +
+      "shapecode_0_x=0.5\n" +
+      "shapecode_0_y=0.5\n" +
+      `shapecode_0_rad=${rad}\n` +
+      "shapecode_0_r=1\nshapecode_0_g=1\nshapecode_0_b=1\nshapecode_0_a=1\n" +
+      "shapecode_0_r2=1\nshapecode_0_g2=1\nshapecode_0_b2=1\nshapecode_0_a2=1\n",
+  );
+}
+
 /// The mean of one channel across the canvas, 0..255.
 function meanChannel(target: HTMLCanvasElement, channel: number): number {
   const px = pixels(target);
@@ -1777,6 +1807,92 @@ async function checkMilkdrop(): Promise<void> {
     "a composite that will not translate does not cost the preset its warp",
     halfG > 150,
     `g ${halfG.toFixed(0)} through the fallback composite`,
+  );
+
+  // --- M7c: custom waves and shapes, drawn from the preset's own code. ---
+
+  // A custom wave's per-point code owns each point's position; y runs 0 at the
+  // bottom to 1 at the top, so the line at 0.75 sits higher than the one at
+  // 0.25 by half the frame -- and pins the vertical orientation in the bargain.
+  run(customWaveLine(0.25), 4);
+  const lowFigure = measure(surface);
+  run(customWaveLine(0.75), 4);
+  const highFigure = measure(surface);
+  const dy = lowFigure.minY - highFigure.minY;
+  check(
+    "a custom wave draws, and its y is 0 at the bottom, 1 at the top",
+    lowFigure.lit > 200 && highFigure.lit > 200 && dy > 100 && dy < 220,
+    `y=0.25 at row ${lowFigure.minY}, y=0.75 at row ${highFigure.minY} (${dy}px apart)`,
+  );
+
+  // value1 is the left channel's sample: a tone spreads a wave that reads it
+  // across x, silence leaves it on the centre column.
+  const value1Preset = milkPreset(
+    "fWaveAlpha=0\n" +
+      "wavecode_0_enabled=1\n" +
+      "wavecode_0_samples=64\n" +
+      "wave_0_per_point1=x=value1*0.5+0.5;\n" +
+      "wave_0_per_point2=y=sample;\n" +
+      "wave_0_per_point3=a=1;\n",
+  );
+  run(value1Preset, 4);
+  const loudFigure = measure(surface);
+  const quietSignal = silence();
+  const quietSpectrum = spectrumOf(quietSignal, 2);
+  renderer.setPreset(value1Preset);
+  for (let f = 0; f < 4; f++) {
+    renderer.draw_frame(
+      quietSignal,
+      2,
+      RATE,
+      FRAME_SECONDS,
+      quietSpectrum.levels,
+      quietSpectrum.centres,
+      undefined,
+    );
+  }
+  const quietFigure = measure(surface);
+  check(
+    "a custom wave's value1 carries the waveform sample",
+    loudFigure.maxX - loudFigure.minX > quietFigure.maxX - quietFigure.minX + 60,
+    `tone ${loudFigure.maxX - loudFigure.minX}px wide, silence ${quietFigure.maxX - quietFigure.minX}px wide`,
+  );
+
+  // A custom shape draws at its centre and radius: radius 0.25 around the centre
+  // spans a quarter of the frame on a side.
+  run(customSquare(0.25), 4);
+  const square = measure(surface);
+  check(
+    "a custom shape draws at its centre and radius",
+    square.lit > 5000 &&
+      Math.abs(square.minX - 80) < 12 &&
+      Math.abs(square.maxX - 240) < 12 &&
+      Math.abs(square.minY - 80) < 12 &&
+      Math.abs(square.maxY - 240) < 12,
+    `${square.lit}px, x ${square.minX}..${square.maxX}, y ${square.minY}..${square.maxY}`,
+  );
+
+  // An `enabled=0` wave or shape is not drawn, and with the built-in waveform
+  // off there is nothing else to light the frame.
+  run(
+    milkPreset(
+      "fWaveAlpha=0\n" +
+        "wavecode_0_enabled=0\n" +
+        "wavecode_0_samples=64\n" +
+        "wave_0_per_point1=x=0.5;\n" +
+        "wave_0_per_point2=y=0.5;\n" +
+        "wave_0_per_point3=a=1;\n" +
+        "shapecode_0_enabled=0\n" +
+        "shapecode_0_sides=4\n" +
+        "shapecode_0_rad=0.25\n",
+    ),
+    4,
+  );
+  const disabledLit = measure(surface).lit;
+  check(
+    "a disabled wave and shape draw nothing",
+    disabledLit === 0,
+    `${disabledLit} lit px`,
   );
 }
 
