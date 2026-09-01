@@ -30,6 +30,7 @@
 //! every other visual in this crate follows and it is why the two shells agree.
 
 use crate::attachments;
+use crate::milk::custom::ShapeGeom;
 use crate::milk::state::FrameState;
 use crate::milk::warp::{Aspect, Grid, GridPoint};
 use crate::milk::wave::Wave;
@@ -124,6 +125,8 @@ pub struct MilkFrame {
     comp_pipeline: wgpu::RenderPipeline,
     /// Alpha-over triangles, for the centre darkening and the borders.
     shape_pipeline: wgpu::RenderPipeline,
+    /// The same, additive, for a custom shape whose preset asked to add.
+    shape_add_pipeline: wgpu::RenderPipeline,
     /// Line strips and points, over and additive: the four ways a preset can
     /// ask for its waveform.
     line_over: wgpu::RenderPipeline,
@@ -391,6 +394,11 @@ impl MilkFrame {
         };
         let shape_pipeline =
             overlay_pipeline("milk-shapes", wgpu::PrimitiveTopology::TriangleList, false);
+        let shape_add_pipeline = overlay_pipeline(
+            "milk-shapes-add",
+            wgpu::PrimitiveTopology::TriangleList,
+            true,
+        );
         let line_over =
             overlay_pipeline("milk-wave-over", wgpu::PrimitiveTopology::LineStrip, false);
         let line_add = overlay_pipeline("milk-wave-add", wgpu::PrimitiveTopology::LineStrip, true);
@@ -450,6 +458,7 @@ impl MilkFrame {
             warp_pipeline,
             comp_pipeline,
             shape_pipeline,
+            shape_add_pipeline,
             line_over,
             line_add,
             point_over,
@@ -773,8 +782,8 @@ impl MilkFrame {
         pass.draw(0..3, 0..1);
     }
 
-    /// Draws the waveform, the centre darkening and the borders into the
-    /// feedback buffer, in MilkDrop's order.
+    /// Draws the waveforms, the custom shapes, the centre darkening and the
+    /// borders into the feedback buffer, in MilkDrop's order.
     ///
     /// Into the feedback buffer, not over the composite: that is what makes
     /// them part of the loop, so this frame's waveform is next frame's trail.
@@ -784,17 +793,20 @@ impl MilkFrame {
         queue: &wgpu::Queue,
         encoder: &mut wgpu::CommandEncoder,
         state: &FrameState,
-        wave: Option<&Wave>,
+        waves: &[Wave],
+        shapes: &[ShapeGeom],
     ) {
         let aspect = self.aspect();
-        let mut wave_runs: Vec<(usize, usize)> = Vec::new();
         let mut vertices: Vec<ShapeVertex> = Vec::new();
+        // Each call is (pipeline, from, to). Pipelines, by index:
+        // 0 line_over, 1 line_add, 2 point_over, 3 point_add,
+        // 4 shape, 5 shape_add.
+        let mut calls: Vec<(u8, u32, u32)> = Vec::new();
 
-        if let Some(wave) = wave {
+        for wave in waves {
             // Thick lines and fat dots are four copies a pixel apart, which is
             // MilkDrop's way of drawing a two-pixel line on hardware that only
-            // draws one-pixel ones -- and is still the only way here, since
-            // WGSL has neither a line width nor a point size.
+            // draws one-pixel ones.
             let offsets: &[[f32; 2]] = if wave.thick || wave.dots {
                 let (dx, dy) = (2.0 / self.width as f32, 2.0 / self.height as f32);
                 &[[0.0, 0.0], [dx, 0.0], [dx, dy], [0.0, dy]]
@@ -805,27 +817,75 @@ impl MilkFrame {
                 Some(at) => vec![(0, at), (at, wave.points.len())],
                 None => vec![(0, wave.points.len())],
             };
+            let pipeline = match (wave.dots, wave.additive) {
+                (true, true) => 3u8,
+                (true, false) => 2u8,
+                (false, true) => 1u8,
+                (false, false) => 0u8,
+            };
             for offset in offsets {
                 for (from, to) in &runs {
                     if to - from < 2 {
                         continue;
                     }
-                    let start = vertices.len();
+                    let start = vertices.len() as u32;
                     vertices.extend(wave.points[*from..*to].iter().map(|p| ShapeVertex {
                         position: [p[0] + offset[0], p[1] + offset[1]],
                         colour: wave.colour,
                     }));
-                    wave_runs.push((start, vertices.len()));
+                    calls.push((pipeline, start, vertices.len() as u32));
                 }
             }
         }
 
-        let shapes_start = vertices.len();
+        let centre_start = vertices.len();
         if state.darken_center {
             push_darken_center(&mut vertices, aspect);
         }
         push_borders(&mut vertices, state);
-        let shapes_end = vertices.len();
+        let centre_end = vertices.len();
+        if centre_end > centre_start {
+            calls.push((4u8, centre_start as u32, centre_end as u32));
+        }
+
+        // Custom shapes: a triangle fan per instance (centre colour fading to
+        // the rim), then the border as a closed line loop.
+        for shape in shapes {
+            let fill_pipeline = if shape.additive { 5u8 } else { 4u8 };
+            let start = vertices.len() as u32;
+            let centre = ShapeVertex {
+                position: shape.centre,
+                colour: shape.inner,
+            };
+            for k in 0..shape.rim.len() {
+                let next = ShapeVertex {
+                    position: shape.rim[(k + 1) % shape.rim.len()],
+                    colour: shape.outer,
+                };
+                vertices.push(centre);
+                vertices.push(ShapeVertex {
+                    position: shape.rim[k],
+                    colour: shape.outer,
+                });
+                vertices.push(next);
+            }
+            calls.push((fill_pipeline, start, vertices.len() as u32));
+
+            if shape.border_colour[3] >= 0.004 {
+                let bstart = vertices.len() as u32;
+                for k in 0..=shape.rim.len() {
+                    vertices.push(ShapeVertex {
+                        position: shape.rim[k % shape.rim.len()],
+                        colour: shape.border_colour,
+                    });
+                }
+                calls.push((
+                    if shape.additive { 1u8 } else { 0u8 },
+                    bstart,
+                    vertices.len() as u32,
+                ));
+            }
+        }
 
         if vertices.is_empty() {
             return;
@@ -852,21 +912,17 @@ impl MilkFrame {
         });
         pass.set_vertex_buffer(0, self.overlay.slice(..));
 
-        if let Some(wave) = wave {
-            let pipeline = match (wave.dots, wave.additive) {
-                (true, true) => &self.point_add,
-                (true, false) => &self.point_over,
-                (false, true) => &self.line_add,
-                (false, false) => &self.line_over,
-            };
-            pass.set_pipeline(pipeline);
-            for (from, to) in &wave_runs {
-                pass.draw(*from as u32..*to as u32, 0..1);
-            }
-        }
-        if shapes_end > shapes_start {
-            pass.set_pipeline(&self.shape_pipeline);
-            pass.draw(shapes_start as u32..shapes_end as u32, 0..1);
+        let pipelines: [&wgpu::RenderPipeline; 6] = [
+            &self.line_over,
+            &self.line_add,
+            &self.point_over,
+            &self.point_add,
+            &self.shape_pipeline,
+            &self.shape_add_pipeline,
+        ];
+        for (pipeline, from, to) in &calls {
+            pass.set_pipeline(pipelines[*pipeline as usize]);
+            pass.draw(*from..*to, 0..1);
         }
     }
 

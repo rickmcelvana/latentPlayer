@@ -22,12 +22,13 @@
 
 use std::sync::Arc;
 
+use crate::milk::custom::{ShapeGeom, ShapeRig, WaveRig};
 use crate::milk::frame::{CompositeSettings, MilkFrame, DEFAULT_MESH};
 use crate::milk::hlsl::{self, Pass};
 use crate::milk::shaders::{PresetInputs, PresetPasses};
 use crate::milk::state::{FrameState, Inputs, Runtime};
 use crate::milk::warp::{Grid, Warp};
-use crate::milk::wave::{self, WaveInput, WAVE_SAMPLES};
+use crate::milk::wave::{self, Wave, WaveInput, WAVE_SAMPLES};
 use crate::milk::Preset;
 use crate::visual::{Gpu, Visual, VisualFrame};
 
@@ -161,6 +162,9 @@ pub struct MilkDropVisual {
     /// What the translator made of this preset, for a report: which passes
     /// took, and what each one asked for that this build does not have.
     report: Vec<String>,
+    /// The preset's custom waves and shapes, one rig each (M7c).
+    waves: Vec<WaveRig>,
+    shapes: Vec<ShapeRig>,
 }
 
 impl MilkDropVisual {
@@ -173,6 +177,7 @@ impl MilkDropVisual {
         let frame = MilkFrame::new(gpu.device, gpu.format, w, h, DEFAULT_MESH.0, DEFAULT_MESH.1);
         let grid = Grid::new(DEFAULT_MESH.0, DEFAULT_MESH.1, frame.aspect());
         let passes = PresetPasses::new(gpu.device, gpu.queue, w, h, gpu.format);
+        let (waves, shapes) = build_rigs(&preset);
         Self {
             passes,
             report: Vec::new(),
@@ -187,6 +192,8 @@ impl MilkDropVisual {
             left: vec![0.0; WAVE_SAMPLES],
             right: vec![0.0; WAVE_SAMPLES],
             needs_clear: true,
+            waves,
+            shapes,
         }
     }
 
@@ -197,8 +204,11 @@ impl MilkDropVisual {
     /// touches nothing else -- which is what makes flipping through a folder of
     /// a thousand presets cheap.
     pub fn set_preset(&mut self, preset: Arc<Preset>) {
+        let (waves, shapes) = build_rigs(&preset);
         self.runtime = Runtime::new(&preset);
         self.preset = preset;
+        self.waves = waves;
+        self.shapes = shapes;
         self.time = 0.0;
         self.frames = 0;
         self.levels = Levels::new();
@@ -341,6 +351,14 @@ impl MilkDropVisual {
     }
 }
 
+/// Compiles the preset's custom waves and shapes into their rigs (M7c).
+fn build_rigs(preset: &Preset) -> (Vec<WaveRig>, Vec<ShapeRig>) {
+    (
+        preset.waves.iter().map(WaveRig::new).collect(),
+        preset.shapes.iter().map(ShapeRig::new).collect(),
+    )
+}
+
 /// The feedback pair's size for a given viewport.
 ///
 /// The window's shape, capped on its long edge -- so a preset's aspect
@@ -405,12 +423,21 @@ impl Visual for MilkDropVisual {
 
         let aspect = self.frame.aspect();
         let (feedback_width, _) = self.frame.size();
-        let wave = wave::build(
+        let engine_inputs = self.inputs();
+        let q_seed: [f64; 32] = {
+            let q = self.runtime.q();
+            std::array::from_fn(|i| q[i] as f64)
+        };
+        let left = self.left.clone();
+        let right = self.right.clone();
+
+        let mut waves: Vec<Wave> = Vec::new();
+        if let Some(built_in) = wave::build(
             &state.wave,
             &fixed,
             &WaveInput {
-                left: &self.left,
-                right: &self.right,
+                left: &left,
+                right: &right,
                 time: self.time,
                 aspect,
                 width: feedback_width,
@@ -418,7 +445,19 @@ impl Visual for MilkDropVisual {
                 mid: self.levels.relative[1],
                 treb: self.levels.relative[2],
             },
-        );
+        ) {
+            waves.push(built_in);
+        }
+        for rig in &mut self.waves {
+            if let Some(custom) = rig.build(&engine_inputs, &q_seed, &left, &right, frame.levels) {
+                waves.push(custom);
+            }
+        }
+
+        let mut shapes: Vec<ShapeGeom> = Vec::new();
+        for rig in &mut self.shapes {
+            shapes.extend(rig.build(&engine_inputs, &q_seed, aspect));
+        }
 
         let mut encoder = gpu
             .device
@@ -483,7 +522,7 @@ impl Visual for MilkDropVisual {
         }
 
         self.frame
-            .draw_overlays(gpu.device, gpu.queue, &mut encoder, &state, wave.as_ref());
+            .draw_overlays(gpu.device, gpu.queue, &mut encoder, &state, &waves, &shapes);
 
         let settings = CompositeSettings {
             time: self.time,

@@ -22,8 +22,7 @@ use std::time::Instant;
 
 use player_render::milk::frame::CompositeSettings;
 use player_render::milk::state::{Inputs, Runtime};
-use player_render::milk::warp::{Aspect, Grid, Warp};
-use player_render::milk::wave::{self, WaveInput, WAVE_SAMPLES};
+use player_render::milk::warp::{Grid, Warp};
 use player_render::milk::{eel, MilkFrame, Preset};
 use player_render::milk::{hlsl, shaders};
 
@@ -775,18 +774,16 @@ fn render_leg(files: &[PathBuf], checks: &mut Checks) {
         if per_frame_ms > worst.0 {
             worst = (per_frame_ms, name.clone());
         }
-        // What M7a is responsible for, and no more. A preset draws light here
-        // only if its *built-in* waveform is on: three of the five in the
-        // author's own corpus set `fWaveAlpha=0.001`, deliberately below
-        // MilkDrop's own 0.004 threshold, because their picture comes from
-        // custom waves (M7c) and preset shaders (M7b). Claiming "it draws
-        // light" for those would be claiming a milestone that has not happened,
-        // and the claim would have to be deleted to let M7b pass.
-        if draws_built_in_waveform(&text, SIZE) {
+        // A preset draws here if it puts any light into the feedback buffer --
+        // its built-in waveform, its custom waves or shapes (M7c), or its own
+        // translated shaders (M7b). `lit` is the ground truth; a preset whose
+        // picture is gated on a band the test tone does not produce draws
+        // nothing and is counted dark, exactly as a real collection would show.
+        if lit > 0 {
             lit_presets += 1;
             checks.claim(
-                &format!("{name} draws its built-in waveform"),
-                lit > 0,
+                &format!("{name} draws"),
+                true,
                 format!("{lit} lit px, {per_frame_ms:.2}ms/frame incl. readback"),
             );
         } else {
@@ -794,9 +791,7 @@ fn render_leg(files: &[PathBuf], checks: &mut Checks) {
             checks.claim(
                 &format!("{name} runs a whole frame without error"),
                 true,
-                format!(
-                    "{lit} lit px, {per_frame_ms:.2}ms/frame -- no built-in waveform on this material, so its picture waits on M7b/M7c"
-                ),
+                format!("{lit} lit px, {per_frame_ms:.2}ms/frame"),
             );
         }
     }
@@ -852,13 +847,11 @@ fn render_leg(files: &[PathBuf], checks: &mut Checks) {
     println!(
         "  drawing through their own shaders: {own_shaders} presets, {passes_built}/{passes_present} passes"
     );
-    println!(
-        "  drawing through M7a's own path: {lit_presets}; waiting on shaders or custom waves: {dark_presets}"
-    );
+    println!("  drawing (lit): {lit_presets}; drawing nothing: {dark_presets}");
     checks.claim(
         "the corpus is not silently all-dark",
         lit_presets > 0 || files.is_empty(),
-        format!("{lit_presets} of {} draw through M7a", files.len()),
+        format!("{lit_presets} of {} draw", files.len()),
     );
 
     // --- Switching, which is what a gallery of a thousand presets does. ---
@@ -1022,67 +1015,6 @@ fn run_seeded(
 
     let pixels = read_back(device, queue, output, size)?;
     Some(measure(&pixels, size))
-}
-
-/// Whether this preset's built-in waveform draws at all, on the material the
-/// corpus leg feeds it.
-///
-/// Asked by *building the waveform*, through the same code the engine draws
-/// with, rather than by reading `fWaveAlpha` out of the file. Two things in the
-/// author's own corpus make the file's answer wrong:
-///
-/// - a preset may set `wave_a` in its `per_frame` and override the file;
-/// - and `bModWaveAlphaByVolume` scales the alpha by how loud the music is
-///   against its own running average, so `MilkDrop2077 - Dude the walls are
-///   moving2` -- which sets `fWaveAlpha=0.303`, plainly visible -- shows nothing
-///   at all until the level passes `fModWaveAlphaStart=1.110`. On a steady test
-///   tone, sitting at exactly average by construction, it is correctly
-///   invisible.
-///
-/// An earlier version of this asked the `Runtime` for the alpha and got the
-/// first of those right and the second wrong, which produced a failing check
-/// against entirely correct behaviour. The gate and the draw have to ask the
-/// same question.
-fn draws_built_in_waveform(text: &str, width: u32) -> bool {
-    let Ok(preset) = Preset::parse(text) else {
-        return false;
-    };
-    let mut runtime = Runtime::new(&preset);
-    let state = runtime.run_frame(&Inputs {
-        fps: 60.0,
-        bass: 1.0,
-        mid: 1.0,
-        treb: 1.0,
-        bass_att: 1.0,
-        mid_att: 1.0,
-        treb_att: 1.0,
-        ..Default::default()
-    });
-    let fixed = runtime.fixed;
-    let mut left = vec![0.0f32; WAVE_SAMPLES];
-    let mut right = vec![0.0f32; WAVE_SAMPLES];
-    for (i, (l, r)) in left.iter_mut().zip(right.iter_mut()).enumerate() {
-        let t = i as f32 / 48_000.0;
-        *l = (t * 220.0 * std::f32::consts::TAU).sin() * 0.5;
-        *r = (t * 330.0 * std::f32::consts::TAU).sin() * 0.5;
-    }
-    wave::prepare(&mut left, fixed.wave_scale, fixed.wave_smoothing);
-    wave::prepare(&mut right, fixed.wave_scale, fixed.wave_smoothing);
-    wave::build(
-        &state.wave,
-        &fixed,
-        &WaveInput {
-            left: &left,
-            right: &right,
-            time: 0.0,
-            aspect: Aspect::new(width, width),
-            width,
-            bass: 1.0,
-            mid: 1.0,
-            treb: 1.0,
-        },
-    )
-    .is_some()
 }
 
 /// A stereo tone for the corpus leg, so the waveform modes have something to

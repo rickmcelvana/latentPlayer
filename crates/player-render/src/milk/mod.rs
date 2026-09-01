@@ -46,6 +46,7 @@
 //! half-texel offset, which is a Direct3D 9 artefact and a per-frame
 //! displacement anywhere else. See [`warp`]'s module note.
 
+pub mod custom;
 pub mod eel;
 pub mod frame;
 pub mod hlsl;
