@@ -2547,7 +2547,9 @@ thing a person can watch:
   comp passes, MilkDrop's helper library and uniforms, and the blur chain the
   helpers need. This is the largest single piece in the phase.
 - **M7c -- the rest of the surface.** Custom waves, custom shapes, motion
-  vectors, and the preset library at the scale people actually use it.
+  vectors, and the preset library at the scale people actually use it. (Order
+  re-set and images added by a 2026-09-01 re-plan -- see the "M7c -- re-planned"
+  section at the end of this file.)
 
 Each is done only when it works on both shells and a person has watched it, as
 ever. If M7b overruns, M7a and M7c are still shippable and still worth shipping:
@@ -2608,12 +2610,11 @@ one that plays none exactly.
     every shader gets.
 56. **The supported subset is a list the app can show, not a paragraph in a
     doc.** `parse::Unsupported` already names what a preset needs and this build
-    does not do; the library UI shows it per preset. Out of scope for M7 and
-    named as such: **sprites** (MilkDrop 3's own extension) and **texture
-    packs** -- both are external image files, both are a content-distribution
-    question rather than an engine one, and the procedural noise textures
-    MilkDrop generates for itself are *in* scope because generating them is
-    arithmetic.
+    does not do; the library UI shows it per preset. The procedural noise
+    textures MilkDrop generates for itself are *in* scope because generating
+    them is arithmetic. (This decision's original "out of scope for M7 and
+    named as such: **sprites** and **texture packs**" is **superseded by
+    decision 59**, 2026-09-01 -- those are in scope, and land in M7c.)
 57. **No preset ever ships with the app** (user decision, 2026-08-22 -- "We
     won't ship any presets. I added those for testing only"). Not "none until
     provenance is established": none. The engine's licence cleanliness
@@ -2685,7 +2686,9 @@ The phase's three kinds of check apply, with one addition this milestone earns:
 
 ### What this milestone will not do
 
-- No sprite support and no texture packs (decision 56).
+- No sprite or texture-pack *loading* yet -- decision 59 puts both in scope,
+  in M7c, so this milestone's placeholder and "unsupported" notes stay until
+  then.
 - No bundled presets (decision 57).
 - No `.milk2` double presets, and no preset *blending* -- MilkDrop crossfades
   between two presets and that needs two engines live at once. It is a real
@@ -3435,3 +3438,91 @@ through their own shaders, and the passes behind them. What is left of M7b is
 a person watching their own presets -- which is the only test of whether a
 preset drawing *as itself* looks like itself, and the same thing M7a needed.
 Custom waves and shapes, and the preset library, are M7c.
+
+## M7c -- re-planned 2026-09-01: images in scope, and the order re-set by a live test
+
+The user ran their own collection through the current build. Two results, and
+both re-shape M7c more than any survey could.
+
+**The live result.** *"A lot of the high-shader presets worked, but not all.
+Most of the others did not."* That is the corpus seen from outside. M7b's
+98.2% is shader *translation* -- a translated shader that samples a texture
+pack still draws the grey placeholder, so "not all" of the shader presets look
+like themselves. And "the others" -- the non-shader presets -- are the ones
+M7a's fixed-function path only covers when they draw through the base
+waveform; the classic presets that draw through **custom waves and custom
+shapes** are M7c's ground and do not exist yet, so they fade toward black.
+The single highest-value thing M7c can do is make those draw, not build the
+library.
+
+**Decision 56 is reverted (decision 59 below).** Sprites and texture packs
+are in scope. The short form: the app ships no preset (decision 57) and no
+image, so an image a preset references is the user's own file, in their own
+folder, and loading it is engine work -- not a content-distribution question.
+"A preset may reference an image" is also the format's *current* truth: the
+new MilkDrop on GitHub lets authors make presets in-app and point them at
+whatever images they like.
+
+### Decision 59 -- a preset's images are the preset's to bring, and they are in scope (2026-09-01)
+
+Decision 56 put **sprites** and **texture packs** out of scope as "a
+content-distribution question rather than an engine one". That was the wrong
+line. The app ships **no** preset (decision 57) and therefore **no** image; an
+image a preset references is the user's own file, in their own folder, exactly
+like the preset itself -- and we do not ship that either. Loading the file is
+engine work; nothing about it is a licensing or distribution act, because
+nothing crosses this app's boundary.
+
+The new MilkDrop on GitHub confirms the direction rather than creating it: it
+makes images first-class, letting authors create presets in-app and reference
+whatever images they like. So "a preset may reference an image" is the format's
+normal case, not a corner to fence off.
+
+Two consequences. **The supported-subset list shrinks by two**: sprites and
+texture packs move out of "unsupported, named" and into "loaded from the
+preset's own folder". And **M7c's scope grows** to include the loading, the
+per-preset name-to-image map, and the sprite draw pass.
+
+### The re-set order
+
+M7c, ordered by "how many presets stop looking wrong":
+
+1. **Custom waves and custom shapes** -- the fix for "most of the others did
+   not work". The EEL is already compiled (the spike's 31/31) and already
+   evaluated (the spike's cost table measured custom-wave cost on two
+   presets); what is missing is *drawing* the per-point and per-instance
+   programs. This is geometry and a draw pass, not new language work.
+2. **Texture packs + sprites** (decision 59) -- the fix for "not all of the
+   shader presets". Replaces the single `tex_placeholder` binding with a
+   per-preset table of `name -> texture`, filled from the preset's own folder;
+   sprites reuse the same loaded images in their own draw pass.
+3. **The preset library** (decision 50) -- the "point at a folder" flow, and
+   the one that makes that folder also the source of textures and sprites, so
+   one folder is the whole of what a person points at.
+
+### Optimisations, and why this order is cheaper than the old one
+
+- **Waves/shapes are drawing, not language.** The spike already proved the
+  per-point and per-frame programs compile and run. Nothing new has to be
+  *understood*; it has to be *drawn*. This is the largest remaining "looks
+  right" bucket and it is not a research item.
+- **Images reuse two things that already exist.** Decoding an image is what
+  cover art does on both shells (`tags.rs` natively, blob loading on the web);
+  walking a folder is what `library.rs` and `milk_survey` already do. Texture
+  packs and sprites are more files in a folder the library already reads.
+- **One bindless table serves texture packs and sprites.** The emitter already
+  reports every distinct sampler name (`wants_textures`) and already resolves
+  each to one of the four samplers; the only change is that an unknown name
+  maps to a *slot in a texture array* rather than one shared placeholder, and
+  the host fills that array from the folder. Sprites add a draw pass, not a
+  second loading mechanism.
+- **The library and the texture pack are one folder.** Decision 50's "point
+  at a folder" should point at a MilkDrop folder -- presets at the top, a
+  `textures/` subfolder and sprite images inside it -- rather than two flows.
+
+### What is still out of scope (unchanged from the M7 plan)
+
+- `.milk2` double presets, and preset *blending*.
+- Preset editing. (The "new MilkDrop lets people create presets in-app" fact
+  is noted as a Phase 6 hook -- see PLAN.md §7 -- not started here.)
+- WebGL2 fallback (decision 8).

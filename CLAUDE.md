@@ -747,6 +747,35 @@ prints what one preset's shader became and runs naga over it; it is what found
 most of those ten bugs. **What is still to confirm is a person watching their
 own presets** -- the same thing M7a needed, for the same reason.
 
+**Phase 3 M7b is live-looked, and M7c is re-planned** (2026-09-01): the user
+ran their own collection through the build. *"A lot of the high-shader presets
+worked, but not all; most of the others did not."* That is the corpus seen from
+outside: M7b's 98.2% is shader *translation*, and a translated shader sampling a
+texture pack still draws the placeholder, so "not all" of the shader presets
+look like themselves; the "others" -- the non-shader presets that draw through
+**custom waves and custom shapes** -- are M7c's ground and do not exist yet, so
+they fade toward black.
+
+**Decision 56 is reverted (decision 59).** Sprites and texture packs are in
+scope. The app ships no preset (57) and no image, so an image a preset
+references is the user's own file in their own folder -- loading it is engine
+work, not a content-distribution question. The new MilkDrop on GitHub makes
+images first-class (presets are created in-app referencing whatever images the
+author likes), so "a preset may reference an image" is the format's current
+truth. M7c's order is re-set by "how many presets stop looking wrong": custom
+waves/shapes, then texture packs + sprites, then the preset library. See
+`tasks/phase-3.md` "M7c -- re-planned".
+
+**Design has a plan at last** (`tasks/design.md`). The app's chrome has never
+been designed -- one centred 560px column in `App.tsx`, in the order things were
+added. The plan consolidates it into a persistent header (transport/now-playing/
+volume) + visualizer left + library/sources right + a collapsible Studio section
+for the five meters, working toward PLAN.md §4's listen/studio split. D1 is
+already done: `index.css` is re-tokenized to the latentbeats.com palette
+(dark-only, blue `#58a6ff` accent, matching latentmastering.com/latentmixer.com),
+the `prefers-color-scheme` split is dropped, and the hard-coded colours in
+`App.css` became tokens. D2 (two-column layout) is next.
+
 The certificate answer changed a finding into a fix: ureq defaults to
 webpki-roots, a bundle compiled into the binary, under which installing a
 self-hosted server's CA in the OS store does nothing -- so the obvious advice

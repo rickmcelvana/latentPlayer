@@ -83,7 +83,7 @@ button {
 }
 
 .error {
-  color: #ff6b6b;
+  color: var(--error);
   font-family: var(--mono);
   font-size: 14px;
 }
@@ -329,7 +329,7 @@ input[type="range"] {
     flex: 1 1 auto;
     height: 6px;
     border-radius: 3px;
-    background: #14141c;
+    background: var(--track);
     overflow: hidden;
   }
 
@@ -385,7 +385,7 @@ input[type="range"] {
 
   /* Past -1 dBTP something downstream will clip. */
   dd.over {
-    color: #ff5f56;
+    color: var(--error);
   }
 
   .units {
@@ -414,7 +414,7 @@ input[type="range"] {
       flex: 1 1 auto;
       height: 8px;
       border-radius: 4px;
-      background: #14141c;
+      background: var(--track);
       overflow: hidden;
     }
 
@@ -427,7 +427,7 @@ input[type="range"] {
 
     /* Anything left of centre cancels when summed to mono. */
     .fill.out-of-phase {
-      background: #ff5f56;
+      background: var(--error);
     }
 
     .centre {
@@ -1017,7 +1017,7 @@ input[type="range"] {
   .server-error {
     margin: 10px 0 0;
     font-size: 12px;
-    color: #ff6b6b;
+    color: var(--error);
   }
 
   button.link {
