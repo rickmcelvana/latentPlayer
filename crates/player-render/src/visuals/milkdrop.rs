@@ -261,14 +261,7 @@ impl MilkDropVisual {
             match hlsl::parse(source)
                 .and_then(|shader| hlsl::emit_with_textures(&shader, pass, &textures))
             {
-                Ok(out) => {
-                    for texture in &out.wants_textures {
-                        report.push(format!(
-                            "texture:{texture}: named by the {name} shader;                              texture packs ship separately from presets"
-                        ));
-                    }
-                    Some(out.source)
-                }
+                Ok(out) => Some(out.source),
                 Err(e) => {
                     report.push(format!("{name} shader, line {}: {}", e.line, e.detail));
                     None

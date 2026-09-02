@@ -588,6 +588,28 @@ impl WasmRenderer {
         Ok(self.inner.preset_report())
     }
 
+    /// Hands the visual the texture-pack images its preset named, as two
+    /// parallel arrays -- `names` (strings) and `bytes` (`Uint8Array`s), one
+    /// entry per name (decision 59).
+    ///
+    /// The web shell has no folder to resolve a texture name against -- a file
+    /// input yields one `.milk`, not its folder -- so this is the engine half
+    /// of a path the preset library (M7c item 3) closes: once a folder handle
+    /// exists, `names`/`bytes` come from reading `textures/clouds.jpg` beside
+    /// the preset. Until then nothing calls it in the running app, and the web
+    /// smoke checks it directly with bytes it made.
+    #[wasm_bindgen(js_name = setTextures)]
+    pub fn set_textures(&mut self, names: js_sys::Array, bytes: js_sys::Array) {
+        let count = names.length().min(bytes.length());
+        let mut textures = Vec::with_capacity(count as usize);
+        for i in 0..count {
+            let name = names.get(i).as_string().unwrap_or_default();
+            let data = js_sys::Uint8Array::new(&bytes.get(i)).to_vec();
+            textures.push((name, data));
+        }
+        self.inner.set_textures(&textures);
+    }
+
     /// Draws one frame from the host's feed.
     ///
     /// `channels` is the interleaving width of `samples` -- the output's, since

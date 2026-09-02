@@ -83,9 +83,9 @@ fn main() {
         format!("{:?}", totals.unknown_functions.keys().collect::<Vec<_>>()),
     );
     checks.claim(
-        "everything a preset needs and this build does not do is named",
-        totals.unsupported.values().all(|count| *count > 0),
-        format!("{} kind(s) named", totals.unsupported.len()),
+        "every texture pack a preset names is tracked",
+        totals.textures.values().all(|count| *count > 0),
+        format!("{} name(s) tracked", totals.textures.len()),
     );
 
     render_leg(&files, &mut checks);
@@ -130,7 +130,7 @@ struct Totals {
     eel_compiled: usize,
     unknown_functions: BTreeMap<String, usize>,
     compile_errors: Vec<String>,
-    unsupported: BTreeMap<String, usize>,
+    textures: BTreeMap<String, usize>,
     hlsl_constructs: BTreeMap<String, usize>,
     worst_frame_us: f64,
     worst_frame_name: String,
@@ -156,9 +156,9 @@ impl Totals {
                 println!("  {name:<16} {count} use(s)");
             }
         }
-        if !self.unsupported.is_empty() {
-            println!("\nPreset features recognised and not implemented:");
-            for (what, count) in &self.unsupported {
+        if !self.textures.is_empty() {
+            println!("\nTexture packs named (loaded from the preset's folder):");
+            for (what, count) in &self.textures {
                 println!("  {what:<24} {count} preset(s)");
             }
         }
@@ -217,9 +217,8 @@ fn report(path: &Path, totals: &mut Totals) {
         preset.shapes.len()
     );
 
-    for note in &preset.unsupported {
-        *totals.unsupported.entry(note.what.clone()).or_default() += 1;
-        println!("   unsupported: {} -- {}", note.what, note.why);
+    for name in preset.texture_names() {
+        *totals.textures.entry(name).or_default() += 1;
     }
 
     // --- the equations -----------------------------------------------------

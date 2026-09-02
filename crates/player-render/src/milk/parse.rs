@@ -322,35 +322,13 @@ impl Preset {
             });
         }
 
-        preset.note_external_textures();
-        preset.unsupported.sort();
-        preset.unsupported.dedup();
         Ok(preset)
-    }
-
-    fn note_unsupported(&mut self, what: &str, why: &'static str) {
-        self.unsupported.push(Unsupported {
-            what: what.to_string(),
-            why,
-        });
-    }
-
-    /// Custom `sampler_<name>` declarations name image files from a MilkDrop
-    /// *texture pack* (decision 59: loaded from the preset's own folder). The
-    /// two procedural noise textures MilkDrop generates for itself are
-    /// excluded: those are ours to generate too.
-    fn note_external_textures(&mut self) {
-        for name in self.texture_names() {
-            self.note_unsupported(
-                &format!("texture:{name}"),
-                "names an image from a MilkDrop texture pack, which ships separately from presets",
-            );
-        }
     }
 
     /// The distinct texture-pack base names the preset's shaders name, sorted
     /// -- the `clouds` in `sampler_fw_clouds`. This is the bindless table's
-    /// slot order (decision 59).
+    /// slot order, and the list the host loads from the preset's folder
+    /// (decision 59).
     pub fn texture_names(&self) -> Vec<String> {
         let mut found: Vec<String> = Vec::new();
         for body in [self.warp.as_str(), self.comp.as_str()] {
@@ -556,12 +534,11 @@ mod tests {
     }
 
     #[test]
-    fn external_textures_are_named_and_built_ins_are_not() {
+    fn texture_names_are_collected_and_built_ins_are_not() {
         let text = "[preset00]\nwarp_1=`sampler sampler_fw_clouds;\n\
                     warp_2=`ret = tex2D(sampler_main, uv).xyz + tex2D(sampler_noise_mq, uv).xyz;\n";
         let p = Preset::parse(text).unwrap();
-        let names: Vec<&str> = p.unsupported.iter().map(|u| u.what.as_str()).collect();
-        assert_eq!(names, vec!["texture:clouds"]);
+        assert_eq!(p.texture_names(), vec!["clouds".to_owned()]);
     }
 
     #[test]
