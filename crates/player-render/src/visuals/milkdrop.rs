@@ -162,6 +162,9 @@ pub struct MilkDropVisual {
     /// What the translator made of this preset, for a report: which passes
     /// took, and what each one asked for that this build does not have.
     report: Vec<String>,
+    /// The preset's texture-pack names, in the bindless table's slot order
+    /// (decision 59). Set by [`Self::translate`]; a name is a slot.
+    wants: Vec<String>,
     /// The preset's custom waves and shapes, one rig each (M7c).
     waves: Vec<WaveRig>,
     shapes: Vec<ShapeRig>,
@@ -181,6 +184,7 @@ impl MilkDropVisual {
         Self {
             passes,
             report: Vec::new(),
+            wants: Vec::new(),
             runtime: Runtime::new(&preset),
             preset,
             frame,
@@ -215,6 +219,19 @@ impl MilkDropVisual {
         self.needs_clear = true;
     }
 
+    /// Decodes the images the host read beside the preset and binds them to the
+    /// user-texture array, one layer per name in [`Self::wants`] order.
+    pub fn set_textures(&mut self, gpu: &Gpu, textures: &[(String, Vec<u8>)]) {
+        let mut ordered: Vec<Option<crate::milk::image::DecodedImage>> =
+            vec![None; self.wants.len()];
+        for (name, bytes) in textures {
+            if let Some(slot) = self.wants.iter().position(|w| w == name) {
+                ordered[slot] = crate::milk::image::decode(bytes);
+            }
+        }
+        self.passes.set_user_textures(gpu.queue, &ordered);
+    }
+
     /// Translate this preset's shaders and build what compiles.
     ///
     /// Per pass, not per preset: **605 presets in the corpus give one pass a
@@ -223,11 +240,27 @@ impl MilkDropVisual {
     /// falls back to M7a's path, which is a picture rather than nothing.
     fn translate(&mut self, device: &wgpu::Device) {
         self.report.clear();
+        let textures = self.preset.texture_names();
+        self.wants = textures
+            .iter()
+            .take(crate::milk::shaders::MAX_USER_TEXTURES)
+            .cloned()
+            .collect();
+        for overflow in textures
+            .iter()
+            .skip(crate::milk::shaders::MAX_USER_TEXTURES)
+        {
+            self.report.push(format!(
+                "texture:{overflow}: not loaded; more textures than one preset can name"
+            ));
+        }
         let build = |source: &str, pass: Pass, name: &str, report: &mut Vec<String>| {
             if source.trim().is_empty() {
                 return None;
             }
-            match hlsl::parse(source).and_then(|shader| hlsl::emit(&shader, pass)) {
+            match hlsl::parse(source)
+                .and_then(|shader| hlsl::emit_with_textures(&shader, pass, &textures))
+            {
                 Ok(out) => {
                     for texture in &out.wants_textures {
                         report.push(format!(
@@ -385,6 +418,10 @@ impl Visual for MilkDropVisual {
         // the honest picture for that.
         MilkDropVisual::set_preset(self, preset.unwrap_or_else(|| Arc::new(Preset::default())));
         self.translate(_gpu.device);
+    }
+
+    fn set_textures(&mut self, gpu: &Gpu, textures: &[(String, Vec<u8>)]) {
+        MilkDropVisual::set_textures(self, gpu, textures);
     }
 
     fn preset_report(&self) -> Vec<String> {

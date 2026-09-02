@@ -207,6 +207,20 @@ impl Renderer {
         Ok(())
     }
 
+    /// Hands the visual the images its loaded preset named (decision 59).
+    ///
+    /// `(name, bytes)` pairs -- `name` a texture-pack base name, `bytes` the
+    /// file's contents -- which the visual decodes, resizes and binds. Called
+    /// after `set_preset`, when a shell has read the files beside the preset.
+    pub fn set_textures(&mut self, textures: &[(String, Vec<u8>)]) {
+        let gpu = Gpu {
+            device: &self.device,
+            queue: &self.queue,
+            format: self.config.format,
+        };
+        self.visual.set_textures(&gpu, textures);
+    }
+
     /// The preset in effect, for a shell that wants to show what it needs.
     pub fn preset(&self) -> Option<&milk::Preset> {
         self.preset.as_deref()
@@ -426,6 +440,17 @@ impl OffscreenRenderer {
         };
         self.visual.set_preset(&gpu, self.preset.clone());
         Ok(())
+    }
+
+    /// Hands the visual the images its loaded preset named (decision 59), as
+    /// the on-screen renderer does -- so the checks exercise the app's path.
+    pub fn set_textures(&mut self, textures: &[(String, Vec<u8>)]) {
+        let gpu = Gpu {
+            device: &self.device,
+            queue: &self.queue,
+            format: Self::FORMAT,
+        };
+        self.visual.set_textures(&gpu, textures);
     }
 
     /// Sets the display gain, as the on-screen renderer does -- so the checks

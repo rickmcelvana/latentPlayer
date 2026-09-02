@@ -2232,6 +2232,19 @@ fn mean_channel(pixels: &[u8], channel: usize) -> f32 {
     sum / (pixels.len() / 4) as f32
 }
 
+/// A solid-colour PNG, for a texture-pack check that has to feed real bytes.
+fn solid_png(r: u8, g: u8, b: u8) -> Vec<u8> {
+    let mut img = image::RgbaImage::new(4, 4);
+    for pixel in img.pixels_mut() {
+        *pixel = image::Rgba([r, g, b, 255]);
+    }
+    let mut out = std::io::Cursor::new(Vec::new());
+    image::DynamicImage::ImageRgba8(img)
+        .write_to(&mut out, image::ImageFormat::Png)
+        .unwrap();
+    out.into_inner()
+}
+
 /// How much a frame varies, as the mean absolute deviation of its brightness.
 ///
 /// The figure that tells a flat fill from a texture: a bound noise volume has
@@ -2664,6 +2677,38 @@ fn check_milkdrop() {
         "a disabled wave and shape draw nothing",
         disabled.count == 0,
         format!("{} lit px", disabled.count),
+    );
+
+    // --- M7c: texture packs. A named sampler resolves to a layer of the
+    // user-texture array, filled from the preset's own folder (decision 59). A
+    // composite that samples its own texture paints the whole frame with it. ---
+    let textured = milk_preset(&milk_shader_lines(
+        "comp",
+        "sampler sampler_fw_test;\nshader_body\n{\nret = tex2D(sampler_fw_test, uv).xyz;\n}",
+    ));
+    renderer
+        .set_preset(Some(&textured))
+        .expect("a preset parses");
+    renderer.set_textures(&[("test".to_string(), solid_png(220, 30, 30))]);
+    let signal = tone(220.0, 0.9);
+    let spectrum = Spectrum::of(&signal, 2);
+    let mut tex = Vec::new();
+    for _ in 0..4 {
+        tex = renderer
+            .draw_to_pixels(&full_frame(&signal, &spectrum))
+            .expect("a MilkDrop frame renders");
+    }
+    check(
+        "a texture pack image is sampled from the user-texture array",
+        mean_channel(&tex, 0) > 150.0
+            && mean_channel(&tex, 1) < 80.0
+            && mean_channel(&tex, 2) < 80.0,
+        format!(
+            "r {:.0} g {:.0} b {:.0}",
+            mean_channel(&tex, 0),
+            mean_channel(&tex, 1),
+            mean_channel(&tex, 2)
+        ),
     );
 }
 

@@ -42,6 +42,23 @@ use super::warp::Aspect;
 /// How many blur levels a preset can read: `GetBlur1`, `2` and `3`.
 pub const BLUR_LEVELS: usize = 3;
 
+/// How many distinct user textures one preset may name, the number of layers
+/// in the user-texture array (decision 59). The corpus's most demanding preset
+/// names six; this is headroom, and a name beyond it still draws from layer
+/// zero rather than failing to compile. Kept small on purpose: every layer is
+/// a `USER_TEXTURE_SIZE` square, so sixteen layers would be a sixteen-megabyte
+/// texture per preset even when the preset names one.
+pub const MAX_USER_TEXTURES: usize = 8;
+
+/// The side, in pixels, every user texture is resized to.
+///
+/// MilkDrop's texture packs are 512x512 by convention, and presets sample them
+/// by normalised UV -- so resizing to this square changes nothing a shader can
+/// see, and lets one `texture_2d_array` hold every distinct texture a preset
+/// names rather than one binding per name (which would overflow the sixteen
+/// sampled textures a stage allows).
+const USER_TEXTURE_SIZE: u32 = 512;
+
 /// MilkDrop's blur kernel, from `BlurPasses`.
 const W: [f32; 8] = [4.0, 3.8, 3.5, 2.9, 1.9, 1.2, 0.7, 0.3];
 
@@ -103,7 +120,11 @@ pub struct PresetPasses {
     /// filter/address in MilkDrop's own order: fw, fc, pw, pc.
     samplers: [wgpu::Sampler; 4],
     noise: Vec<wgpu::TextureView>,
-    placeholder: wgpu::TextureView,
+    /// The user-texture array a preset's texture pack samples (decision 59):
+    /// one `texture_2d_array`, `MAX_USER_TEXTURES` layers, all `USER_TEXTURE_SIZE`
+    /// square. The host's images are resized into it; unfilled layers are grey.
+    tex_user: wgpu::Texture,
+    tex_user_view: wgpu::TextureView,
     blur: Vec<wgpu::TextureView>,
     blur_temp: Vec<wgpu::TextureView>,
     blur_size: Vec<(u32, u32)>,
@@ -201,15 +222,16 @@ impl PresetPasses {
             noise.push(texture.create_view(&wgpu::TextureViewDescriptor::default()));
         }
 
-        // A texture pack this build does not load reads from here rather than
-        // refusing the shader (decision 56). Mid grey rather than black, so a
-        // preset multiplying by it still shows something.
-        let placeholder = device.create_texture(&wgpu::TextureDescriptor {
-            label: Some("milk-placeholder"),
+        // The user-texture array, one `texture_2d_array` of `MAX_USER_TEXTURES`
+        // square layers (decision 59). All grey until the host's images are
+        // written into it, so an unfilled layer still reads something a preset
+        // multiplying by it can show.
+        let tex_user = device.create_texture(&wgpu::TextureDescriptor {
+            label: Some("milk-user-textures"),
             size: wgpu::Extent3d {
-                width: 1,
-                height: 1,
-                depth_or_array_layers: 1,
+                width: USER_TEXTURE_SIZE,
+                height: USER_TEXTURE_SIZE,
+                depth_or_array_layers: MAX_USER_TEXTURES as u32,
             },
             mip_level_count: 1,
             sample_count: 1,
@@ -218,26 +240,37 @@ impl PresetPasses {
             usage: wgpu::TextureUsages::TEXTURE_BINDING | wgpu::TextureUsages::COPY_DST,
             view_formats: &[],
         });
-        queue.write_texture(
-            wgpu::TexelCopyTextureInfo {
-                texture: &placeholder,
-                mip_level: 0,
-                origin: wgpu::Origin3d::ZERO,
-                aspect: wgpu::TextureAspect::All,
-            },
-            &[128u8, 128, 128, 255],
-            wgpu::TexelCopyBufferLayout {
-                offset: 0,
-                bytes_per_row: Some(4),
-                rows_per_image: Some(1),
-            },
-            wgpu::Extent3d {
-                width: 1,
-                height: 1,
-                depth_or_array_layers: 1,
-            },
-        );
-        let placeholder = placeholder.create_view(&wgpu::TextureViewDescriptor::default());
+        let grey = vec![128u8; USER_TEXTURE_SIZE as usize * USER_TEXTURE_SIZE as usize * 4];
+        for layer in 0..MAX_USER_TEXTURES {
+            queue.write_texture(
+                wgpu::TexelCopyTextureInfo {
+                    texture: &tex_user,
+                    mip_level: 0,
+                    origin: wgpu::Origin3d {
+                        x: 0,
+                        y: 0,
+                        z: layer as u32,
+                    },
+                    aspect: wgpu::TextureAspect::All,
+                },
+                &grey,
+                wgpu::TexelCopyBufferLayout {
+                    offset: 0,
+                    bytes_per_row: Some(USER_TEXTURE_SIZE * 4),
+                    rows_per_image: Some(USER_TEXTURE_SIZE),
+                },
+                wgpu::Extent3d {
+                    width: USER_TEXTURE_SIZE,
+                    height: USER_TEXTURE_SIZE,
+                    depth_or_array_layers: 1,
+                },
+            );
+        }
+        let tex_user_view = tex_user.create_view(&wgpu::TextureViewDescriptor {
+            label: Some("milk-user-textures-view"),
+            dimension: Some(wgpu::TextureViewDimension::D2Array),
+            ..Default::default()
+        });
 
         let layout = environment_layout(device);
         let (blur, blur_temp, blur_size) = blur_targets(device, width, height);
@@ -308,7 +341,8 @@ impl PresetPasses {
             layout,
             samplers,
             noise,
-            placeholder,
+            tex_user,
+            tex_user_view,
             blur,
             blur_temp,
             blur_size,
@@ -576,15 +610,60 @@ impl PresetPasses {
                 resource: wgpu::BindingResource::TextureView(view),
             });
         }
+        // The user-texture array (decision 59): one binding for every texture
+        // pack a preset names, the layer being the slot the emitter assigned.
+        // A texture pack's own sampler carries its filter/address, so the same
+        // view is shared by every `sampler_?[cw]_<name>` spelling of one name.
         entries.push(wgpu::BindGroupEntry {
             binding: 15,
-            resource: wgpu::BindingResource::TextureView(&self.placeholder),
+            resource: wgpu::BindingResource::TextureView(&self.tex_user_view),
         });
         device.create_bind_group(&wgpu::BindGroupDescriptor {
             label: Some("milk-preset-bind"),
             layout: &self.layout,
             entries: &entries,
         })
+    }
+
+    /// Writes the preset's decoded images into the user-texture array, one per
+    /// layer in slot order. Each is resized to `USER_TEXTURE_SIZE` square, so
+    /// the shader's normalised UV sampling sees the whole image exactly as
+    /// MilkDrop's native-size textures do. A `None` slot stays grey.
+    pub fn set_user_textures(
+        &mut self,
+        queue: &wgpu::Queue,
+        images: &[Option<super::image::DecodedImage>],
+    ) {
+        let size = USER_TEXTURE_SIZE as usize;
+        for (layer, image) in images.iter().take(MAX_USER_TEXTURES).enumerate() {
+            let Some(image) = image else {
+                continue;
+            };
+            let rgba = resize_rgba(image, USER_TEXTURE_SIZE);
+            queue.write_texture(
+                wgpu::TexelCopyTextureInfo {
+                    texture: &self.tex_user,
+                    mip_level: 0,
+                    origin: wgpu::Origin3d {
+                        x: 0,
+                        y: 0,
+                        z: layer as u32,
+                    },
+                    aspect: wgpu::TextureAspect::All,
+                },
+                &rgba,
+                wgpu::TexelCopyBufferLayout {
+                    offset: 0,
+                    bytes_per_row: Some((size * 4) as u32),
+                    rows_per_image: Some(size as u32),
+                },
+                wgpu::Extent3d {
+                    width: USER_TEXTURE_SIZE,
+                    height: USER_TEXTURE_SIZE,
+                    depth_or_array_layers: 1,
+                },
+            );
+        }
     }
 
     /// Run the three blur levels over `main`.
@@ -816,6 +895,22 @@ fn blur_targets(
     (blur, temp, sizes)
 }
 
+/// Resizes a decoded image to `USER_TEXTURE_SIZE` square, stretching to fill.
+///
+/// Stretching rather than letterboxing is the right call: a shader samples a
+/// texture with UVs in 0..1, so the image always covers the square, and this
+/// just matches what MilkDrop's native-size textures already do. Nearest for
+/// the upscale is exact; the downscale keeps the common 512 case lossless.
+fn resize_rgba(image: &super::image::DecodedImage, size: u32) -> Vec<u8> {
+    if image.width == size && image.height == size {
+        return image.rgba.clone();
+    }
+    let src = image::RgbaImage::from_raw(image.width, image.height, image.rgba.clone())
+        .unwrap_or_default();
+    let resized = image::imageops::resize(&src, size, size, image::imageops::FilterType::Triangle);
+    resized.into_raw()
+}
+
 fn uniform_entry(binding: u32) -> wgpu::BindGroupLayoutEntry {
     wgpu::BindGroupLayoutEntry {
         binding,
@@ -856,7 +951,7 @@ fn sampler_entry(binding: u32) -> wgpu::BindGroupLayoutEntry {
 
 /// The sixteen bindings `prelude.wgsl` declares, in its order.
 fn environment_layout(device: &wgpu::Device) -> wgpu::BindGroupLayout {
-    use wgpu::TextureViewDimension::{D2, D3};
+    use wgpu::TextureViewDimension::{D2Array, D2, D3};
     let mut entries = vec![uniform_entry(0)];
     for i in 0..4 {
         entries.push(sampler_entry(1 + i));
@@ -868,7 +963,10 @@ fn environment_layout(device: &wgpu::Device) -> wgpu::BindGroupLayout {
     }
     entries.push(texture_entry(13, D3));
     entries.push(texture_entry(14, D3));
-    entries.push(texture_entry(15, D2));
+    // The user-texture array (decision 59): one `texture_2d_array`, its layers
+    // the slots the emitter assigned. Indexed by a compile-time constant, so
+    // the layout is fixed while each preset uses only the layers it names.
+    entries.push(texture_entry(15, D2Array));
     device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
         label: Some("milk-preset-layout"),
         entries: &entries,

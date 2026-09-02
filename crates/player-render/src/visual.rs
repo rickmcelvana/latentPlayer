@@ -269,6 +269,12 @@ pub trait Visual {
     /// seam exists to prevent.
     fn set_preset(&mut self, _gpu: &Gpu, _preset: Option<std::sync::Arc<crate::milk::Preset>>) {}
 
+    /// Hands this visual the images its preset named, as `(name, bytes)`
+    /// (decision 59). Ignored by default, which is every visual but MilkDrop --
+    /// a texture pack's `sampler_fw_clouds` arrives here as `("clouds", bytes)`,
+    /// and the visual decodes, resizes and binds them.
+    fn set_textures(&mut self, _gpu: &Gpu, _textures: &[(String, Vec<u8>)]) {}
+
     /// What this visual made of the preset it was given: what translated, what
     /// did not, and what it asked for that this build does not have.
     ///

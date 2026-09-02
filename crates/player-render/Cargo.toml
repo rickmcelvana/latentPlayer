@@ -19,6 +19,10 @@ thiserror = "1"
 # calling it directly is the same acceptance taken synchronously. It is also
 # what lets the corpus check thousands of shaders without a GPU device.
 naga = { version = "30", features = ["wgsl-in"] }
+# Decoding the image files a preset's texture pack and sprites reference
+# (decision 59). PNG + JPEG only -- that is the whole of what the corpus ships
+# (`png`, `jpg`, `jfif`), and no other format has to compile to wasm.
+image = { version = "0.25", default-features = false, features = ["png", "jpeg"] }
 
 [dev-dependencies]
 # Only the offscreen smoke check needs to block on the async device request --

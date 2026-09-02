@@ -50,6 +50,7 @@ pub mod custom;
 pub mod eel;
 pub mod frame;
 pub mod hlsl;
+pub mod image;
 pub mod noise;
 pub mod parse;
 pub mod shaders;

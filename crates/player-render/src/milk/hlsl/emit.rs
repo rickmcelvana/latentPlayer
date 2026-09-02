@@ -36,10 +36,10 @@
 //! GPU. Decision 51 bounds the equation interpreter for the same reason; this
 //! is the same bound one layer out, and it costs an integer compare.
 //!
-//! **A texture this build does not load resolves to a placeholder** rather
-//! than refusing the shader. Decision 56 keeps texture packs out of scope, and
-//! 19.6% of the corpus asks for one; drawing approximately and *naming what is
-//! missing* (which `parse::Unsupported` already does) beats drawing nothing.
+//! **A texture a preset names resolves to a layer of the user-texture array**
+//! (decision 59). The host fills that array from the preset's own folder; a
+//! name whose file is missing reads a grey layer rather than failing to
+//! compile, and the name is still reported. 19.6% of the corpus asks for one.
 
 use std::collections::{BTreeSet, HashMap};
 
@@ -64,13 +64,29 @@ pub const MAX_LOOP: u32 = 4096;
 pub struct Emitted {
     /// A complete WGSL module: the prelude, then the preset's own code.
     pub source: String,
-    /// Textures the preset asked for by name that this build does not load,
-    /// in the order first seen. Each one drew from the placeholder.
+    /// Textures the preset asked for by name -- the `clouds` in
+    /// `sampler_fw_clouds` -- in the order first seen. Each resolves to a
+    /// layer of the user-texture array.
     pub wants_textures: Vec<String>,
 }
 
 /// Translate one pass of a preset's shader into WGSL.
 pub fn emit(shader: &Shader, pass: Pass) -> Result<Emitted, HlslError> {
+    emit_with_textures(shader, pass, &[])
+}
+
+/// Translate one pass, resolving a preset's texture-pack names to their slots.
+///
+/// `textures` is the preset-wide, sorted list of distinct user-texture base
+/// names (the `clouds` in `sampler_fw_clouds`). A name resolves to
+/// `tex_user[slot]`, where `slot` is its position in that list -- the one
+/// thing that keeps a warp and a composite shader, translated separately,
+/// reading the same texture from the same slot.
+pub fn emit_with_textures(
+    shader: &Shader,
+    pass: Pass,
+    textures: &[String],
+) -> Result<Emitted, HlslError> {
     let Some(body) = &shader.body else {
         return Err(HlslError {
             line: 1,
@@ -78,6 +94,11 @@ pub fn emit(shader: &Shader, pass: Pass) -> Result<Emitted, HlslError> {
             detail: "the shader has no `shader_body { ... }` block".into(),
         });
     };
+    let slot_of: HashMap<String, u32> = textures
+        .iter()
+        .enumerate()
+        .map(|(i, name)| (name.clone(), i as u32))
+        .collect();
 
     let mut e = Emitter {
         pass,
@@ -89,6 +110,7 @@ pub fn emit(shader: &Shader, pass: Pass) -> Result<Emitted, HlslError> {
         loops: 0,
         temps: 0,
         mirrors: mirrored_registers(shader, pass),
+        slot_of,
         wants: BTreeSet::new(),
         wants_order: Vec::new(),
     };
@@ -219,6 +241,13 @@ impl Value {
     }
 }
 
+/// What a sampler name resolves to: a fixed environment texture, or a layer in
+/// the user-texture array a texture pack names (decision 59).
+enum Tex {
+    Static(&'static str),
+    User(u32),
+}
+
 struct Emitter {
     pass: Pass,
     scopes: Vec<HashMap<String, Binding>>,
@@ -236,6 +265,9 @@ struct Emitter {
     /// uniform buffer is read-only. Only the registers actually written are
     /// mirrored, so a shader that reads them pays nothing.
     mirrors: BTreeSet<String>,
+    /// User-texture base name -> its slot in the bindless table, from the
+    /// preset-wide sorted list handed to [`emit_with_textures`].
+    slot_of: HashMap<String, u32>,
     wants: BTreeSet<String>,
     wants_order: Vec<String>,
 }
@@ -1230,20 +1262,22 @@ impl Emitter {
         // honoured, which is the same picture on a single-level texture.
         let want = if three { Ty::FLOAT3 } else { Ty::FLOAT2 };
         let coord = self.fit(&coord, want, line)?;
-        let call = if three { "milk_tex3D" } else { "milk_tex2D" };
-        Ok(Value::expr(
-            format!("{call}({texture}, {samp}, {coord})"),
-            Ty::FLOAT4,
-        ))
+        let call = match texture {
+            Tex::Static(name) if three => format!("milk_tex3D({name}, {samp}, {coord})"),
+            Tex::Static(name) => format!("milk_tex2D({name}, {samp}, {coord})"),
+            Tex::User(layer) => format!("milk_tex2D_array(tex_user, {samp}, {coord}, {layer}i)"),
+        };
+        Ok(Value::expr(call, Ty::FLOAT4))
     }
 
     /// The texture and sampler bindings a MilkDrop sampler name resolves to.
     ///
     /// The naming is `sampler_[fp][cw]_<what>`, with the filter/address pair
     /// optional and `sampler_main` meaning `sampler_fw_main`. A `<what>` this
-    /// build does not have is a texture pack (decision 56): it reads the
-    /// placeholder, and the name is reported.
-    fn binding_for(&mut self, name: &str) -> (&'static str, &'static str, bool) {
+    /// build does not generate itself is a texture pack (decision 59): it
+    /// reads a layer of the user-texture array the host fills from the preset's
+    /// folder, and the name is reported.
+    fn binding_for(&mut self, name: &str) -> (Tex, &'static str, bool) {
         let rest = name.strip_prefix("sampler_").unwrap_or(name);
         let (samp, what) = match rest.split_once('_') {
             Some(("fw", w)) => ("samp_fw", w),
@@ -1252,24 +1286,30 @@ impl Emitter {
             Some(("pc", w)) => ("samp_pc", w),
             _ => ("samp_fw", rest),
         };
-        match what {
-            "main" => ("tex_main", samp, false),
-            "blur1" => ("tex_blur1", samp, false),
-            "blur2" => ("tex_blur2", samp, false),
-            "blur3" => ("tex_blur3", samp, false),
-            "noise_lq" => ("tex_noise_lq", samp, false),
-            "noise_lq_lite" => ("tex_noise_lq_lite", samp, false),
-            "noise_mq" => ("tex_noise_mq", samp, false),
-            "noise_hq" => ("tex_noise_hq", samp, false),
-            "noisevol_lq" => ("tex_noisevol_lq", samp, true),
-            "noisevol_hq" => ("tex_noisevol_hq", samp, true),
+        let is_3d = matches!(what, "noisevol_lq" | "noisevol_hq");
+        let texture = match what {
+            "main" => Tex::Static("tex_main"),
+            "blur1" => Tex::Static("tex_blur1"),
+            "blur2" => Tex::Static("tex_blur2"),
+            "blur3" => Tex::Static("tex_blur3"),
+            "noise_lq" => Tex::Static("tex_noise_lq"),
+            "noise_lq_lite" => Tex::Static("tex_noise_lq_lite"),
+            "noise_mq" => Tex::Static("tex_noise_mq"),
+            "noise_hq" => Tex::Static("tex_noise_hq"),
+            "noisevol_lq" => Tex::Static("tex_noisevol_lq"),
+            "noisevol_hq" => Tex::Static("tex_noisevol_hq"),
             other => {
                 if self.wants.insert(other.to_owned()) {
                     self.wants_order.push(other.to_owned());
                 }
-                ("tex_placeholder", samp, false)
+                // A name beyond the preset's table (more textures than the cap)
+                // falls back to layer zero, which is always grey. It is reported
+                // through `wants_textures` regardless.
+                let slot = self.slot_of.get(other).copied().unwrap_or(0);
+                Tex::User(slot)
             }
-        }
+        };
+        (texture, samp, is_3d)
     }
 
     fn mul(&mut self, args: &[Expr], line: u32) -> Result<Value, HlslError> {
@@ -1979,14 +2019,30 @@ mod tests {
     }
 
     #[test]
-    fn a_texture_this_build_does_not_load_draws_a_placeholder_and_is_named() {
+    fn a_texture_pack_name_resolves_to_its_layer_and_is_named() {
         let shader = parse(
             "sampler sampler_pc_clouds; shader_body { ret = tex2D(sampler_pc_clouds, uv).xyz; }",
         )
         .expect("parses");
+        // Without a table the name falls back to layer zero; with one it lands
+        // on its own layer. Both still report the name it asked for.
         let out = emit(&shader, Pass::Warp).expect("emits");
-        assert!(out.source.contains("tex_placeholder"));
+        assert!(
+            out.source.contains("milk_tex2D_array(tex_user, samp_pc"),
+            "{}",
+            out.source
+        );
+        assert!(out.source.contains(", 0i)"), "{}", out.source);
         assert_eq!(out.wants_textures, vec!["clouds".to_owned()]);
+
+        let out = emit_with_textures(&shader, Pass::Warp, &["worms".into(), "clouds".into()])
+            .expect("emits");
+        assert!(
+            out.source.contains("milk_tex2D_array(tex_user, samp_pc"),
+            "{}",
+            out.source
+        );
+        assert!(out.source.contains(", 1i)"), "{}", out.source);
     }
 
     #[test]

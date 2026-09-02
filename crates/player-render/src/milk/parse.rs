@@ -76,6 +76,7 @@ pub struct Preset {
     pub comp: String,
     pub waves: Vec<CustomWave>,
     pub shapes: Vec<CustomShape>,
+    pub sprites: Vec<Sprite>,
     /// What was recognised and not implemented. See [`Unsupported`].
     pub unsupported: Vec<Unsupported>,
 }
@@ -99,6 +100,18 @@ pub struct CustomShape {
     pub base: BTreeMap<String, String>,
     pub init: String,
     pub per_frame: String,
+}
+
+/// One of MilkDrop 3's `[SPRITE_BEGIN]` blocks, which draws an external image
+/// as a textured quad over the preset (decision 59).
+#[derive(Clone, Debug, Default)]
+pub struct Sprite {
+    pub index: u32,
+    /// `Sprite*` scalars, with the `Sprite` prefix removed -- `SpriteName`
+    /// becomes `Name`, `SpriteRepeatX` becomes `RepeatX`.
+    pub base: BTreeMap<String, String>,
+    pub init: String,
+    pub code: String,
 }
 
 #[derive(Debug, PartialEq, Eq)]
@@ -144,6 +157,10 @@ impl Preset {
         let mut wave_base: BTreeMap<u32, BTreeMap<String, String>> = BTreeMap::new();
         let mut shape_base: BTreeMap<u32, BTreeMap<String, String>> = BTreeMap::new();
         let mut in_sprite = false;
+        let mut sprite_index = 0u32;
+        let mut sprite_base: BTreeMap<String, String> = BTreeMap::new();
+        let mut sprite_init: Vec<String> = Vec::new();
+        let mut sprite_code: Vec<String> = Vec::new();
 
         for raw in text.lines() {
             let line = raw.trim_end_matches('\r');
@@ -158,18 +175,46 @@ impl Preset {
                 if name.eq_ignore_ascii_case("preset00") {
                     in_preset = true;
                 } else if name.to_ascii_uppercase().contains("SPRITE") {
-                    let begins = name.to_ascii_uppercase().ends_with("_BEGIN");
-                    in_sprite = begins;
-                    if begins {
-                        preset.note_unsupported(
-                            "sprite",
-                            "MilkDrop 3 sprites draw an external image file this app does not load",
-                        );
+                    let upper = name.to_ascii_uppercase();
+                    if upper.ends_with("_BEGIN") {
+                        sprite_index = upper
+                            .strip_prefix("SPRITE")
+                            .and_then(|r| r.strip_suffix("_BEGIN"))
+                            .and_then(|n| n.parse().ok())
+                            .unwrap_or(0);
+                        in_sprite = true;
+                        sprite_base.clear();
+                        sprite_init.clear();
+                        sprite_code.clear();
+                    } else if upper.ends_with("_END") {
+                        if in_sprite {
+                            preset.sprites.push(Sprite {
+                                index: sprite_index,
+                                base: std::mem::take(&mut sprite_base),
+                                init: std::mem::take(&mut sprite_init).join("\n"),
+                                code: std::mem::take(&mut sprite_code).join("\n"),
+                            });
+                        }
+                        in_sprite = false;
                     }
                 }
                 continue;
             }
             if in_sprite {
+                let Some((key, value)) = line.split_once('=') else {
+                    continue;
+                };
+                let key = key.trim();
+                if let Some((kind, body)) = split_sprite_code_line(key, value) {
+                    match kind {
+                        "init" => sprite_init.push(body),
+                        _ => sprite_code.push(body),
+                    }
+                } else if let Some(field) = key.strip_prefix("Sprite") {
+                    sprite_base.insert(field.to_string(), value.trim().to_string());
+                } else {
+                    sprite_base.insert(key.to_string(), value.trim().to_string());
+                }
                 continue;
             }
 
@@ -291,10 +336,22 @@ impl Preset {
     }
 
     /// Custom `sampler_<name>` declarations name image files from a MilkDrop
-    /// *texture pack*, which ships separately from the presets and is not in
-    /// this repository. The two procedural noise textures MilkDrop generates
-    /// for itself are excluded: those are ours to generate too.
+    /// *texture pack* (decision 59: loaded from the preset's own folder). The
+    /// two procedural noise textures MilkDrop generates for itself are
+    /// excluded: those are ours to generate too.
     fn note_external_textures(&mut self) {
+        for name in self.texture_names() {
+            self.note_unsupported(
+                &format!("texture:{name}"),
+                "names an image from a MilkDrop texture pack, which ships separately from presets",
+            );
+        }
+    }
+
+    /// The distinct texture-pack base names the preset's shaders name, sorted
+    /// -- the `clouds` in `sampler_fw_clouds`. This is the bindless table's
+    /// slot order (decision 59).
+    pub fn texture_names(&self) -> Vec<String> {
         let mut found: Vec<String> = Vec::new();
         for body in [self.warp.as_str(), self.comp.as_str()] {
             for name in sampler_names(body) {
@@ -312,12 +369,7 @@ impl Preset {
         }
         found.sort();
         found.dedup();
-        for name in found {
-            self.note_unsupported(
-                &format!("texture:{name}"),
-                "names an image from a MilkDrop texture pack, which ships separately from presets",
-            );
-        }
+        found
     }
 
     /// True when the preset draws through HLSL pixel shaders rather than
@@ -362,6 +414,25 @@ fn split_indexed<'a>(key: &'a str, prefix: &str) -> Option<(u32, &'a str)> {
     let rest = key.strip_prefix(prefix)?;
     let (index, field) = rest.split_once('_')?;
     Some((index.parse().ok()?, field))
+}
+
+/// Splits a sprite block's `code_2` / `init_1` into its kind and body.
+///
+/// The same numbered-line spelling as the top-level blocks, but on names
+/// `split_code_line` does not recognise -- a sprite's code is not the preset's.
+fn split_sprite_code_line(key: &str, value: &str) -> Option<(&'static str, String)> {
+    let stem = key.trim_end_matches(|c: char| c.is_ascii_digit());
+    if stem.len() == key.len() {
+        return None;
+    }
+    let block = stem.strip_suffix('_').unwrap_or(stem);
+    let kind = match block {
+        "code" => "code",
+        "init" => "init",
+        _ => return None,
+    };
+    let body = value.strip_prefix('`').unwrap_or(value);
+    Some((kind, body.to_string()))
 }
 
 /// Recognises a numbered code line and returns its block name and its body.
@@ -463,7 +534,25 @@ mod tests {
         let p = Preset::parse(text).unwrap();
         assert_eq!(p.per_frame, "a=1;");
         assert!(!p.base.contains_key("SpriteName"));
-        assert!(p.unsupported.iter().any(|u| u.what == "sprite"));
+        assert_eq!(p.sprites.len(), 1);
+        assert_eq!(
+            p.sprites[0].base.get("Name").map(String::as_str),
+            Some("x.png")
+        );
+        assert_eq!(p.sprites[0].code, "sx=2;");
+    }
+
+    #[test]
+    fn sprite_scalars_are_collected_and_code_lines_join() {
+        let text = "[preset00]\n[SPRITE1_BEGIN]\nSpriteBlend=4\nSpriteAlpha=0.25\n\
+                    code_1=rot=time;\ncode_2=sx=new_scale;\n[SPRITE1_END]\n";
+        let p = Preset::parse(text).unwrap();
+        assert_eq!(p.sprites.len(), 1);
+        let s = &p.sprites[0];
+        assert_eq!(s.index, 1);
+        assert_eq!(s.base.get("Blend").map(String::as_str), Some("4"));
+        assert_eq!(s.base.get("Alpha").map(String::as_str), Some("0.25"));
+        assert_eq!(s.code, "rot=time;\nsx=new_scale;");
     }
 
     #[test]

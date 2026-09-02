@@ -134,7 +134,7 @@ pub mod pre;
 pub mod ty;
 
 pub use ast::{Block, Expr, ExprKind, Function, Shader, Stmt};
-pub use emit::{emit, Emitted};
+pub use emit::{emit, emit_with_textures, Emitted};
 pub use env::{Alias, Pass};
 pub use lex::{lex, Tok, Token};
 pub use parse::{parse, HlslError};

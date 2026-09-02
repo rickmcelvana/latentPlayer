@@ -90,10 +90,12 @@ struct MilkUniforms {
 @group(0) @binding(12) var tex_noise_hq: texture_2d<f32>;
 @group(0) @binding(13) var tex_noisevol_lq: texture_3d<f32>;
 @group(0) @binding(14) var tex_noisevol_hq: texture_3d<f32>;
-// Stands in for any texture a preset names that this build does not load --
-// a texture pack or a sprite (decision 56). The preset still draws, and the
-// name it wanted is reported beside it rather than silently dropped.
-@group(0) @binding(15) var tex_placeholder: texture_2d<f32>;
+// The user-texture array a preset's texture pack reads from (decision 59).
+// Each distinct `sampler_<name>` the preset names maps to a layer here, filled
+// by the host from the preset's own folder; a layer whose file is not found
+// stays grey, so the preset still draws and the name is reported rather than
+// silently dropped.
+@group(0) @binding(15) var tex_user: texture_2d_array<f32>;
 
 // `tex2D` becomes `textureSampleLevel`, not `textureSample`, everywhere.
 //
@@ -108,6 +110,13 @@ fn milk_tex2D(t: texture_2d<f32>, s: sampler, uv: vec2<f32>) -> vec4<f32> {
 
 fn milk_tex3D(t: texture_3d<f32>, s: sampler, uvw: vec3<f32>) -> vec4<f32> {
     return textureSampleLevel(t, s, uvw, 0.0);
+}
+
+// A texture-pack read selects its image as the array's layer. The layer is a
+// compile-time constant in the emitted shader, so there is never a dynamic,
+// non-uniform index into the array.
+fn milk_tex2D_array(t: texture_2d_array<f32>, s: sampler, uv: vec2<f32>, layer: i32) -> vec4<f32> {
+    return textureSampleLevel(t, s, uv, layer, 0.0);
 }
 
 fn GetMain(uv: vec2<f32>) -> vec3<f32> {
