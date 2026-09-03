@@ -3550,3 +3550,51 @@ shape's centre/radius, and the `enabled=0` gate) and **133/133** at
 `/visualizer.html`, agreeing figure for figure; 272 unit tests, `milk_smoke`
 168/168 over 150 real presets, clippy/fmt clean on both targets. **Confirmed
 live on both shells: some presets work well and are not mirrored.**
+
+## M7c second item -- texture packs and sprites: done 2026-09-02/03
+
+The fix for "not all of the shader presets" (texture packs) and the last of
+the non-shader presets (sprites), both under decision 59. Three commits:
+`80c6431` (the engine), `37c6da8` (host loading), `5feb7bb` (the sprite draw
+pass).
+
+**Texture packs.** A preset's `sampler_fw_clouds` resolves to a layer of one
+`texture_2d_array` -- 8 layers of 512-square, the corpus's most demanding
+preset naming six -- instead of a single grey placeholder. `binding_array<T>`
+was tried and rejected: wgpu's default limits forbid it
+(`max_binding_array_elements: 0`), and `texture_2d_array` keeps the
+sampled-texture count at eleven. The emitter maps each name to a layer via
+`emit_with_textures` (a sorted preset-wide list shared across both passes, so a
+warp and a composite read the same texture from the same layer); `milk/image.rs`
+decodes PNG/JPEG (the whole of what the corpus ships); the host reads the files
+from the preset's own folder (`textures/`/`sprites/` subfolders, or a sibling
+of a `presets/` folder, walking up to two ancestors). The web shell's
+`setTextures` is the engine half of the same path -- a browser's single-file
+input cannot resolve a folder, so the running web app catches up with the
+preset library (item 3).
+
+**Sprites.** `milk/sprite.rs` is `SpriteRig` -- the sprite's EEL code in its
+own variable pool (the ten frame inputs, no `q`/`t` bridges), the transform
+read out of MilkDrop 2's `DrawUserSprites` (image-aspect, rotate, translate,
+screen-aspect), the scalar-to-variable seeding MilkDrop 3's editor convention
+(`SpriteX` is an offset from centre, overwritten by the code in nearly every
+preset). `frame.rs` gained a sprite pass: one pipeline per blend state (0/4
+alpha, 1 decal, 2 additive, 3 srccolor, 5 multiply, 6 subtract, 9 darken;
+MilkDrop 3's 7/8/10 fall back to alpha), the colour key applied in the
+fragment shader, drawn into the feedback buffer so a sprite is part of the
+loop rather than pasted over the finished frame. `src-tauri` reads each
+`SpriteName` image from the preset's folder.
+
+Verified: **124/124** `visual_smoke` (a texture-pack check feeds a red PNG to
+`sampler_fw_test` and reads it back; a sprite check draws a green quad at
+centre), 280 unit tests (up from 272), `milk_smoke` 369/371 against the full
+353-preset set (the two failures are the pre-existing EEL budget/`memcpy`
+limits), clippy/fmt clean, wasm check clean. **Texture packs are
+user-confirmed live on the desktop (2026-09-02): "tested on a cloud and worm
+preset and it works."** Sprites are **not yet live-looked** -- the
+y-orientation and the 7/8/10 blend-mode fallbacks are the two things a
+readback cannot settle.
+
+**Remaining M7c item 2 work:** the web smoke's sprite check (mirror the native
+one in `visualizerSmoke.ts`), and a live look at sprites on both shells. Then
+M7c item 3, the preset library (decision 50), is next.
