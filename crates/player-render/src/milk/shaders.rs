@@ -1005,7 +1005,13 @@ fn milk_warp_vs(
 fn milk_warp_fs(in: MilkWarpOut) -> @location(0) vec4<f32> {
     // The diffuse alpha is 1 here: MilkDrop's warp mesh is drawn opaque, and
     // the preset's `ret` is the whole colour.
-    return milk_shader(vec4<f32>(in.uv, in.uv_orig), in.rad_ang, vec4<f32>(1.0, 1.0, 1.0, 1.0));
+    let c = milk_shader(vec4<f32>(in.uv, in.uv_orig), in.rad_ang, vec4<f32>(1.0, 1.0, 1.0, 1.0));
+    // MilkDrop's feedback texture is 8-bit, so every warp write clamps to
+    // [0,1]. This build's is 16-bit float (for the dark trails), so the clamp
+    // has to be written out -- without it a preset's sharpen term
+    // (`ret += (ret - GetBlur1)*0.4`) is a high-pass with gain above one, and
+    // the loop grows to white where MilkDrop's own target held it.
+    return vec4<f32>(clamp(c.xyz, vec3<f32>(0.0), vec3<f32>(1.0)), c.w);
 }
 "#;
 

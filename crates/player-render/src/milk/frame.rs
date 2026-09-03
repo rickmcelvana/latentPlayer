@@ -40,8 +40,14 @@ use crate::milk::wave::Wave;
 /// 16-bit float rather than 8-bit unorm, and this is not a luxury: a feedback
 /// loop multiplies its own output by a decay every frame, so 8 bits of
 /// precision quantises to a visible staircase within a second and dark trails
-/// snap to black. It is also what lets a preset's `ret` exceed 1.0 mid-chain
-/// before the composite brings it back.
+/// snap to black.
+///
+/// The one thing the wider format does *not* buy is MilkDrop's implicit clamp:
+/// its own feedback texture is 8-bit, so every warp write saturates to [0,1],
+/// and a preset's sharpen term (`ret += (ret - GetBlur1)*0.4`) is a high-pass
+/// with gain above one that MilkDrop's target silently holds. A float target
+/// does not, so the clamp is written out in the warp entry wrapper
+/// (`shaders.rs`'s `WARP_ENTRY`) rather than left to the format.
 pub const FEEDBACK_FORMAT: wgpu::TextureFormat = wgpu::TextureFormat::Rgba16Float;
 
 /// MilkDrop's own default warp grid.
