@@ -26,6 +26,7 @@ use crate::milk::custom::{ShapeGeom, ShapeRig, WaveRig};
 use crate::milk::frame::{CompositeSettings, MilkFrame, DEFAULT_MESH};
 use crate::milk::hlsl::{self, Pass};
 use crate::milk::shaders::{PresetInputs, PresetPasses};
+use crate::milk::sprite::{SpriteDraw, SpriteRig};
 use crate::milk::state::{FrameState, Inputs, Runtime};
 use crate::milk::warp::{Grid, Warp};
 use crate::milk::wave::{self, Wave, WaveInput, WAVE_SAMPLES};
@@ -168,6 +169,10 @@ pub struct MilkDropVisual {
     /// The preset's custom waves and shapes, one rig each (M7c).
     waves: Vec<WaveRig>,
     shapes: Vec<ShapeRig>,
+    /// The preset's sprites (M7c), and each one's decoded image, parallel to
+    /// the rigs. `None` until the host hands the image over.
+    sprites: Vec<SpriteRig>,
+    sprite_textures: Vec<Option<wgpu::TextureView>>,
 }
 
 impl MilkDropVisual {
@@ -181,6 +186,8 @@ impl MilkDropVisual {
         let grid = Grid::new(DEFAULT_MESH.0, DEFAULT_MESH.1, frame.aspect());
         let passes = PresetPasses::new(gpu.device, gpu.queue, w, h, gpu.format);
         let (waves, shapes) = build_rigs(&preset);
+        let sprites: Vec<SpriteRig> = preset.sprites.iter().map(SpriteRig::new).collect();
+        let sprite_textures = vec![None; sprites.len()];
         Self {
             passes,
             report: Vec::new(),
@@ -198,6 +205,8 @@ impl MilkDropVisual {
             needs_clear: true,
             waves,
             shapes,
+            sprites,
+            sprite_textures,
         }
     }
 
@@ -209,6 +218,8 @@ impl MilkDropVisual {
     /// a thousand presets cheap.
     pub fn set_preset(&mut self, preset: Arc<Preset>) {
         let (waves, shapes) = build_rigs(&preset);
+        self.sprites = preset.sprites.iter().map(SpriteRig::new).collect();
+        self.sprite_textures = vec![None; self.sprites.len()];
         self.runtime = Runtime::new(&preset);
         self.preset = preset;
         self.waves = waves;
@@ -219,14 +230,24 @@ impl MilkDropVisual {
         self.needs_clear = true;
     }
 
-    /// Decodes the images the host read beside the preset and binds them to the
-    /// user-texture array, one layer per name in [`Self::wants`] order.
+    /// Decodes the images the host read beside the preset and binds them. A
+    /// name that matches a texture-pack name fills that layer of the
+    /// user-texture array; one that matches a sprite's `SpriteName` becomes
+    /// that sprite's image (decision 59).
     pub fn set_textures(&mut self, gpu: &Gpu, textures: &[(String, Vec<u8>)]) {
         let mut ordered: Vec<Option<crate::milk::image::DecodedImage>> =
             vec![None; self.wants.len()];
         for (name, bytes) in textures {
             if let Some(slot) = self.wants.iter().position(|w| w == name) {
                 ordered[slot] = crate::milk::image::decode(bytes);
+            }
+            for (rig, texture) in self.sprites.iter_mut().zip(self.sprite_textures.iter_mut()) {
+                if rig.name == *name {
+                    if let Some(image) = crate::milk::image::decode(bytes) {
+                        rig.img_size = [image.width as f32, image.height as f32];
+                        *texture = Some(upload_sprite_image(gpu, &image));
+                    }
+                }
             }
         }
         self.passes.set_user_textures(gpu.queue, &ordered);
@@ -385,6 +406,43 @@ fn build_rigs(preset: &Preset) -> (Vec<WaveRig>, Vec<ShapeRig>) {
     )
 }
 
+/// Uploads a sprite's decoded image at its own size -- unlike a texture pack,
+/// a sprite is not resized, because its quad's aspect correction reads the
+/// image's real dimensions.
+fn upload_sprite_image(gpu: &Gpu, image: &crate::milk::image::DecodedImage) -> wgpu::TextureView {
+    let size = wgpu::Extent3d {
+        width: image.width.max(1),
+        height: image.height.max(1),
+        depth_or_array_layers: 1,
+    };
+    let texture = gpu.device.create_texture(&wgpu::TextureDescriptor {
+        label: Some("milk-sprite-image"),
+        size,
+        mip_level_count: 1,
+        sample_count: 1,
+        dimension: wgpu::TextureDimension::D2,
+        format: wgpu::TextureFormat::Rgba8Unorm,
+        usage: wgpu::TextureUsages::TEXTURE_BINDING | wgpu::TextureUsages::COPY_DST,
+        view_formats: &[],
+    });
+    gpu.queue.write_texture(
+        wgpu::TexelCopyTextureInfo {
+            texture: &texture,
+            mip_level: 0,
+            origin: wgpu::Origin3d::ZERO,
+            aspect: wgpu::TextureAspect::All,
+        },
+        &image.rgba,
+        wgpu::TexelCopyBufferLayout {
+            offset: 0,
+            bytes_per_row: Some(image.width.max(1) * 4),
+            rows_per_image: Some(image.height.max(1)),
+        },
+        size,
+    );
+    texture.create_view(&wgpu::TextureViewDescriptor::default())
+}
+
 /// The feedback pair's size for a given viewport.
 ///
 /// The window's shape, capped on its long edge -- so a preset's aspect
@@ -489,6 +547,21 @@ impl Visual for MilkDropVisual {
             shapes.extend(rig.build(&engine_inputs, &q_seed, aspect));
         }
 
+        // Sprites (M7c): each one a textured quad, its transform and blend
+        // settled by its own code. The screen aspect is the feedback buffer's.
+        let screen_aspect = {
+            let (w, h) = self.frame.size();
+            w as f32 / h.max(1) as f32
+        };
+        let mut sprites: Vec<(SpriteDraw, wgpu::TextureView)> = Vec::new();
+        for (rig, texture) in self.sprites.iter_mut().zip(self.sprite_textures.iter()) {
+            if let Some(texture) = texture {
+                if let Some(draw) = rig.build(&engine_inputs, screen_aspect) {
+                    sprites.push((draw, texture.clone()));
+                }
+            }
+        }
+
         let mut encoder = gpu
             .device
             .create_command_encoder(&wgpu::CommandEncoderDescriptor {
@@ -553,6 +626,8 @@ impl Visual for MilkDropVisual {
 
         self.frame
             .draw_overlays(gpu.device, gpu.queue, &mut encoder, &state, &waves, &shapes);
+        self.frame
+            .draw_sprites(gpu.device, gpu.queue, &mut encoder, &sprites);
 
         let settings = CompositeSettings {
             time: self.time,

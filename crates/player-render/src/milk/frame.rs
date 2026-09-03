@@ -78,6 +78,43 @@ struct ShapeVertex {
     colour: [f32; 4],
 }
 
+/// A textured vertex, for a sprite's quad (Phase 3 M7c).
+#[repr(C)]
+#[derive(Clone, Copy, Debug, bytemuck::Pod, bytemuck::Zeroable)]
+struct SpriteVertex {
+    position: [f32; 2],
+    uv: [f32; 2],
+}
+
+#[repr(C)]
+#[derive(Clone, Copy, Debug, bytemuck::Pod, bytemuck::Zeroable)]
+struct SpriteUniform {
+    /// `r`, `g`, `b`, `a` -- the sprite's modulation.
+    modulate: [f32; 4],
+    /// The colour key's `r`, `g`, `b`, and 1.0 when one is set.
+    colorkey: [f32; 4],
+    /// The blend mode (0..10), and padding.
+    blendmode: [u32; 4],
+}
+
+/// Which sprite pipeline a blend mode uses. Modes 0 and 4 share one blend state
+/// (their difference is the fragment shader's alpha); the MilkDrop 3 modes 5, 6
+/// and 9 map onto a multiply, a reverse-subtract and a min; the rest of the
+/// MilkDrop 3 additions (7 invert, 8 cut-off, 10 vivid) fall back to alpha
+/// blending, which is the closest a fixed-function blend state comes.
+fn sprite_pipeline_index(mode: u32) -> usize {
+    match mode {
+        0 | 4 | 7 | 8 | 10 => 0,
+        1 => 1,
+        2 => 2,
+        3 => 3,
+        5 => 4,
+        6 => 5,
+        9 => 6,
+        _ => 0,
+    }
+}
+
 #[repr(C)]
 #[derive(Clone, Copy, Debug, bytemuck::Pod, bytemuck::Zeroable)]
 struct WarpUniform {
@@ -133,6 +170,13 @@ pub struct MilkFrame {
     line_add: wgpu::RenderPipeline,
     point_over: wgpu::RenderPipeline,
     point_add: wgpu::RenderPipeline,
+    /// A pipeline per sprite blend mode's own blend state (Phase 3 M7c). Indexed
+    /// by [`sprite_pipeline_index`].
+    sprite_pipelines: Vec<wgpu::RenderPipeline>,
+    sprite_layout: wgpu::BindGroupLayout,
+    sprite_uniform: wgpu::Buffer,
+    sprite_vertices: wgpu::Buffer,
+    sprite_capacity: usize,
     warp_layout: wgpu::BindGroupLayout,
     comp_layout: wgpu::BindGroupLayout,
     vertices: wgpu::Buffer,
@@ -406,6 +450,181 @@ impl MilkFrame {
             overlay_pipeline("milk-dots-over", wgpu::PrimitiveTopology::PointList, false);
         let point_add = overlay_pipeline("milk-dots-add", wgpu::PrimitiveTopology::PointList, true);
 
+        // The sprite pass (Phase 3 M7c): a textured quad per sprite, with the
+        // modulation, colour key and blend mode in a uniform and the blend
+        // state chosen per mode. One pipeline per distinct blend state.
+        let sprite_layout = device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
+            label: Some("milk-sprite-layout"),
+            entries: &[
+                wgpu::BindGroupLayoutEntry {
+                    binding: 0,
+                    visibility: wgpu::ShaderStages::FRAGMENT,
+                    ty: wgpu::BindingType::Texture {
+                        sample_type: wgpu::TextureSampleType::Float { filterable: true },
+                        view_dimension: wgpu::TextureViewDimension::D2,
+                        multisampled: false,
+                    },
+                    count: None,
+                },
+                wgpu::BindGroupLayoutEntry {
+                    binding: 1,
+                    visibility: wgpu::ShaderStages::FRAGMENT,
+                    ty: wgpu::BindingType::Sampler(wgpu::SamplerBindingType::Filtering),
+                    count: None,
+                },
+                wgpu::BindGroupLayoutEntry {
+                    binding: 2,
+                    visibility: wgpu::ShaderStages::FRAGMENT,
+                    ty: wgpu::BindingType::Buffer {
+                        ty: wgpu::BufferBindingType::Uniform,
+                        has_dynamic_offset: false,
+                        min_binding_size: None,
+                    },
+                    count: None,
+                },
+            ],
+        });
+        let sprite_shader = device.create_shader_module(wgpu::ShaderModuleDescriptor {
+            label: Some("milk-sprite"),
+            source: wgpu::ShaderSource::Wgsl(SPRITE_SHADER.into()),
+        });
+        let sprite_pipeline_layout =
+            device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
+                label: Some("milk-sprite-pipeline-layout"),
+                bind_group_layouts: &[Some(&sprite_layout)],
+                immediate_size: 0,
+            });
+        let sprite_pipeline = |label: &str, blend: Option<wgpu::BlendState>| {
+            device.create_render_pipeline(&wgpu::RenderPipelineDescriptor {
+                label: Some(label),
+                layout: Some(&sprite_pipeline_layout),
+                vertex: wgpu::VertexState {
+                    module: &sprite_shader,
+                    entry_point: Some("sprite_vs"),
+                    buffers: &[Some(wgpu::VertexBufferLayout {
+                        array_stride: std::mem::size_of::<SpriteVertex>() as u64,
+                        step_mode: wgpu::VertexStepMode::Vertex,
+                        attributes: &[
+                            wgpu::VertexAttribute {
+                                format: wgpu::VertexFormat::Float32x2,
+                                offset: 0,
+                                shader_location: 0,
+                            },
+                            wgpu::VertexAttribute {
+                                format: wgpu::VertexFormat::Float32x2,
+                                offset: 8,
+                                shader_location: 1,
+                            },
+                        ],
+                    })],
+                    compilation_options: Default::default(),
+                },
+                fragment: Some(wgpu::FragmentState {
+                    module: &sprite_shader,
+                    entry_point: Some("sprite_fs"),
+                    targets: &[Some(wgpu::ColorTargetState {
+                        format: FEEDBACK_FORMAT,
+                        blend,
+                        write_mask: wgpu::ColorWrites::ALL,
+                    })],
+                    compilation_options: Default::default(),
+                }),
+                primitive: wgpu::PrimitiveState {
+                    topology: wgpu::PrimitiveTopology::TriangleStrip,
+                    ..Default::default()
+                },
+                depth_stencil: None,
+                multisample: wgpu::MultisampleState::default(),
+                multiview_mask: None,
+                cache: None,
+            })
+        };
+        let alpha = wgpu::BlendState {
+            color: wgpu::BlendComponent {
+                src_factor: wgpu::BlendFactor::SrcAlpha,
+                dst_factor: wgpu::BlendFactor::OneMinusSrcAlpha,
+                operation: wgpu::BlendOperation::Add,
+            },
+            alpha: wgpu::BlendComponent::REPLACE,
+        };
+        let sprite_pipelines = vec![
+            // 0 alpha (modes 0, 4, and the approximations 7/8/10).
+            sprite_pipeline("milk-sprite-alpha", Some(alpha)),
+            // 1 decal -- no blend, overwrite.
+            sprite_pipeline("milk-sprite-decal", None),
+            // 2 additive.
+            sprite_pipeline(
+                "milk-sprite-additive",
+                Some(wgpu::BlendState {
+                    color: wgpu::BlendComponent {
+                        src_factor: wgpu::BlendFactor::One,
+                        dst_factor: wgpu::BlendFactor::One,
+                        operation: wgpu::BlendOperation::Add,
+                    },
+                    alpha: wgpu::BlendComponent::REPLACE,
+                }),
+            ),
+            // 3 srccolor: src * src + dst * (1 - src).
+            sprite_pipeline(
+                "milk-sprite-srccolor",
+                Some(wgpu::BlendState {
+                    color: wgpu::BlendComponent {
+                        src_factor: wgpu::BlendFactor::Src,
+                        dst_factor: wgpu::BlendFactor::OneMinusSrc,
+                        operation: wgpu::BlendOperation::Add,
+                    },
+                    alpha: wgpu::BlendComponent::REPLACE,
+                }),
+            ),
+            // 5 multiplicative: src * dst.
+            sprite_pipeline(
+                "milk-sprite-multiply",
+                Some(wgpu::BlendState {
+                    color: wgpu::BlendComponent {
+                        src_factor: wgpu::BlendFactor::Dst,
+                        dst_factor: wgpu::BlendFactor::Zero,
+                        operation: wgpu::BlendOperation::Add,
+                    },
+                    alpha: wgpu::BlendComponent::REPLACE,
+                }),
+            ),
+            // 6 subtractive: dst - src.
+            sprite_pipeline(
+                "milk-sprite-subtract",
+                Some(wgpu::BlendState {
+                    color: wgpu::BlendComponent {
+                        src_factor: wgpu::BlendFactor::One,
+                        dst_factor: wgpu::BlendFactor::One,
+                        operation: wgpu::BlendOperation::ReverseSubtract,
+                    },
+                    alpha: wgpu::BlendComponent::REPLACE,
+                }),
+            ),
+            // 9 darken: min(src, dst).
+            sprite_pipeline(
+                "milk-sprite-darken",
+                Some(wgpu::BlendState {
+                    color: wgpu::BlendComponent {
+                        src_factor: wgpu::BlendFactor::One,
+                        dst_factor: wgpu::BlendFactor::One,
+                        operation: wgpu::BlendOperation::Min,
+                    },
+                    alpha: wgpu::BlendComponent::REPLACE,
+                }),
+            ),
+        ];
+        let sprite_uniform = make_uniform(
+            "milk-sprite-uniform",
+            std::mem::size_of::<SpriteUniform>() as u64,
+        );
+        let sprite_capacity = 4;
+        let sprite_vertices = device.create_buffer(&wgpu::BufferDescriptor {
+            label: Some("milk-sprite-vertices"),
+            size: (sprite_capacity * std::mem::size_of::<SpriteVertex>()) as u64,
+            usage: wgpu::BufferUsages::VERTEX | wgpu::BufferUsages::COPY_DST,
+            mapped_at_creation: false,
+        });
+
         let vertex_count = ((mesh_x + 1) * (mesh_y + 1)) as u64;
         let vertices = device.create_buffer(&wgpu::BufferDescriptor {
             label: Some("milk-mesh-vertices"),
@@ -463,6 +682,11 @@ impl MilkFrame {
             line_add,
             point_over,
             point_add,
+            sprite_pipelines,
+            sprite_layout,
+            sprite_uniform,
+            sprite_vertices,
+            sprite_capacity,
             warp_layout,
             comp_layout,
             vertices,
@@ -926,6 +1150,101 @@ impl MilkFrame {
         }
     }
 
+    /// Draws the preset's sprites on top of the waves and shapes, into the
+    /// feedback buffer -- so a sprite is *part of the loop* (MilkDrop 3's
+    /// "merge the image in the preset", `SpriteBurn=1`), warped and faded like
+    /// everything else rather than pasted over the finished frame.
+    ///
+    /// Each sprite is a four-vertex quad with its own image, modulation, colour
+    /// key and blend mode; the corner and UV work was done by [`SpriteRig`]
+    /// on the CPU, so this only binds and draws.
+    pub fn draw_sprites(
+        &mut self,
+        device: &wgpu::Device,
+        queue: &wgpu::Queue,
+        encoder: &mut wgpu::CommandEncoder,
+        sprites: &[(super::sprite::SpriteDraw, wgpu::TextureView)],
+    ) {
+        if sprites.is_empty() {
+            return;
+        }
+        let mut vertices: Vec<SpriteVertex> = Vec::with_capacity(sprites.len() * 4);
+        for (sprite, _) in sprites {
+            for k in 0..4 {
+                vertices.push(SpriteVertex {
+                    position: sprite.corners[k],
+                    uv: sprite.uvs[k],
+                });
+            }
+        }
+        let needed = vertices.len();
+        if needed > self.sprite_capacity {
+            let capacity = needed.next_power_of_two();
+            self.sprite_vertices = device.create_buffer(&wgpu::BufferDescriptor {
+                label: Some("milk-sprite-vertices"),
+                size: (capacity * std::mem::size_of::<SpriteVertex>()) as u64,
+                usage: wgpu::BufferUsages::VERTEX | wgpu::BufferUsages::COPY_DST,
+                mapped_at_creation: false,
+            });
+            self.sprite_capacity = capacity;
+        }
+        queue.write_buffer(&self.sprite_vertices, 0, bytemuck::cast_slice(&vertices));
+
+        let mut pass = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
+            label: Some("milk-sprite-pass"),
+            color_attachments: &[Some(wgpu::RenderPassColorAttachment {
+                view: &self.views[self.current],
+                depth_slice: None,
+                resolve_target: None,
+                ops: wgpu::Operations {
+                    load: wgpu::LoadOp::Load,
+                    store: wgpu::StoreOp::Store,
+                },
+            })],
+            depth_stencil_attachment: None,
+            timestamp_writes: None,
+            occlusion_query_set: None,
+            multiview_mask: None,
+        });
+        pass.set_vertex_buffer(0, self.sprite_vertices.slice(..));
+
+        for (index, (sprite, texture)) in sprites.iter().enumerate() {
+            let uniform = SpriteUniform {
+                modulate: sprite.modulate,
+                colorkey: [
+                    sprite.colorkey[0],
+                    sprite.colorkey[1],
+                    sprite.colorkey[2],
+                    if sprite.has_colorkey { 1.0 } else { 0.0 },
+                ],
+                blendmode: [sprite.blendmode, 0, 0, 0],
+            };
+            queue.write_buffer(&self.sprite_uniform, 0, bytemuck::bytes_of(&uniform));
+            let bind = device.create_bind_group(&wgpu::BindGroupDescriptor {
+                label: Some("milk-sprite-bind"),
+                layout: &self.sprite_layout,
+                entries: &[
+                    wgpu::BindGroupEntry {
+                        binding: 0,
+                        resource: wgpu::BindingResource::TextureView(texture),
+                    },
+                    wgpu::BindGroupEntry {
+                        binding: 1,
+                        resource: wgpu::BindingResource::Sampler(&self.repeat_sampler),
+                    },
+                    wgpu::BindGroupEntry {
+                        binding: 2,
+                        resource: self.sprite_uniform.as_entire_binding(),
+                    },
+                ],
+            });
+            pass.set_pipeline(&self.sprite_pipelines[sprite_pipeline_index(sprite.blendmode)]);
+            pass.set_bind_group(0, &bind, &[]);
+            let from = (index * 4) as u32;
+            pass.draw(from..from + 4, 0..1);
+        }
+    }
+
     fn ensure_overlay_capacity(&mut self, device: &wgpu::Device, needed: usize) {
         if needed <= self.overlay_capacity {
             return;
@@ -1101,6 +1420,55 @@ fn push_borders(out: &mut Vec<ShapeVertex>, state: &FrameState) {
         }
     }
 }
+
+/// The sprite pass (Phase 3 M7c). A textured quad, modulated and colour-keyed,
+/// with the blend state chosen per mode.
+const SPRITE_SHADER: &str = r#"
+struct SpriteUniform {
+    modulate: vec4<f32>,
+    colorkey: vec4<f32>,
+    blendmode: vec4<u32>,
+};
+
+@group(0) @binding(0) var tex: texture_2d<f32>;
+@group(0) @binding(1) var samp: sampler;
+@group(0) @binding(2) var<uniform> u: SpriteUniform;
+
+struct SpriteOut {
+    @builtin(position) clip: vec4<f32>,
+    @location(0) uv: vec2<f32>,
+};
+
+@vertex
+fn sprite_vs(@location(0) position: vec2<f32>, @location(1) uv: vec2<f32>) -> SpriteOut {
+    var out: SpriteOut;
+    out.clip = vec4<f32>(position, 0.0, 1.0);
+    out.uv = uv;
+    return out;
+}
+
+@fragment
+fn sprite_fs(in: SpriteOut) -> @location(0) vec4<f32> {
+    var c = textureSampleLevel(tex, samp, in.uv, 0.0).rgba;
+    // The colour key turns the matching texel transparent, which is what makes
+    // blend mode 4 (and only mode 4) skip it.
+    if (u.colorkey.w > 0.5 && all(abs(c.rgb - u.colorkey.rgb) < vec3<f32>(0.002))) {
+        c.a = 0.0;
+    }
+    let mode = u.blendmode.x;
+    if (mode == 1u || mode == 2u) {
+        // decal and additive: modulate by r*a/g*a/b*a, alpha 1.
+        return vec4<f32>(c.rgb * u.modulate.rgb * u.modulate.a, 1.0);
+    } else if (mode == 3u) {
+        // srccolor: the texture's own colour, unmodulated.
+        return vec4<f32>(c.rgb, 1.0);
+    }
+    // 0 blend, 4 colorkey, and the approximations: modulate rgb, alpha from a
+    // (or a * the keyed texture's alpha for mode 4).
+    let a = select(u.modulate.a, u.modulate.a * c.a, mode == 4u);
+    return vec4<f32>(c.rgb * u.modulate.rgb, a);
+}
+"#;
 
 /// The passes. Fixed WGSL for M7a -- a preset's own `warp` and `comp` bodies
 /// are translated into the marked places in M7b.

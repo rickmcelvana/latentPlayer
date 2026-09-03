@@ -2710,6 +2710,35 @@ fn check_milkdrop() {
             mean_channel(&tex, 2)
         ),
     );
+
+    // --- M7c: sprites. A sprite draws its own image as a textured quad, in
+    // decal mode (overwrite) so the colour is the image's own. ---
+    let sprite = milk_preset(
+        "fWaveAlpha=0\n\
+         [SPRITE1_BEGIN]\n\
+         SpriteName=sprite_test\n\
+         SpriteBlend=1\n\
+         SpriteAlpha=1.0\n\
+         SpriteSX=-0.5\n\
+         SpriteSY=-0.5\n\
+         SpriteX=0\n\
+         SpriteY=0\n\
+         [SPRITE1_END]\n",
+    );
+    renderer.set_preset(Some(&sprite)).expect("a preset parses");
+    renderer.set_textures(&[("sprite_test".to_string(), solid_png(30, 200, 30))]);
+    let mut sprite_px = Vec::new();
+    for _ in 0..4 {
+        sprite_px = renderer
+            .draw_to_pixels(&full_frame(&signal, &spectrum))
+            .expect("a MilkDrop frame renders");
+    }
+    let centre = mean_centre(&sprite_px, 0.3);
+    check(
+        "a sprite draws its image as a textured quad",
+        centre > 150.0 && mean_channel(&sprite_px, 0) < 40.0,
+        format!("centre g {centre:.0}, r {:.0}", mean_channel(&sprite_px, 0)),
+    );
 }
 
 fn main() {

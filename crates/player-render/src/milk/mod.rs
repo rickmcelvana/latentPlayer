@@ -54,12 +54,13 @@ pub mod image;
 pub mod noise;
 pub mod parse;
 pub mod shaders;
+pub mod sprite;
 pub mod state;
 pub mod warp;
 pub mod wave;
 
 pub use frame::{CompositeSettings, MilkFrame, WarpVertex, DEFAULT_MESH};
-pub use parse::{CustomShape, CustomWave, ParseError, Preset, Unsupported};
+pub use parse::{CustomShape, CustomWave, ParseError, Preset, Sprite, Unsupported};
 pub use state::{Fault, FrameState, Inputs, Motion, Runtime};
 pub use warp::{Aspect, Grid, GridPoint, Warp};
 pub use wave::{Wave, WaveInput};

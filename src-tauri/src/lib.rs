@@ -773,6 +773,23 @@ fn set_milk_preset(
             None => report.push(format!("texture:{name}: image not found beside the preset")),
         }
     }
+    // Sprites (decision 59), one image each, keyed by the path the preset wrote
+    // in `SpriteName` -- the same string the visual matches by.
+    for sprite in &preset.sprites {
+        let name = sprite
+            .base
+            .get("Name")
+            .map(String::as_str)
+            .unwrap_or("")
+            .replace('\\', "/");
+        if name.is_empty() {
+            continue;
+        }
+        match find_sprite_image(folder, &name).and_then(|p| std::fs::read(&p).ok()) {
+            Some(bytes) => textures.push((name, bytes)),
+            None => report.push(format!("sprite:{name}: image not found beside the preset")),
+        }
+    }
     report.extend(
         player_render::milk::Runtime::new(&preset)
             .faults()
@@ -824,6 +841,25 @@ fn find_image(folder: &std::path::Path, name: &str) -> Option<std::path::PathBuf
             if known_ext {
                 return Some(path);
             }
+        }
+    }
+    None
+}
+
+/// Finds a sprite's image file. `name` is the path the preset wrote in
+/// `SpriteName` (`sprites/x1.png`), resolved against the preset's folder and its
+/// ancestors -- the same walk as [`find_image`], but the name already carries
+/// its folder, so it is tried as a path rather than a stem.
+fn find_sprite_image(folder: &std::path::Path, name: &str) -> Option<std::path::PathBuf> {
+    let rel = std::path::Path::new(name);
+    let mut ancestor = Some(folder);
+    for _ in 0..3 {
+        if let Some(dir) = ancestor {
+            let candidate = dir.join(rel);
+            if candidate.is_file() {
+                return Some(candidate);
+            }
+            ancestor = dir.parent();
         }
     }
     None
