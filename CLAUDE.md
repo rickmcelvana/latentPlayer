@@ -825,12 +825,13 @@ centre), 280 unit tests (up from 272), `milk_smoke` 369/371 against the full
 353-preset set (the two failures are the pre-existing EEL budget/`memcpy`
 limits), clippy/fmt clean, wasm check clean. The web smoke mirrors both checks
 in `visualizerSmoke.ts` (its own `solidPng` encoder feeding `setTextures`),
-awaiting a browser run at `/visualizer.html`. **Texture packs are
+and a browser run at `/visualizer.html` reports **135/135** (was 133/133),
+agreeing figure for figure with the native half. **Texture packs are
 user-confirmed live on the desktop (2026-09-02): "tested on a cloud and worm
 preset and it works."** Sprites are **not yet live-looked** -- the y-orientation
 and the 7/8/10 blend-mode fallbacks are the two things a readback cannot
-settle. A browser run of the web smoke and a live look at sprites are the
-remaining M7c item 2 work; the preset library (item 3) is next.
+settle. A live look at sprites is the remaining M7c item 2 work; the preset
+library (item 3) is next.
 
 The certificate answer changed a finding into a fix: ureq defaults to
 webpki-roots, a bundle compiled into the binary, under which installing a
