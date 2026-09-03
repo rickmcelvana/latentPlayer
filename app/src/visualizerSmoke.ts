@@ -1560,6 +1560,20 @@ function meanCentre(target: HTMLCanvasElement, fraction: number): number {
   return n === 0 ? 0 : sum / n;
 }
 
+/// A solid-colour PNG, for the texture-pack and sprite checks that have to
+/// feed real bytes -- the browser's own encoder, the counterpart of the
+/// native half's `image` crate.
+async function solidPng(r: number, g: number, b: number): Promise<Uint8Array> {
+  const c = document.createElement("canvas");
+  c.width = 4;
+  c.height = 4;
+  const ctx = c.getContext("2d")!;
+  ctx.fillStyle = `rgb(${r},${g},${b})`;
+  ctx.fillRect(0, 0, 4, 4);
+  const blob = await new Promise<Blob>((resolve) => c.toBlob((b) => resolve(b!), "image/png"));
+  return new Uint8Array(await blob.arrayBuffer());
+}
+
 async function checkMilkdrop(): Promise<void> {
   log("\nMilkDrop -- its own claims:");
   // One renderer for the whole section, presets swapped in place. M6's live run
@@ -1893,6 +1907,69 @@ async function checkMilkdrop(): Promise<void> {
     "a disabled wave and shape draw nothing",
     disabledLit === 0,
     `${disabledLit} lit px`,
+  );
+
+  // --- M7c: texture packs. A named sampler resolves to a layer of the
+  // user-texture array, filled from the preset's own folder (decision 59). A
+  // composite that samples its own texture paints the whole frame with it. ---
+  const textured = milkPreset(
+    milkShaderLines("comp", "shader_body\n{\nret = tex2D(sampler_fw_test, uv).xyz;\n}"),
+  );
+  renderer.setPreset(textured);
+  renderer.setTextures(["test"], [await solidPng(220, 30, 30)]);
+  for (let f = 0; f < 4; f++) {
+    renderer.draw_frame(
+      signal,
+      2,
+      RATE,
+      FRAME_SECONDS,
+      spectrum.levels,
+      spectrum.centres,
+      undefined,
+    );
+  }
+  const texR = meanChannel(surface, 0);
+  const texG = meanChannel(surface, 1);
+  const texB = meanChannel(surface, 2);
+  check(
+    "a texture pack image is sampled from the user-texture array",
+    texR > 150 && texG < 80 && texB < 80,
+    `r ${texR.toFixed(0)}, g ${texG.toFixed(0)}, b ${texB.toFixed(0)}`,
+  );
+
+  // --- M7c: sprites. A sprite draws its own image as a textured quad, in
+  // decal mode (overwrite) so the colour is the image's own. ---
+  const sprite = milkPreset(
+    "fWaveAlpha=0\n" +
+      "[SPRITE1_BEGIN]\n" +
+      "SpriteName=sprite_test\n" +
+      "SpriteBlend=1\n" +
+      "SpriteAlpha=1.0\n" +
+      "SpriteSX=-0.5\n" +
+      "SpriteSY=-0.5\n" +
+      "SpriteX=0\n" +
+      "SpriteY=0\n" +
+      "[SPRITE1_END]\n",
+  );
+  renderer.setPreset(sprite);
+  renderer.setTextures(["sprite_test"], [await solidPng(30, 200, 30)]);
+  for (let f = 0; f < 4; f++) {
+    renderer.draw_frame(
+      signal,
+      2,
+      RATE,
+      FRAME_SECONDS,
+      spectrum.levels,
+      spectrum.centres,
+      undefined,
+    );
+  }
+  const spriteCentre = meanCentre(surface, 0.3);
+  const spriteR = meanChannel(surface, 0);
+  check(
+    "a sprite draws its image as a textured quad",
+    spriteCentre > 150 && spriteR < 40,
+    `centre g ${spriteCentre.toFixed(0)}, r ${spriteR.toFixed(0)}`,
   );
 }
 

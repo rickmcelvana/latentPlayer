@@ -823,11 +823,13 @@ running web app catches up with the preset library (M7c item 3). Verified:
 `sampler_fw_test` and reads it back; a sprite check draws a green quad at
 centre), 280 unit tests (up from 272), `milk_smoke` 369/371 against the full
 353-preset set (the two failures are the pre-existing EEL budget/`memcpy`
-limits), clippy/fmt clean, wasm check clean. **Texture packs are
+limits), clippy/fmt clean, wasm check clean. The web smoke mirrors both checks
+in `visualizerSmoke.ts` (its own `solidPng` encoder feeding `setTextures`),
+awaiting a browser run at `/visualizer.html`. **Texture packs are
 user-confirmed live on the desktop (2026-09-02): "tested on a cloud and worm
 preset and it works."** Sprites are **not yet live-looked** -- the y-orientation
 and the 7/8/10 blend-mode fallbacks are the two things a readback cannot
-settle. The web smoke's sprite check and a live look at sprites are the
+settle. A browser run of the web smoke and a live look at sprites are the
 remaining M7c item 2 work; the preset library (item 3) is next.
 
 The certificate answer changed a finding into a fix: ureq defaults to

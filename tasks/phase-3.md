@@ -3595,6 +3595,8 @@ preset and it works."** Sprites are **not yet live-looked** -- the
 y-orientation and the 7/8/10 blend-mode fallbacks are the two things a
 readback cannot settle.
 
-**Remaining M7c item 2 work:** the web smoke's sprite check (mirror the native
-one in `visualizerSmoke.ts`), and a live look at sprites on both shells. Then
-M7c item 3, the preset library (decision 50), is next.
+**Remaining M7c item 2 work:** a browser run of the web smoke at
+`/visualizer.html` (the texture-pack and sprite checks are mirrored in
+`visualizerSmoke.ts`, feeding `setTextures` bytes from its own `solidPng`
+encoder), and a live look at sprites on both shells. Then M7c item 3, the
+preset library (decision 50), is next.
