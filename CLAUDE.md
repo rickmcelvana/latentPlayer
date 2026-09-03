@@ -827,8 +827,8 @@ limits), clippy/fmt clean, wasm check clean. **Texture packs are
 user-confirmed live on the desktop (2026-09-02): "tested on a cloud and worm
 preset and it works."** Sprites are **not yet live-looked** -- the y-orientation
 and the 7/8/10 blend-mode fallbacks are the two things a readback cannot
-settle. The web smoke's sprite check and the docs are the remaining M7c item 2
-work; the preset library (item 3) is next.
+settle. The web smoke's sprite check and a live look at sprites are the
+remaining M7c item 2 work; the preset library (item 3) is next.
 
 The certificate answer changed a finding into a fix: ureq defaults to
 webpki-roots, a bundle compiled into the binary, under which installing a
