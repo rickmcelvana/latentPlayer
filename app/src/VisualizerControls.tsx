@@ -25,6 +25,18 @@ import {
   type GainInfo,
   type VisualInfo,
 } from "./visualizer";
+import {
+  addPresetFolder,
+  forgetPreset as forgetPresetSelection,
+  forgetPresetFolder,
+  openPreset,
+  presetFolders,
+  presetRows,
+  rememberPreset,
+  restorePreset,
+  type PresetFolder,
+  type PresetRow,
+} from "./presetLibrary";
 
 export function VisualizerControls() {
   const [catalog, setCatalog] = useState<VisualInfo[]>([]);
@@ -44,6 +56,12 @@ export function VisualizerControls() {
   /// Why a preset would not load. A file that is not a preset is the one
   /// failure here a person can act on, so it is said rather than swallowed.
   const [presetError, setPresetError] = useState<string | null>(null);
+  /// The preset library (M7c item 3): the folders and rows a person has
+  /// pointed the app at, and the state of scanning one.
+  const [presetFolderList, setPresetFolderList] = useState<PresetFolder[]>([]);
+  const [presetRowList, setPresetRowList] = useState<PresetRow[]>([]);
+  const [presetScanning, setPresetScanning] = useState(false);
+  const [presetStatus, setPresetStatus] = useState<string | null>(null);
   /// The web shell's file input. Hidden, and clicked from the button, because
   /// a bare `<input type="file">` cannot be styled like the rest of the panel.
   const fileInput = useRef<HTMLInputElement | null>(null);
@@ -132,6 +150,84 @@ export function VisualizerControls() {
     void setGain(id).catch(() => {});
   };
 
+  /// Loads the preset library's folders and rows, and restores the selection
+  /// from last session. The restore is silent on failure -- the honest state is
+  /// "no preset selected", and the person can pick again.
+  useEffect(() => {
+    let cancelled = false;
+    const refresh = async () => {
+      const [folders, rows] = await Promise.all([presetFolders(), presetRows()]);
+      if (cancelled) return;
+      setPresetFolderList(folders);
+      setPresetRowList(rows);
+    };
+    refresh().catch(() => {});
+    restorePreset()
+      .then((report) => {
+        if (cancelled || report === null) return;
+        setPresetReport(report);
+      })
+      .catch(() => {});
+    return () => {
+      cancelled = true;
+    };
+  }, []);
+
+  /// Points the app at a folder of presets and scans it (M7c item 3).
+  const choosePresetFolder = async () => {
+    setPresetError(null);
+    setPresetScanning(true);
+    setPresetStatus("Scanning…");
+    try {
+      const summary = await addPresetFolder((done, total) =>
+        setPresetStatus(`Read ${done} of ${total}…`),
+      );
+      if (!summary) {
+        setPresetStatus(null);
+        return;
+      }
+      const [folders, rows] = await Promise.all([presetFolders(), presetRows()]);
+      setPresetFolderList(folders);
+      setPresetRowList(rows);
+      setPresetStatus(
+        summary.failed > 0
+          ? `Added ${summary.added} of ${summary.found} presets (${summary.failed} unreadable)`
+          : `Added ${summary.added} presets`,
+      );
+    } catch (e) {
+      setPresetError(String(e));
+      setPresetStatus(null);
+    } finally {
+      setPresetScanning(false);
+    }
+  };
+
+  /// Selects a preset from the library, remembering it for next session.
+  const chooseLibraryPreset = async (row: PresetRow) => {
+    setPresetError(null);
+    try {
+      const report = await openPreset(row);
+      setPreset(row.fileName);
+      setPresetReport(report);
+      rememberPreset(row);
+    } catch (e) {
+      setPresetError(String(e));
+    }
+  };
+
+  /// Forgets a preset folder and its rows.
+  const removePresetFolder = async (folder: PresetFolder) => {
+    setPresetError(null);
+    try {
+      await forgetPresetFolder(folder.id);
+      const [folders, rows] = await Promise.all([presetFolders(), presetRows()]);
+      setPresetFolderList(folders);
+      setPresetRowList(rows);
+    } catch (e) {
+      setPresetError(String(e));
+    }
+  };
+
   /// Picks a `.milk` file, in whichever way this shell picks files.
   ///
   /// Two mechanisms because there is no one mechanism: the desktop shell opens
@@ -181,6 +277,7 @@ export function VisualizerControls() {
       await setMilkPreset(null);
       setPreset(null);
       setPresetReport([]);
+      forgetPresetSelection();
     } catch (e) {
       setPresetError(String(e));
     }
@@ -269,6 +366,65 @@ export function VisualizerControls() {
             style={{ display: "none" }}
             onChange={(event) => void onFilePicked(event)}
           />
+
+          {/* The preset library (M7c item 3): point at a folder, and it is the
+              whole of what a person points at -- presets, and the textures and
+              sprites beside them. The single-file picker above stays as the
+              path for one preset in hand. */}
+          <div className="preset-library">
+            <button
+              type="button"
+              onClick={() => void choosePresetFolder()}
+              disabled={presetScanning}
+            >
+              {presetScanning ? "Scanning…" : "Add preset folder…"}
+            </button>
+            {presetStatus && <span className="hint">{presetStatus}</span>}
+            {presetFolderList.length > 0 && (
+              <ul className="preset-folders">
+                {presetFolderList.map((folder) => (
+                  <li key={folder.id} className={folder.available ? undefined : "unavailable"}>
+                    <span className="folder-name" title={folder.id}>
+                      {folder.name}
+                    </span>
+                    {!folder.available && (
+                      <span className="folder-note">needs adding again to open</span>
+                    )}
+                    <button
+                      type="button"
+                      className="remove"
+                      aria-label={`Remove ${folder.name}`}
+                      onClick={() => void removePresetFolder(folder)}
+                    >
+                      &times;
+                    </button>
+                  </li>
+                ))}
+              </ul>
+            )}
+            {presetRowList.length > 0 && (
+              <ol className="preset-rows">
+                {presetRowList.map((row) => (
+                  <li key={row.id}>
+                    <button
+                      type="button"
+                      className={row.fileName === preset ? "row current" : "row"}
+                      title={row.report.join("\n")}
+                      onClick={() => void chooseLibraryPreset(row)}
+                    >
+                      <span className="name">{row.fileName}</span>
+                      {row.report.length > 0 && (
+                        <span className="meta">
+                          {row.report.length} thing{row.report.length === 1 ? "" : "s"} this
+                          preset needs
+                        </span>
+                      )}
+                    </button>
+                  </li>
+                ))}
+              </ol>
+            )}
+          </div>
         </div>
       )}
       {gains.length > 0 && (

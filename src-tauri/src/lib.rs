@@ -219,6 +219,11 @@ const DEFAULT_EQ_RATE: u32 = 48_000;
 /// open" state for the UI to handle.
 type SharedLibrary = Arc<Mutex<Library>>;
 
+/// The preset library (Phase 3 M7c item 3). Built in `setup` against the app
+/// data directory, beside the music library, and always present for the same
+/// reason.
+type SharedPresetLibrary = Arc<Mutex<player_render::milk::PresetLibrary>>;
+
 /// The URI scheme cover art is served over.
 ///
 /// Art does not travel through `invoke`: a 50KB JPEG becomes a JSON array of
@@ -562,6 +567,62 @@ fn delete_playlist(id: String, state: tauri::State<SharedLibrary>) -> Result<(),
         .lock()
         .unwrap()
         .delete_playlist(&id)
+        .map_err(|e| e.to_string())
+}
+
+/// Walks `path`, parses every `.milk` file, and merges the result into the
+/// preset library (Phase 3 M7c item 3).
+///
+/// `async` and doing its work in `spawn_blocking`, for `scan_folder`'s reason:
+/// a folder of several thousand presets is seconds of file IO and parsing, and
+/// on the main thread that is a frozen UI. Nothing the preset library does may
+/// reach the audio path or the renderer.
+#[tauri::command]
+async fn scan_preset_folder(
+    path: String,
+    state: tauri::State<'_, SharedPresetLibrary>,
+) -> Result<player_render::milk::PresetScanSummary, String> {
+    let library = state.inner().clone();
+    tauri::async_runtime::spawn_blocking(move || {
+        library
+            .lock()
+            .unwrap()
+            .scan(&path)
+            .map_err(|e| e.to_string())
+    })
+    .await
+    .map_err(|e| e.to_string())?
+}
+
+/// Every row in the preset library. Sent whole rather than paged, for
+/// `library_tracks`'s reason: a row is a couple of hundred bytes, so even a
+/// large collection is a few megabytes read once.
+#[tauri::command]
+fn preset_rows(state: tauri::State<SharedPresetLibrary>) -> Vec<player_render::milk::PresetRow> {
+    state.lock().unwrap().rows().to_vec()
+}
+
+#[tauri::command]
+fn preset_folders(state: tauri::State<SharedPresetLibrary>) -> Vec<String> {
+    state
+        .lock()
+        .unwrap()
+        .folders()
+        .iter()
+        .map(|p| p.to_string_lossy().into_owned())
+        .collect()
+}
+
+/// Forgets a folder and its rows. The files themselves are untouched.
+#[tauri::command]
+fn forget_preset_folder(
+    path: String,
+    state: tauri::State<SharedPresetLibrary>,
+) -> Result<(), String> {
+    state
+        .lock()
+        .unwrap()
+        .forget_folder(&path)
         .map_err(|e| e.to_string())
 }
 
@@ -1273,6 +1334,10 @@ pub fn run() {
             playlists,
             save_playlist,
             delete_playlist,
+            scan_preset_folder,
+            preset_rows,
+            preset_folders,
+            forget_preset_folder,
             load_server_track,
             set_next_server_track,
             servers::server_random_tracks,
@@ -1330,6 +1395,9 @@ pub fn run() {
             // where that is (it depends on the bundle identifier and the OS).
             let data_dir = app.path().app_data_dir()?;
             app.manage(SharedLibrary::new(Mutex::new(Library::open(&data_dir)?)));
+            app.manage(SharedPresetLibrary::new(Mutex::new(
+                player_render::milk::PresetLibrary::open(&data_dir)?,
+            )));
 
             // The music server (Phase 2 M1). The directory is managed too, since
             // the server's settings live beside the library index and the

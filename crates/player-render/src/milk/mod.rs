@@ -51,8 +51,13 @@ pub mod eel;
 pub mod frame;
 pub mod hlsl;
 pub mod image;
+/// The desktop shell's preset library (M7c item 3). Native only: a browser has
+/// handles rather than paths, so the two shells cannot share a scanner.
+#[cfg(not(target_arch = "wasm32"))]
+pub mod library;
 pub mod noise;
 pub mod parse;
+pub mod report;
 pub mod shaders;
 pub mod sprite;
 pub mod state;
@@ -60,7 +65,10 @@ pub mod warp;
 pub mod wave;
 
 pub use frame::{CompositeSettings, MilkFrame, WarpVertex, DEFAULT_MESH};
+#[cfg(not(target_arch = "wasm32"))]
+pub use library::{PresetLibrary, PresetRow, PresetScanSummary};
 pub use parse::{CustomShape, CustomWave, ParseError, Preset, Sprite, Unsupported};
+pub use report::preset_report;
 pub use state::{Fault, FrameState, Inputs, Motion, Runtime};
 pub use warp::{Aspect, Grid, GridPoint, Warp};
 pub use wave::{Wave, WaveInput};

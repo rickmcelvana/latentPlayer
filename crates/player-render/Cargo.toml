@@ -23,6 +23,10 @@ naga = { version = "30", features = ["wgsl-in"] }
 # (decision 59). PNG + JPEG only -- that is the whole of what the corpus ships
 # (`png`, `jpg`, `jfif`), and no other format has to compile to wasm.
 image = { version = "0.25", default-features = false, features = ["png", "jpeg"] }
+# The preset library's index (M7c item 3). Cross-target: the native shell writes
+# it to disk, and the wasm build serialises rows to JSON for the web store.
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
 
 [dev-dependencies]
 # Only the offscreen smoke check needs to block on the async device request --

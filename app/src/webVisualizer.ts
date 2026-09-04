@@ -224,6 +224,21 @@ export function currentPresetReportWeb(): string[] {
   return selectedPresetReport;
 }
 
+/// Hands the visual the texture-pack and sprite images its preset named, as
+/// `(name, bytes)` pairs (decision 59).
+///
+/// The web shell has no folder to resolve a texture name against on the
+/// single-file path, but the preset library (M7c item 3) does: once a folder
+/// handle exists, `presetLibrary.ts` reads `textures/clouds.jpg` beside the
+/// preset and calls this with the bytes. Until then nothing calls it in the
+/// running app, and the web smoke checks it directly with bytes it made.
+export function setTexturesWeb(textures: { name: string; bytes: Uint8Array }[]): void {
+  if (!renderer) return;
+  const names = textures.map((t) => t.name);
+  const bytes = textures.map((t) => t.bytes);
+  renderer.setTextures(names, bytes);
+}
+
 /// Shows or hides the visualizer: the canvas goes out of the page and the draw
 /// loop stops drawing. The web counterpart of hiding the native window, and
 /// hiding rather than tearing down for the same reason -- the renderer holds a

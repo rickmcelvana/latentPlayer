@@ -3338,6 +3338,8 @@ dependencies = [
  "naga",
  "player-core",
  "pollster 0.4.0",
+ "serde",
+ "serde_json",
  "thiserror 1.0.69",
  "wgpu",
 ]

@@ -67,16 +67,21 @@ export interface StoredPlaylist {
 const DB_NAME = "latentplayer-library";
 /// Bumped only when the schema changes; `onupgradeneeded` creates whatever is
 /// missing, so an existing database gains new stores rather than being dropped.
-/// Bumped to 2 in Phase 2 M1 for the `servers` store. The upgrade path is the
-/// existing one: every store is created only if absent, so an existing library
-/// gains the new store and keeps its rows.
-const DB_VERSION = 2;
+/// Bumped to 2 in Phase 2 M1 for the `servers` store, and to 3 in Phase 3 M7c
+/// for the preset library's two stores. The upgrade path is the existing one:
+/// every store is created only if absent, so an existing library gains the new
+/// store and keeps its rows.
+const DB_VERSION = 3;
 
 const TRACKS = "tracks";
 const COVERS = "covers";
 const FOLDERS = "folders";
 const PLAYLISTS = "playlists";
 const SERVERS = "servers";
+/// The preset library's stores (Phase 3 M7c item 3), in the same database as
+/// the music library -- one database means one upgrade path.
+const PRESETS = "presets";
+const PRESET_FOLDERS = "presetFolders";
 
 let db: Promise<IDBDatabase> | null = null;
 
@@ -104,6 +109,13 @@ function open(): Promise<IDBDatabase> {
       if (!database.objectStoreNames.contains(SERVERS)) {
         database.createObjectStore(SERVERS, { keyPath: "id" });
       }
+      if (!database.objectStoreNames.contains(PRESETS)) {
+        const presets = database.createObjectStore(PRESETS, { keyPath: "id" });
+        presets.createIndex("folderId", "folderId", { unique: false });
+      }
+      if (!database.objectStoreNames.contains(PRESET_FOLDERS)) {
+        database.createObjectStore(PRESET_FOLDERS, { keyPath: "id" });
+      }
     };
     request.onsuccess = () => resolve(request.result);
     request.onerror = () => reject(request.error ?? new Error("indexedDB.open failed"));
@@ -112,15 +124,18 @@ function open(): Promise<IDBDatabase> {
 }
 
 /// Wraps one request in a promise. Every operation below is one of these or a
-/// transaction's worth of them.
-function promisify<T>(request: IDBRequest<T>): Promise<T> {
+/// transaction's worth of them. Exported so the preset store (presetStore.ts)
+/// can run its own operations over the same database.
+export function promisify<T>(request: IDBRequest<T>): Promise<T> {
   return new Promise((resolve, reject) => {
     request.onsuccess = () => resolve(request.result);
     request.onerror = () => reject(request.error ?? new Error("IndexedDB request failed"));
   });
 }
 
-async function withStore<T>(
+/// Runs `run` inside one transaction over `names`, resolving only once the
+/// transaction commits. Exported for the same reason `promisify` is.
+export async function withStore<T>(
   names: string | string[],
   mode: IDBTransactionMode,
   run: (tx: IDBTransaction) => Promise<T> | T,

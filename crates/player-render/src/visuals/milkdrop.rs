@@ -24,7 +24,6 @@ use std::sync::Arc;
 
 use crate::milk::custom::{ShapeGeom, ShapeRig, WaveRig};
 use crate::milk::frame::{CompositeSettings, MilkFrame, DEFAULT_MESH};
-use crate::milk::hlsl::{self, Pass};
 use crate::milk::shaders::{PresetInputs, PresetPasses};
 use crate::milk::sprite::{SpriteDraw, SpriteRig};
 use crate::milk::state::{FrameState, Inputs, Runtime};
@@ -259,6 +258,10 @@ impl MilkDropVisual {
     /// shader and leave the other fixed-function**, and a composite that will
     /// not translate should not cost a preset its warp. Whatever does not take
     /// falls back to M7a's path, which is a picture rather than nothing.
+    ///
+    /// The translation itself is [`crate::milk::report::translate_shaders`],
+    /// shared with the preset library so a row and a selection cannot disagree
+    /// about what a preset needs.
     fn translate(&mut self, device: &wgpu::Device) {
         self.report.clear();
         let textures = self.preset.texture_names();
@@ -275,22 +278,7 @@ impl MilkDropVisual {
                 "texture:{overflow}: not loaded; more textures than one preset can name"
             ));
         }
-        let build = |source: &str, pass: Pass, name: &str, report: &mut Vec<String>| {
-            if source.trim().is_empty() {
-                return None;
-            }
-            match hlsl::parse(source)
-                .and_then(|shader| hlsl::emit_with_textures(&shader, pass, &textures))
-            {
-                Ok(out) => Some(out.source),
-                Err(e) => {
-                    report.push(format!("{name} shader, line {}: {}", e.line, e.detail));
-                    None
-                }
-            }
-        };
-        let warp = build(&self.preset.warp, Pass::Warp, "warp", &mut self.report);
-        let comp = build(&self.preset.comp, Pass::Comp, "composite", &mut self.report);
+        let (warp, comp) = crate::milk::report::translate_shaders(&self.preset, &mut self.report);
         let (warp_ok, comp_ok) = self
             .passes
             .set_shaders(device, warp.as_deref(), comp.as_deref());

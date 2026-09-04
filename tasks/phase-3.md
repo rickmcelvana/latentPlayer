@@ -3602,3 +3602,105 @@ cannot settle). The web smoke's texture-pack and sprite checks are mirrored in
 encoder) and pass in a real browser: **135/135** at `/visualizer.html` (was
 133/133), agreeing figure for figure with the native half. Then M7c item 3, the
 preset library (decision 50), is next.
+
+## M7c third item -- the preset library: planned 2026-09-03
+
+The last item of the re-planned M7c, and the one that makes "point at a folder"
+a first-class flow rather than a single-file picker. Decision 50 already fixed
+the shape -- a library built like the music library -- and decision 57 made it
+the *only* way a preset ever arrives, since none ships with the app. This item
+also closes the one stated web gap from item 2: a browser's single-file input
+cannot resolve a preset's texture-pack folder, and a scanned folder's
+`FileSystemDirectoryHandle` is exactly what lets `setTextures` read
+`textures/clouds.jpg` beside the preset.
+
+### What a preset row is
+
+A preset row is smaller than a music row and carries different facts. The
+fields, settled by what the library UI has to show and what selection needs:
+
+- **`id`** -- hash of the path (native) or `folderId/relativePath` (web), the
+  same id scheme the music library uses, so a rescan updates rows rather than
+  duplicating them.
+- **`name`** -- the file's own name, always present, what the UI shows.
+- **`path`** (native only) -- where the file is, so selection reads it.
+- **`relativePath`** (web only) -- where the file is inside the scanned folder,
+  so selection reopens it through the folder's handle.
+- **`report`** -- the parse/compile notes, one line each: what the preset asks
+  for that this build does not do, and what went wrong compiling it. Settled at
+  scan time by the same `Preset::parse` + `Runtime::new` + shader translation
+  the selection path runs, so a row says the truth about a preset before it is
+  ever clicked. A preset that fails to parse is *listed as failing* rather than
+  hidden (decision 50).
+
+The `.milk` text is **not** held in the index -- it is read on selection, the
+way the music library reads tags on scan but audio on play. A row is a couple
+of hundred bytes; a thousand presets is a few hundred kilobytes of index.
+
+### Native half
+
+`player-render::milk::library` -- a `PresetLibrary` mirroring
+`player-core::library::Library` field for field, but for `.milk` files. It
+lives in `player-render` rather than `player-core` because the parser it
+depends on (`milk::Preset`) is `player-render`'s, and `player-core` must not
+grow a dependency on the renderer. It walks a folder for `.milk` files, parses
+each, and stores a versioned JSON index (`presets.json`) in a directory it is
+handed. `scan` is idempotent (keyed by path), `forget_folder` drops a folder's
+rows, and a corrupt index opens empty rather than refusing to start -- the
+same three properties the music library's tests pin.
+
+The report is computed at scan time by the same code the selection path runs:
+`Preset::parse`, then `Runtime::new(&preset).faults()`, then the shader
+translation (`hlsl::parse` + `emit_with_textures` + naga validation) -- the
+three things `Renderer::set_preset` and `milk_smoke` already do, factored so a
+row and a selection cannot disagree about what a preset needs.
+
+`src-tauri` gains a `SharedPresetLibrary` (an `Arc<Mutex<PresetLibrary>>`
+managed in `setup`, opened in the app data directory beside the music library)
+and four commands: `scan_preset_folder` (blocking thread, like `scan_folder`),
+`preset_rows`, `preset_folders`, `forget_preset_folder`. `set_milk_preset`
+stays as it is -- the library UI calls it with a path, and it already reads
+the file and its textures/sprites from the preset's own folder.
+
+### Web half
+
+The web build's preset library lives in **IndexedDB**, mirroring
+`libraryStore.ts`/`libraryWorker.ts`: a `presets` store (rows keyed by id), a
+`presetFolders` store (the scanned folder's `FileSystemDirectoryHandle`, which
+is what lets a later session reopen the real files), and a `presetWorker.ts`
+that parses each file's text through a new wasm binding
+(`parsePreset(text) -> {ok, report}`) off the main thread. The adapter
+`presetLibrary.ts` is the shell-choosing module: `addPresetFolder` (native
+dialog / `showDirectoryPicker`), `presetRows`, `presetFolders`,
+`forgetPresetFolder`, and `openPreset(row)` -- which natively calls
+`setMilkPreset(path)` and on the web reads the file through the folder handle,
+hands the text to `setPresetWeb`, and reads the texture-pack images beside it
+to feed `setTextures` (the item-2 gap, closed).
+
+### UI
+
+`VisualizerControls.tsx`'s preset section grows from one "Load a .milk preset"
+button into a folder flow plus a list: "Add preset folder…" (which scans and
+lists), the rows (name + report count, click to select, a failing row shown
+with its reason rather than hidden), and a "Clear" that returns to MilkDrop's
+defaults. The single-file picker stays as a secondary path -- a person with one
+`.milk` in hand should not have to point at a folder first. The selected
+preset persists in localStorage on both shells (a path natively, a
+`folderId/relativePath` on the web), so a session reopens on the preset it
+closed on -- the persistence `visualizer.ts` deliberately deferred to this
+milestone.
+
+### Verified
+
+- **Native**: `cargo run -p player-render --example preset_library_smoke` --
+  scan a synthesised folder of presets (one good, one with an unsupported
+  feature, one that fails to parse), assert the rows, the report, the
+  idempotent rescan, the reopen, and the forget. Plus unit tests on the
+  library mirroring `library.rs`'s.
+- **Web**: `/preset.html` running the same claims through the real worker and
+  store, the way `/library.html` does for music.
+- **Both**: the running app -- point at a folder, see the rows, click one, it
+  draws; a failing preset is listed and says why; the selection survives a
+  reload. The live confirmation is a person pointing at their own collection,
+  which is the only test of "the folder is also the source of textures and
+  sprites" (one folder = the whole of what a person points at).

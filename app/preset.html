@@ -1,0 +1,30 @@
+<!doctype html>
+<!--
+  Dev-only harness for the web preset library (Phase 3 M7c item 3): parsing
+  through wasm, the scan worker, the IndexedDB store and selection. Served at
+  /preset.html by `npm run dev`; deliberately not in vite's build inputs, so it
+  never ships. The native equivalent is
+  `cargo run -p player-render --example preset_library_smoke`, running the same
+  checks against the same claims.
+
+  A button rather than an autorun, to match the other harnesses and because
+  the run clears the real preset store -- which should not happen merely
+  because someone opened the page.
+-->
+<html lang="en">
+  <head>
+    <meta charset="UTF-8" />
+    <title>preset library smoke</title>
+    <style>
+      body { background: #14161a; color: #dfe3ea; font: 13px/1.6 ui-monospace, monospace; padding: 24px; }
+      button { font: inherit; padding: 6px 14px; }
+      pre { white-space: pre-wrap; }
+    </style>
+  </head>
+  <body>
+    <p>Scans four synthesised presets. Clears this origin's preset store first.</p>
+    <button id="run">Run</button>
+    <pre id="out"></pre>
+    <script type="module" src="/src/presetLibrarySmoke.ts"></script>
+  </body>
+</html>

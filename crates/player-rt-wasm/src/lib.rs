@@ -732,6 +732,60 @@ pub fn default_visual() -> String {
     VisualKind::DEFAULT.id().to_string()
 }
 
+/// Parses a preset's `.milk` text and answers with its report and the images
+/// it references (Phase 3 M7c item 3).
+///
+/// The web preset library's worker calls this per file, so a row carries the
+/// same report the desktop shell's `PresetLibrary` computes -- out of the same
+/// `player_render::milk::report::preset_report`, so the two shells cannot
+/// disagree about what a preset needs. Returns JSON:
+///
+/// ```json
+/// {"ok":true,"report":["..."],"textures":["clouds"],"sprites":["sprites/x1.png"]}
+/// {"ok":false,"report":["not a MilkDrop preset: no [preset00] section"],"textures":[],"sprites":[]}
+/// ```
+///
+/// `textures` are the texture-pack base names (the `clouds` in
+/// `sampler_fw_clouds`) and `sprites` the sprite image paths (the `Name` in a
+/// `[SPRITE_BEGIN]` block) -- the two lists the web shell needs to read the
+/// images beside the preset and hand them to `setTextures`, which is the item-2
+/// gap this milestone closes. A file that is not a preset is `ok: false` with
+/// the reason in the report, rather than an error -- the library lists it as
+/// failing rather than hiding it (decision 50).
+#[wasm_bindgen(js_name = parsePreset)]
+pub fn parse_preset(text: &str) -> String {
+    match player_render::milk::Preset::parse(text) {
+        Ok(preset) => {
+            let sprites: Vec<String> = preset
+                .sprites
+                .iter()
+                .map(|s| {
+                    s.base
+                        .get("Name")
+                        .map(String::as_str)
+                        .unwrap_or("")
+                        .replace('\\', "/")
+                })
+                .filter(|name| !name.is_empty())
+                .collect();
+            serde_json::json!({
+                "ok": true,
+                "report": player_render::milk::preset_report(&preset),
+                "textures": preset.texture_names(),
+                "sprites": sprites,
+            })
+            .to_string()
+        }
+        Err(e) => serde_json::json!({
+            "ok": false,
+            "report": [format!("not a MilkDrop preset: {e}")],
+            "textures": [],
+            "sprites": [],
+        })
+        .to_string(),
+    }
+}
+
 /// How many interleaved samples one frame's feed should carry.
 ///
 /// A fixed *duration* of history rather than a fixed sample count, so a visual
