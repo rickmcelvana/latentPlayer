@@ -1872,18 +1872,37 @@ async function checkMilkdrop(): Promise<void> {
     `tone ${loudFigure.maxX - loudFigure.minX}px wide, silence ${quietFigure.maxX - quietFigure.minX}px wide`,
   );
 
-  // A custom shape draws at its centre and radius: radius 0.25 around the centre
-  // spans a quarter of the frame on a side.
+  // A custom shape draws at its centre and radius, by MilkDrop's arithmetic:
+  // `rad` is in clip units and the rim starts a quarter turn round, so four
+  // sides are an axis-aligned square of half-side rad*cos(45deg) -- 28px of
+  // this 320px frame, centred on 160 (visual_smoke's figure exactly).
   run(customSquare(0.25), 4);
   const square = measure(surface);
   check(
     "a custom shape draws at its centre and radius",
-    square.lit > 5000 &&
-      Math.abs(square.minX - 80) < 12 &&
-      Math.abs(square.maxX - 240) < 12 &&
-      Math.abs(square.minY - 80) < 12 &&
-      Math.abs(square.maxY - 240) < 12,
+    square.lit > 2800 &&
+      Math.abs(square.minX - 132) < 4 &&
+      Math.abs(square.maxX - 188) < 4 &&
+      Math.abs(square.minY - 132) < 4 &&
+      Math.abs(square.maxY - 188) < 4,
     `${square.lit}px, x ${square.minX}..${square.maxX}, y ${square.minY}..${square.maxY}`,
+  );
+
+  // A *textured* shape copies the previous frame through its colour rather
+  // than painting the colour itself: white-modulated over an empty frame it is
+  // still empty (visual_smoke's check, mirrored).
+  run(
+    customSquare(0.9).replace(
+      "shapecode_0_enabled=1\n",
+      "shapecode_0_enabled=1\nshapecode_0_textured=1\n",
+    ),
+    4,
+  );
+  const texturedShape = meanBrightness(surface);
+  check(
+    "a textured shape copies the frame instead of painting its colour",
+    texturedShape < 12,
+    `mean brightness ${texturedShape.toFixed(1)} (untextured, it would be a white square)`,
   );
 
   // An `enabled=0` wave or shape is not drawn, and with the built-in waveform

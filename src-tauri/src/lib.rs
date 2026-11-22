@@ -821,36 +821,11 @@ fn set_milk_preset(
     let preset = player_render::milk::Preset::parse(&text)
         .map_err(|e| format!("{} is not a MilkDrop preset: {e}", path.display()))?;
 
-    // The texture pack, read from the preset's own folder (decision 59): one
-    // `(name, bytes)` per distinct sampler the shaders name. A name whose file
-    // is not found is reported rather than silently dropped -- the visual then
-    // draws that layer grey.
+    // The texture pack and sprites, read from the preset's own folder
+    // (decision 59). A name whose file is not found is reported rather than
+    // silently dropped -- the visual then draws that layer grey.
     let folder = path.parent().unwrap_or(std::path::Path::new("."));
-    let mut report: Vec<String> = Vec::new();
-    let mut textures: Vec<(String, Vec<u8>)> = Vec::new();
-    for name in preset.texture_names() {
-        match find_image(folder, &name).and_then(|p| std::fs::read(&p).ok()) {
-            Some(bytes) => textures.push((name, bytes)),
-            None => report.push(format!("texture:{name}: image not found beside the preset")),
-        }
-    }
-    // Sprites (decision 59), one image each, keyed by the path the preset wrote
-    // in `SpriteName` -- the same string the visual matches by.
-    for sprite in &preset.sprites {
-        let name = sprite
-            .base
-            .get("Name")
-            .map(String::as_str)
-            .unwrap_or("")
-            .replace('\\', "/");
-        if name.is_empty() {
-            continue;
-        }
-        match find_sprite_image(folder, &name).and_then(|p| std::fs::read(&p).ok()) {
-            Some(bytes) => textures.push((name, bytes)),
-            None => report.push(format!("sprite:{name}: image not found beside the preset")),
-        }
-    }
+    let (textures, mut report) = player_render::milk::files::load_images(&preset, folder);
     report.extend(
         player_render::milk::Runtime::new(&preset)
             .faults()
@@ -863,67 +838,6 @@ fn set_milk_preset(
         .unwrap_or_else(|| path.display().to_string());
     visualizer.request_preset(Some(name), Some(text), report.clone(), textures);
     Ok(report)
-}
-
-/// Finds the image file for a texture-pack name beside a preset, by stem.
-///
-/// MilkDrop's convention is a `textures/` (or `sprites/`) folder beside the
-/// presets, and MilkDrop 3 treats the two as interchangeable; a collection that
-/// keeps its presets in a `presets/` subfolder has the images as a sibling
-/// instead, and one that nests presets a level deeper has them an ancestor up.
-/// `name` is the stem -- `clouds` finds `textures/clouds.jpg`.
-fn find_image(folder: &std::path::Path, name: &str) -> Option<std::path::PathBuf> {
-    const EXTS: &[&str] = &["png", "jpg", "jpeg", "jfif"];
-    let mut dirs = Vec::new();
-    let mut ancestor = Some(folder);
-    for _ in 0..3 {
-        if let Some(dir) = ancestor {
-            dirs.push(dir.join("textures"));
-            dirs.push(dir.join("sprites"));
-            ancestor = dir.parent();
-        }
-    }
-    for dir in dirs {
-        let Ok(entries) = std::fs::read_dir(&dir) else {
-            continue;
-        };
-        for entry in entries.flatten() {
-            let path = entry.path();
-            if !path
-                .file_stem()
-                .is_some_and(|s| s.to_string_lossy().eq_ignore_ascii_case(name))
-            {
-                continue;
-            }
-            let known_ext = path
-                .extension()
-                .and_then(|e| e.to_str())
-                .is_some_and(|e| EXTS.contains(&e.to_ascii_lowercase().as_str()));
-            if known_ext {
-                return Some(path);
-            }
-        }
-    }
-    None
-}
-
-/// Finds a sprite's image file. `name` is the path the preset wrote in
-/// `SpriteName` (`sprites/x1.png`), resolved against the preset's folder and its
-/// ancestors -- the same walk as [`find_image`], but the name already carries
-/// its folder, so it is tried as a path rather than a stem.
-fn find_sprite_image(folder: &std::path::Path, name: &str) -> Option<std::path::PathBuf> {
-    let rel = std::path::Path::new(name);
-    let mut ancestor = Some(folder);
-    for _ in 0..3 {
-        if let Some(dir) = ancestor {
-            let candidate = dir.join(rel);
-            if candidate.is_file() {
-                return Some(candidate);
-            }
-            ancestor = dir.parent();
-        }
-    }
-    None
 }
 
 #[tauri::command]
@@ -1693,30 +1607,4 @@ pub fn run() {
         })
         .run(tauri::generate_context!())
         .expect("error while running tauri application");
-}
-
-#[cfg(test)]
-mod tests {
-    use super::find_image;
-
-    /// Builds `base/presets/p.milk`, `base/textures/clouds.jpg` and answers
-    /// with the `presets` folder, the shape a MilkDrop collection takes.
-    fn make_collection() -> std::path::PathBuf {
-        let base = std::env::temp_dir().join(format!("milk-find-image-{}", std::process::id()));
-        let presets = base.join("presets");
-        let textures = base.join("textures");
-        std::fs::create_dir_all(&presets).unwrap();
-        std::fs::create_dir_all(&textures).unwrap();
-        std::fs::write(presets.join("p.milk"), b"unused").unwrap();
-        std::fs::write(textures.join("clouds.jpg"), b"unused").unwrap();
-        presets
-    }
-
-    #[test]
-    fn finds_a_texture_pack_image_in_the_sibling_folder() {
-        let presets = make_collection();
-        let found = find_image(&presets, "clouds").expect("clouds.jpg is found");
-        assert!(found.ends_with("clouds.jpg"), "{found:?}");
-        assert!(find_image(&presets, "missing").is_none());
-    }
 }

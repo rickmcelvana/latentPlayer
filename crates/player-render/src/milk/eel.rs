@@ -344,6 +344,27 @@ impl Context {
         }
     }
 
+    /// Gives this context its own `rand` stream, still reproducible.
+    ///
+    /// MilkDrop has one generator for the whole process, so two custom shapes
+    /// whose code is the same `x = rand(...)` land in *different* places. A
+    /// generator per context seeded with one constant made them land in the
+    /// same place every frame -- and a preset that paints a square with one
+    /// shape and lays a textured copy beside it with another instead copied
+    /// the old frame exactly over its own square, erasing it. Each variable
+    /// pool (the preset's own, and each wave, shape and sprite) takes a
+    /// distinct `stream`.
+    pub fn reseed(&mut self, stream: u64) {
+        // splitmix64 of the stream, so neighbouring streams are unrelated;
+        // xorshift needs a non-zero state.
+        let mut z =
+            0x2545_F491_4F6C_DD1D_u64.wrapping_add(stream.wrapping_mul(0x9E37_79B9_7F4A_7C15));
+        z = (z ^ (z >> 30)).wrapping_mul(0xBF58_476D_1CE4_E5B9);
+        z = (z ^ (z >> 27)).wrapping_mul(0x94D0_49BB_1331_11EB);
+        z ^= z >> 31;
+        self.rng = if z == 0 { 0x2545_F491_4F6C_DD1D } else { z };
+    }
+
     /// Grows the variable pool to match a table that has gained names since
     /// this context was made -- compiling a preset's later blocks can intern
     /// names the earlier ones never mentioned.
@@ -1233,6 +1254,18 @@ mod tests {
     fn comments_do_not_eat_the_next_statement() {
         assert_eq!(var("a = 1; //mirrored\nb = a + 1;", "b"), 2.0);
         assert_eq!(var("a = 1; /* note */ b = a + 1;", "b"), 2.0);
+    }
+
+    #[test]
+    fn two_streams_draw_different_numbers_and_each_repeats() {
+        let symbols = Symbols::new();
+        let draw = |stream: u64| {
+            let mut ctx = Context::new(&symbols);
+            ctx.reseed(stream);
+            (0..4).map(|_| ctx.next_rand()).collect::<Vec<_>>()
+        };
+        assert_ne!(draw(2000), draw(2001));
+        assert_eq!(draw(2000), draw(2000));
     }
 
     #[test]

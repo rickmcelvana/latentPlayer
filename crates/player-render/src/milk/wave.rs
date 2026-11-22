@@ -36,7 +36,12 @@ pub struct Wave {
     /// Where the line is in two pieces rather than one -- mode 7 draws two
     /// channels and joining them would put a stroke across the frame.
     pub break_at: Option<usize>,
+    /// The line's colour, or -- for a custom wave, whose per-point code
+    /// colours each point -- a representative one, with `colours` holding
+    /// the rest.
     pub colour: [f32; 4],
+    /// One colour per point, when the points are coloured individually.
+    pub colours: Option<Vec<[f32; 4]>>,
     pub additive: bool,
     pub dots: bool,
     pub thick: bool,
@@ -365,6 +370,7 @@ pub fn build(state: &WaveState, fixed: &Fixed, input: &WaveInput) -> Option<Wave
     Some(Wave {
         points,
         break_at,
+        colours: None,
         colour: [r, g, b, alpha],
         additive: state.additive,
         dots: state.dots,
@@ -379,6 +385,21 @@ pub fn build(state: &WaveState, fixed: &Fixed, input: &WaveInput) -> Option<Wave
 /// sharpening rather than an average -- the inserted point sits slightly
 /// *outside* the straight line between its neighbours, so a smoothed waveform
 /// keeps its peaks instead of rounding them off.
+/// [`smooth`] for a line whose points carry their own colours: an inserted
+/// point takes the colour of the point before it, as MilkDrop's `SmoothWave`
+/// does.
+pub(crate) fn smooth_coloured(
+    points: &[[f32; 2]],
+    colours: &[[f32; 4]],
+) -> (Vec<[f32; 2]>, Vec<[f32; 4]>) {
+    let smoothed = smooth(points);
+    let mut out = Vec::with_capacity(smoothed.len());
+    for (i, _) in smoothed.iter().enumerate() {
+        out.push(colours[(i / 2).min(colours.len() - 1)]);
+    }
+    (smoothed, out)
+}
+
 fn smooth(points: &[[f32; 2]]) -> Vec<[f32; 2]> {
     if points.len() < 2 {
         return points.to_vec();

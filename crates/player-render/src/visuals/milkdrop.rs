@@ -22,7 +22,7 @@
 
 use std::sync::Arc;
 
-use crate::milk::custom::{ShapeGeom, ShapeRig, WaveRig};
+use crate::milk::custom::{ShapeGeom, ShapeRig, WaveRig, WaveSource};
 use crate::milk::frame::{CompositeSettings, MilkFrame, DEFAULT_MESH};
 use crate::milk::shaders::{PresetInputs, PresetPasses};
 use crate::milk::sprite::{SpriteDraw, SpriteRig};
@@ -152,6 +152,10 @@ pub struct MilkDropVisual {
     /// has somewhere to run and the allocation happens once.
     left: Vec<f32>,
     right: Vec<f32>,
+    /// The same samples before the built-in wave's scale and smoothing,
+    /// display gain applied: what a custom wave reads.
+    raw_left: Vec<f32>,
+    raw_right: Vec<f32>,
     /// Cleared on the next draw, so the loop never warps the previous preset's
     /// picture under the new one's equations.
     needs_clear: bool,
@@ -200,6 +204,8 @@ impl MilkDropVisual {
             frames: 0,
             fps: 60.0,
             left: vec![0.0; WAVE_SAMPLES],
+            raw_left: vec![0.0; WAVE_SAMPLES],
+            raw_right: vec![0.0; WAVE_SAMPLES],
             right: vec![0.0; WAVE_SAMPLES],
             needs_clear: true,
             waves,
@@ -329,6 +335,12 @@ impl MilkDropVisual {
         // Display gain applies here and nowhere else in this visual: it is the
         // one place an amplitude becomes a size on screen (the warp and the
         // filters are ratios, and scaling those would change the preset).
+        self.raw_left.clear();
+        self.raw_right.clear();
+        self.raw_left
+            .extend(self.left.iter().map(|s| s * frame.gain));
+        self.raw_right
+            .extend(self.right.iter().map(|s| s * frame.gain));
         let scale = scale * frame.gain;
         wave::prepare(&mut self.left, scale, smoothing);
         wave::prepare(&mut self.right, scale, smoothing);
@@ -493,6 +505,11 @@ impl Visual for MilkDropVisual {
         self.levels.update(frame, dt);
 
         let state = self.runtime.run_frame(&self.inputs());
+        // `q1..q32` as `per_frame` left them, taken before `build_mesh` runs
+        // `per_pixel` in the same variable pool. MilkDrop gives `per_pixel` a
+        // pool of its own, so a preset that writes `q` per vertex changes
+        // nothing the waves, shapes or shaders read.
+        let q_frame = self.runtime.q();
         let fixed = self.runtime.fixed;
         self.load_waveform(frame, fixed.wave_scale, fixed.wave_smoothing);
         self.build_mesh(gpu.queue, &state);
@@ -500,14 +517,25 @@ impl Visual for MilkDropVisual {
         let aspect = self.frame.aspect();
         let (feedback_width, _) = self.frame.size();
         let engine_inputs = self.inputs();
-        let q_seed: [f64; 32] = {
-            let q = self.runtime.q();
-            std::array::from_fn(|i| q[i] as f64)
-        };
+        let q_seed: [f64; 32] = std::array::from_fn(|i| q_frame[i] as f64);
         let left = self.left.clone();
         let right = self.right.clone();
 
+        // Custom waves before the built-in one: MilkDrop's draw order
+        // (`DrawCustomWaves` then `DrawWave`), which `draw_overlays` keeps.
         let mut waves: Vec<Wave> = Vec::new();
+        let source = WaveSource {
+            left: &self.raw_left,
+            right: &self.raw_right,
+            spectrum: frame.levels,
+            wave_scale: fixed.wave_scale,
+            aspect,
+        };
+        for rig in &mut self.waves {
+            if let Some(custom) = rig.build(&engine_inputs, &q_seed, &source) {
+                waves.push(custom);
+            }
+        }
         if let Some(built_in) = wave::build(
             &state.wave,
             &fixed,
@@ -523,11 +551,6 @@ impl Visual for MilkDropVisual {
             },
         ) {
             waves.push(built_in);
-        }
-        for rig in &mut self.waves {
-            if let Some(custom) = rig.build(&engine_inputs, &q_seed, &left, &right, frame.levels) {
-                waves.push(custom);
-            }
         }
 
         let mut shapes: Vec<ShapeGeom> = Vec::new();
@@ -577,7 +600,7 @@ impl Visual for MilkDropVisual {
                 + self.levels.attenuated[1]
                 + self.levels.attenuated[2])
                 / 3.0,
-            q: self.runtime.q(),
+            q: q_frame,
             blur_min: state.blur_min,
             blur_max: state.blur_max,
             aspect,

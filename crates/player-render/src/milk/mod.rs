@@ -48,6 +48,10 @@
 
 pub mod custom;
 pub mod eel;
+/// Finding a preset's images on disk (decision 59). Native only, like
+/// [`library`].
+#[cfg(not(target_arch = "wasm32"))]
+pub mod files;
 pub mod frame;
 pub mod hlsl;
 pub mod image;

@@ -46,8 +46,11 @@ use crate::milk::wave::Wave;
 /// its own feedback texture is 8-bit, so every warp write saturates to [0,1],
 /// and a preset's sharpen term (`ret += (ret - GetBlur1)*0.4`) is a high-pass
 /// with gain above one that MilkDrop's target silently holds. A float target
-/// does not, so the clamp is written out in the warp entry wrapper
-/// (`shaders.rs`'s `WARP_ENTRY`) rather than left to the format.
+/// does not, so the clamp is written out in both warp passes -- the
+/// fixed-function `warp_fs` below and the preset-shader `milk_warp_fs` in
+/// `shaders.rs` -- rather than left to the format. Once per frame is enough:
+/// every frame passes through exactly one of them, so overflow from the waves,
+/// shapes and sprites blended in afterwards never reaches the next frame.
 pub const FEEDBACK_FORMAT: wgpu::TextureFormat = wgpu::TextureFormat::Rgba16Float;
 
 /// MilkDrop's own default warp grid.
@@ -77,11 +80,28 @@ pub const WARP_ATTRIBUTES: [wgpu::VertexAttribute; 4] =
     wgpu::vertex_attr_array![0 => Float32x2, 1 => Float32x2, 2 => Float32x2, 3 => Float32x2];
 
 /// A coloured vertex, for everything drawn on top of the warp.
+///
+/// `textured` is 0 or 1: at 1 the colour *modulates* the previous frame
+/// sampled at `uv`, which is how a MilkDrop textured shape draws a copy of the
+/// screen inside itself. Everything else leaves it at 0 and ignores `uv`.
 #[repr(C)]
 #[derive(Clone, Copy, Debug, bytemuck::Pod, bytemuck::Zeroable)]
 struct ShapeVertex {
     position: [f32; 2],
     colour: [f32; 4],
+    uv: [f32; 2],
+    textured: f32,
+}
+
+impl ShapeVertex {
+    fn plain(position: [f32; 2], colour: [f32; 4]) -> Self {
+        Self {
+            position,
+            colour,
+            uv: [0.0; 2],
+            textured: 0.0,
+        }
+    }
 }
 
 /// A textured vertex, for a sprite's quad (Phase 3 M7c).
@@ -185,6 +205,8 @@ pub struct MilkFrame {
     sprite_capacity: usize,
     warp_layout: wgpu::BindGroupLayout,
     comp_layout: wgpu::BindGroupLayout,
+    /// The previous frame, bound for textured custom shapes.
+    overlay_layout: wgpu::BindGroupLayout,
     vertices: wgpu::Buffer,
     indices: wgpu::Buffer,
     index_count: u32,
@@ -378,18 +400,25 @@ impl MilkFrame {
             cache: None,
         });
 
-        let overlay_layout = device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
-            label: Some("milk-overlay-pipeline-layout"),
-            bind_group_layouts: &[],
-            immediate_size: 0,
+        // The overlays bind the previous frame, for textured shapes: the warp's
+        // own texture and sampler, without its uniform.
+        let overlay_layout = device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
+            label: Some("milk-overlay-layout"),
+            entries: &sampled_layout("overlay")[..2],
         });
+        let overlay_pipeline_layout =
+            device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
+                label: Some("milk-overlay-pipeline-layout"),
+                bind_group_layouts: &[Some(&overlay_layout)],
+                immediate_size: 0,
+            });
         let overlay_pipeline = |label: &str,
                                 topology: wgpu::PrimitiveTopology,
                                 additive: bool|
          -> wgpu::RenderPipeline {
             device.create_render_pipeline(&wgpu::RenderPipelineDescriptor {
                 label: Some(label),
-                layout: Some(&overlay_layout),
+                layout: Some(&overlay_pipeline_layout),
                 vertex: wgpu::VertexState {
                     module: &shader,
                     entry_point: Some("shape_vs"),
@@ -406,6 +435,16 @@ impl MilkFrame {
                                 format: wgpu::VertexFormat::Float32x4,
                                 offset: 8,
                                 shader_location: 1,
+                            },
+                            wgpu::VertexAttribute {
+                                format: wgpu::VertexFormat::Float32x2,
+                                offset: 24,
+                                shader_location: 2,
+                            },
+                            wgpu::VertexAttribute {
+                                format: wgpu::VertexFormat::Float32,
+                                offset: 32,
+                                shader_location: 3,
                             },
                         ],
                     })],
@@ -695,6 +734,7 @@ impl MilkFrame {
             sprite_capacity,
             warp_layout,
             comp_layout,
+            overlay_layout,
             vertices,
             indices,
             index_count,
@@ -1033,6 +1073,45 @@ impl MilkFrame {
         // 4 shape, 5 shape_add.
         let mut calls: Vec<(u8, u32, u32)> = Vec::new();
 
+        // MilkDrop's order (`RenderFrame`): custom shapes first, "better for
+        // feedback if the waves draw *over* them", then the custom waves, then
+        // the built-in wave, then the centre darkening and the borders. The
+        // caller hands `waves` custom-first for the same reason.
+        //
+        // Custom shapes: a triangle fan per instance (centre colour fading to
+        // the rim), then the border as a closed line loop.
+        for shape in shapes {
+            let fill_pipeline = if shape.additive { 5u8 } else { 4u8 };
+            let start = vertices.len() as u32;
+            let textured = if shape.textured { 1.0 } else { 0.0 };
+            let vertex = |position: [f32; 2], colour: [f32; 4], uv: [f32; 2]| ShapeVertex {
+                position,
+                colour,
+                uv,
+                textured,
+            };
+            let n = shape.rim.len();
+            for k in 0..n {
+                let next = (k + 1) % n;
+                vertices.push(vertex(shape.centre, shape.inner, shape.centre_uv));
+                vertices.push(vertex(shape.rim[k], shape.outer, shape.rim_uv[k]));
+                vertices.push(vertex(shape.rim[next], shape.outer, shape.rim_uv[next]));
+            }
+            calls.push((fill_pipeline, start, vertices.len() as u32));
+
+            if shape.border_colour[3] >= 0.004 {
+                let bstart = vertices.len() as u32;
+                for k in 0..=n {
+                    vertices.push(ShapeVertex::plain(shape.rim[k % n], shape.border_colour));
+                }
+                calls.push((
+                    if shape.additive { 1u8 } else { 0u8 },
+                    bstart,
+                    vertices.len() as u32,
+                ));
+            }
+        }
+
         for wave in waves {
             // Thick lines and fat dots are four copies a pixel apart, which is
             // MilkDrop's way of drawing a two-pixel line on hardware that only
@@ -1059,9 +1138,10 @@ impl MilkFrame {
                         continue;
                     }
                     let start = vertices.len() as u32;
-                    vertices.extend(wave.points[*from..*to].iter().map(|p| ShapeVertex {
-                        position: [p[0] + offset[0], p[1] + offset[1]],
-                        colour: wave.colour,
+                    vertices.extend((*from..*to).map(|i| {
+                        let p = wave.points[i];
+                        let colour = wave.colours.as_ref().map_or(wave.colour, |c| c[i]);
+                        ShapeVertex::plain([p[0] + offset[0], p[1] + offset[1]], colour)
                     }));
                     calls.push((pipeline, start, vertices.len() as u32));
                 }
@@ -1076,45 +1156,6 @@ impl MilkFrame {
         let centre_end = vertices.len();
         if centre_end > centre_start {
             calls.push((4u8, centre_start as u32, centre_end as u32));
-        }
-
-        // Custom shapes: a triangle fan per instance (centre colour fading to
-        // the rim), then the border as a closed line loop.
-        for shape in shapes {
-            let fill_pipeline = if shape.additive { 5u8 } else { 4u8 };
-            let start = vertices.len() as u32;
-            let centre = ShapeVertex {
-                position: shape.centre,
-                colour: shape.inner,
-            };
-            for k in 0..shape.rim.len() {
-                let next = ShapeVertex {
-                    position: shape.rim[(k + 1) % shape.rim.len()],
-                    colour: shape.outer,
-                };
-                vertices.push(centre);
-                vertices.push(ShapeVertex {
-                    position: shape.rim[k],
-                    colour: shape.outer,
-                });
-                vertices.push(next);
-            }
-            calls.push((fill_pipeline, start, vertices.len() as u32));
-
-            if shape.border_colour[3] >= 0.004 {
-                let bstart = vertices.len() as u32;
-                for k in 0..=shape.rim.len() {
-                    vertices.push(ShapeVertex {
-                        position: shape.rim[k % shape.rim.len()],
-                        colour: shape.border_colour,
-                    });
-                }
-                calls.push((
-                    if shape.additive { 1u8 } else { 0u8 },
-                    bstart,
-                    vertices.len() as u32,
-                ));
-            }
         }
 
         if vertices.is_empty() {
@@ -1140,7 +1181,28 @@ impl MilkFrame {
             occlusion_query_set: None,
             multiview_mask: None,
         });
+        // A textured shape samples the frame this one was warped *from* --
+        // MilkDrop's `m_lpVS[0]` -- with the preset's own wrap setting.
+        let previous = device.create_bind_group(&wgpu::BindGroupDescriptor {
+            label: Some("milk-overlay-bind"),
+            layout: &self.overlay_layout,
+            entries: &[
+                wgpu::BindGroupEntry {
+                    binding: 0,
+                    resource: wgpu::BindingResource::TextureView(&self.views[1 - self.current]),
+                },
+                wgpu::BindGroupEntry {
+                    binding: 1,
+                    resource: wgpu::BindingResource::Sampler(if state.wrap {
+                        &self.repeat_sampler
+                    } else {
+                        &self.clamp_sampler
+                    }),
+                },
+            ],
+        });
         pass.set_vertex_buffer(0, self.overlay.slice(..));
+        pass.set_bind_group(0, &previous, &[]);
 
         let pipelines: [&wgpu::RenderPipeline; 6] = [
             &self.line_over,
@@ -1365,14 +1427,8 @@ fn corner_tints(time: f32, shader: f32) -> [[f32; 4]; 4] {
 /// triangles, opaque-ish at the middle and transparent at the rim.
 fn push_darken_center(out: &mut Vec<ShapeVertex>, aspect: Aspect) {
     const HALF: f32 = 0.05;
-    let centre = ShapeVertex {
-        position: [0.0, 0.0],
-        colour: [0.0, 0.0, 0.0, 3.0 / 32.0],
-    };
-    let rim = |x: f32, y: f32| ShapeVertex {
-        position: [x, y],
-        colour: [0.0, 0.0, 0.0, 0.0],
-    };
+    let centre = ShapeVertex::plain([0.0, 0.0], [0.0, 0.0, 0.0, 3.0 / 32.0]);
+    let rim = |x: f32, y: f32| ShapeVertex::plain([x, y], [0.0, 0.0, 0.0, 0.0]);
     let (w, h) = (HALF * aspect.y, HALF);
     let points = [
         rim(-w, 0.0),
@@ -1415,9 +1471,11 @@ fn push_borders(out: &mut Vec<ShapeVertex>, state: &FrameState) {
         ];
         for turn in 0..4 {
             let (sin_t, cos_t) = (std::f32::consts::FRAC_PI_2 * turn as f32).sin_cos();
-            let rotate = |p: [f32; 2]| ShapeVertex {
-                position: [p[0] * cos_t - p[1] * sin_t, p[0] * sin_t + p[1] * cos_t],
-                colour,
+            let rotate = |p: [f32; 2]| {
+                ShapeVertex::plain(
+                    [p[0] * cos_t - p[1] * sin_t, p[0] * sin_t + p[1] * cos_t],
+                    colour,
+                )
             };
             // The fan (0,1,2),(0,2,3), written out as a list.
             for index in [0usize, 1, 2, 0, 2, 3] {
@@ -1520,27 +1578,47 @@ fn warp_fs(in: WarpOut) -> @location(0) vec4<f32> {
     // Where a preset's translated `warp` body will run (M7b), with `uv` bound
     // to `in.source` and `ret` the value written out.
     let previous_colour = textureSample(previous, previous_sampler, in.source).rgb;
-    return vec4<f32>(previous_colour * warp_frame.decay, 1.0);
+    // Clamped to MilkDrop's 8-bit range, like the warp-shader path
+    // (`shaders.rs`'s `milk_warp_fs`): the waves, shapes and sprites blend
+    // into this float buffer past 1.0, and without the clamp that overflow
+    // rides the loop -- additive waves pile up beyond white, the warp's filter
+    // spreads the excess, and a preset MilkDrop held at a bright line fills
+    // the frame instead. Every frame passes through one warp or the other, so
+    // this is where MilkDrop's per-write saturation is restored.
+    return vec4<f32>(clamp(previous_colour * warp_frame.decay, vec3<f32>(0.0), vec3<f32>(1.0)), 1.0);
 }
 
 struct ShapeOut {
     @builtin(position) clip: vec4<f32>,
     @location(0) colour: vec4<f32>,
+    @location(1) uv: vec2<f32>,
+    @location(2) textured: f32,
 };
 
 @vertex
-fn shape_vs(@location(0) position: vec2<f32>, @location(1) colour: vec4<f32>) -> ShapeOut {
+fn shape_vs(
+    @location(0) position: vec2<f32>,
+    @location(1) colour: vec4<f32>,
+    @location(2) uv: vec2<f32>,
+    @location(3) textured: f32,
+) -> ShapeOut {
     var out: ShapeOut;
     out.clip = vec4<f32>(position, 0.0, 1.0);
     out.colour = colour;
+    out.uv = uv;
+    out.textured = textured;
     return out;
 }
 
 @fragment
 fn shape_fs(in: ShapeOut) -> @location(0) vec4<f32> {
     // Straight through: the feedback buffer holds display-space colour, and
-    // the one conversion to the surface happens in the composite.
-    return in.colour;
+    // the one conversion to the surface happens in the composite. A textured
+    // shape's colour modulates the previous frame instead, as D3D's default
+    // texture stage did for MilkDrop (diffuse * texture).
+    let sampled = textureSampleLevel(previous, previous_sampler, in.uv, 0.0).rgb;
+    let rgb = select(in.colour.rgb, in.colour.rgb * sampled, in.textured > 0.5);
+    return vec4<f32>(rgb, in.colour.a);
 }
 
 struct CompOut {

@@ -3704,3 +3704,128 @@ milestone.
   reload. The live confirmation is a person pointing at their own collection,
   which is the only test of "the folder is also the source of textures and
   sprites" (one folder = the whole of what a person points at).
+
+## M7c polish -- the white screens: 2026-11-22
+
+The user came back to the project with one verdict from daily listening: the
+presets that work look good, and *"a lot show bright white screen"*. Too many
+to list by hand, so the first job was a check that sees it.
+
+### `milk_look`: watching every preset, headless
+
+`cargo run --release -p player-render --example milk_look -- <folder|file|list.txt> [every-nth] [out.tsv]`
+draws each preset for four seconds of synthesised music (kick, offbeat hat,
+sustained chord, measured by `player-core`'s own analyser) through the app's
+own path -- `OffscreenRenderer`, the preset loaded as the desktop loads it, its
+images found by the same rules -- and classes the last frame WHITE (over 60% of
+pixels at 235+ on every channel), BLACK (98% at 12 or under) or OK. One TSV row
+per preset with what it uses (shaders, waves, shapes, sprites, missing images),
+`MILK_LOOK_DUMP=<dir>` for the frames, `MILK_LOOK_SHEET=<png>` for a contact
+sheet, `MILK_LOOK_SIZE=WxH` for the size. Two supporting changes:
+`OffscreenRenderer::draw` (no readback, so only measured frames pay for one)
+and `milk::files` -- the desktop shell's image finder moved into
+`player-render` so the check and the app cannot find images differently.
+
+**Measure at a real size.** The first pass ran at 320x240, where a one-pixel
+line covers sixteen times more of the frame than at 1280x720, so a preset of
+thousands of additive lines saturates there and not on a real window: the
+matrix-cube preset read 95% white small and 5% at 720p. Every figure below is
+at 1280x720 unless it says otherwise.
+
+### What was white, and why
+
+Five bugs, each read against MilkDrop 2's `milkdropfs.cpp`/`state.cpp`
+rather than guessed. The first two together were most of it -- 70% of the
+small-size white presets used textured shapes.
+
+1. **Textured shapes drew as solid colour.** `textured=1` means the fill
+   *samples the previous frame* (`m_lpVS[0]`) through `tex_ang`/`tex_zoom`,
+   with the colour as a modulation -- which is why those shapes are nearly
+   always r=g=b=1. M7c had deferred them, so they drew as white polygons, and
+   the "Nested" and "Mirror" families nest them. The overlay pass now binds the
+   previous frame (the warp's own texture and sampler, at the preset's wrap)
+   and `ShapeVertex` carries a uv and a textured weight. The texture's `v` is
+   negated with the geometry's `y`, under this crate's one standing flip.
+2. **Every shape was twice its size.** MilkDrop adds `rad` *after* converting
+   the centre to clip space; this build added it in 0..1 space and doubled it.
+   The rim also starts a quarter turn round (`+ pi/4`), so four sides at
+   `ang=0` are a square, not a diamond. visual_smoke's shape check had encoded
+   the doubled diamond (80..240); it now reads MilkDrop's 132..188 on both
+   shells.
+3. **Shape defaults were white and large.** MilkDrop's `CState` defaults are
+   rad 0.1, inner red, outer green at alpha 0, border alpha 0.1 -- a preset
+   that leaves a key out draws what its author saw.
+4. **The composite filters saw unclamped shader output.** MilkDrop writes the
+   composite to an 8-bit backbuffer and applies brighten/darken/solarize/invert
+   to that. A preset ending `ret = 1 - fret*fret` goes hugely negative in the
+   dark (black, in MilkDrop) and `bDarken` squared it to white. Clamped before
+   the filters now.
+5. **The fixed-function warp did not clamp.** Same 8-bit rule as M7c's
+   warp-shader clamp, for the other warp path: overflow from waves, shapes and
+   sprites no longer rides the loop.
+
+### What was black because a wave never drew
+
+6. **A custom wave took one colour for the whole line: its last point's.**
+   Fading a line's ends (`a = a*sin(sample*pi)`) is one of the corpus's
+   commonest idioms, and its last point has alpha zero -- so the wave was
+   dropped entirely. `Wave` now carries per-point colours. While there, the
+   rest of `DrawCustomWaves`: each point starts fresh (`x`/`y` at
+   `0.5 + value1/value2`, colour at the per-frame value -- it was carrying the
+   previous point's), samples are the middle of the waveform offset by `sep`,
+   smoothed forward and back by the wave's own `smoothing` and scaled by
+   `0.004 * scaling * fWaveScale` (the built-in wave's scaling and smoothing
+   were leaking in, and MilkDrop's 0.512 per unit was missing), positions take
+   the inverse aspect, and lines get the one-pass tessellation. Custom waves
+   now draw before the built-in one and shapes before both -- MilkDrop's order,
+   so waves land on top.
+7. **`per_pixel` could change the `q` the waves, shapes and shaders read.**
+   They now read `q` as `per_frame` left it, as MilkDrop's separate pools do.
+8. **Every variable pool drew the same `rand()` sequence.** Each `Context`
+   seeded one constant, so two shapes running `x = int(rand(11))*.1` landed in
+   the same place every frame. Found by fix 1 turning a preset black: it paints
+   a coloured square with one shape and lays a *textured* copy of the old frame
+   with another, at the "same" random spot -- exactly over the square, erasing
+   it. MilkDrop has one process-wide generator; this build keeps determinism
+   (decision 6's readback checks need it) and gives each pool its own stream
+   (`Context::reseed`: the preset's own as before, waves 1000+i, shapes
+   2000+i, sprites 3000+i).
+
+The fixes surfaced a few presets that read variables nothing sets
+(`q31/q32` as the aspect, in "festidiout roam3") -- 0/0 is NaN in MilkDrop 2's
+`ns-eel2` too (plain `fdiv`), so those waves cannot draw there either; they are
+probably written for a fork that pre-sets them. Left alone.
+
+### Results
+
+The 1-in-20 sample (561 presets) at 1280x720, before and after:
+
+| class | before | after |
+|---|---|---|
+| OK | 451 | 489 |
+| WHITE | 68 | 22 |
+| BLACK | 42 | 50 |
+
+43 white presets now draw, 8 white ones went black, 10 black ones now draw.
+15 that were OK changed class (10 to black, 5 to white). The 17 were looked at
+on a contact sheet before and after: most were lit by a shape drawn at twice
+its size (a white disc, a white triangle, a full-screen colour) and now draw the
+small shape their author wrote, which on a dark preset reads as BLACK to a
+whole-frame threshold. One was a real regression, which became fix 8.
+
+What remains white is mostly shader presets whose composites divide by blur
+values (`1/GetBlur2(uv)`), plus presets whose look depends on audio this
+synthesised track does not have. Telling those from bugs needs a reference
+rendering this machine does not have, which is what a live look is for.
+
+Verified: 125/125 `visual_smoke` (a new check: a textured shape over an empty
+frame stays empty instead of painting white), 292 unit tests in
+`player-render`, clippy clean apart from a lint new in the Rust 1.99 toolchain
+(`chunks_exact_to_as_chunks`, 32 hits in untouched `player-core` code). The
+web half reports **136/136** at `/visualizer.html`, agreeing with the native
+figures on both changed shape checks.
+
+**User-confirmed live on the desktop (2026-11-22)**, against the whole
+collection on real music: *"so much better ... 100% improvement"*. A few
+presets still did not load; the user will collect their names, and those are
+the next polish input.

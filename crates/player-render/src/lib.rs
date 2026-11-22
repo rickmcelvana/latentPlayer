@@ -459,8 +459,11 @@ impl OffscreenRenderer {
         self.gain.set(setting);
     }
 
-    /// Draws one frame, then reads it back as RGBA8 rows, top row first.
-    pub fn draw_to_pixels(&mut self, frame: &VisualFrame) -> Result<Vec<u8>, RenderError> {
+    /// Draws one frame without reading it back. For a check that has to run a
+    /// feedback loop for seconds before it has anything to measure -- the
+    /// readback blocks on the device, and only the frames being measured need
+    /// to pay for it.
+    pub fn draw(&mut self, frame: &VisualFrame) {
         let frame = &VisualFrame {
             gain: self.gain.resolve(frame.peak(), frame.elapsed_seconds),
             ..*frame
@@ -475,10 +478,16 @@ impl OffscreenRenderer {
         };
         let commands = self.visual.draw(&gpu, &view, frame);
         self.queue.submit(Some(commands));
+    }
+
+    /// Draws one frame, then reads it back as RGBA8 rows, top row first.
+    pub fn draw_to_pixels(&mut self, frame: &VisualFrame) -> Result<Vec<u8>, RenderError> {
+        self.draw(frame);
         self.read_pixels()
     }
 
-    fn read_pixels(&self) -> Result<Vec<u8>, RenderError> {
+    /// Reads the last drawn frame back as RGBA8 rows, top row first.
+    pub fn read_pixels(&self) -> Result<Vec<u8>, RenderError> {
         // Copies out of a texture are padded to 256-byte rows, which is a
         // hardware requirement rather than a preference -- so the buffer is
         // wider than the image and the padding is dropped on the way out.

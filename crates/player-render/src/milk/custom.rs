@@ -127,6 +127,25 @@ fn read_num(base: &BTreeMap<String, String>, key: &str, default: f64) -> f64 {
         .unwrap_or(default)
 }
 
+/// What a custom wave reads its samples from, once per frame.
+pub struct WaveSource<'a> {
+    /// Both channels of the newest audio, -1..1, display gain applied, and
+    /// *not* scaled or smoothed -- a custom wave has its own `scaling` and
+    /// `smoothing` and must not inherit the built-in wave's.
+    pub left: &'a [f32],
+    pub right: &'a [f32],
+    /// The frame's spectrum, dBFS per band, for `bSpectrum` waves.
+    pub spectrum: &'a [f32],
+    /// The preset's `fWaveScale`, which MilkDrop applies to custom waves too.
+    pub wave_scale: f32,
+    pub aspect: Aspect,
+}
+
+/// How MilkDrop scales a waveform sample before a custom wave sees it:
+/// `0.004` times its byte-ranged sample (+-128), i.e. 0.512 per unit of this
+/// build's -1..1 audio.
+const WAVEFORM_MULT: f64 = 0.004 * 128.0;
+
 /// One custom wave, compiled and runnable.
 pub struct WaveRig {
     _symbols: Symbols,
@@ -147,6 +166,8 @@ pub struct WaveRig {
     enabled: bool,
     spectrum: bool,
     scaling: f64,
+    smoothing: f64,
+    sep: i64,
     dots: bool,
     thick: bool,
     additive: bool,
@@ -182,6 +203,7 @@ impl WaveRig {
         let per_point = compile(&mut symbols, &custom.per_point, &mut faults);
 
         let mut ctx = Context::new(&symbols);
+        ctx.reseed(1000 + u64::from(custom.index));
         ctx.sync(&symbols);
 
         let mut t_after_init = [0.0f64; T_COUNT];
@@ -223,6 +245,8 @@ impl WaveRig {
             enabled: read_flag(&custom.base, "enabled", false),
             spectrum: read_flag(&custom.base, "bSpectrum", false),
             scaling: read_num(&custom.base, "scaling", 1.0),
+            smoothing: read_num(&custom.base, "smoothing", 0.5),
+            sep: read_num(&custom.base, "sep", 0.0) as i64,
             dots: read_flag(&custom.base, "bUseDots", false),
             thick: read_flag(&custom.base, "bDrawThick", false),
             additive: read_flag(&custom.base, "bAdditive", false),
@@ -239,13 +263,28 @@ impl WaveRig {
     /// smoothed the way the built-in wave's are); `spectrum` is the frame's
     /// spectrum in dBFS, used when the wave's `bSpectrum` flag is set.
     #[allow(clippy::too_many_arguments)]
+    /// Runs the wave's per-frame and per-point code and returns what to draw.
+    ///
+    /// MilkDrop 2's `DrawCustomWaves`, line for line where it matters:
+    ///
+    /// - the samples are the middle `samples` of the waveform (offset by
+    ///   `sep` between the channels), smoothed forward and back by the wave's
+    ///   own `smoothing`, then scaled by `0.004 * scaling * fWaveScale`;
+    /// - **every point starts fresh**: `x`/`y` at `0.5 + value1/value2` and
+    ///   `r`/`g`/`b`/`a` at what the per-frame code left, so a point that does
+    ///   not write its colour does not inherit the previous point's;
+    /// - **every point keeps its own colour.** Fading a line's ends to
+    ///   transparent (`a = a*sin(sample*pi)`) is one of the corpus's commonest
+    ///   idioms, and taking the last point's colour for the whole strip drew
+    ///   those waves at alpha zero -- which is to say not at all;
+    /// - positions are multiplied by the inverse aspect, so a circle drawn in
+    ///   0..1 stays a circle on a window that is not square;
+    /// - a line (not dots) gets MilkDrop's one-pass tessellation.
     pub fn build(
         &mut self,
         inputs: &Inputs,
         q_seed: &[f64; Q_COUNT],
-        left: &[f32],
-        right: &[f32],
-        spectrum: &[f32],
+        source: &WaveSource,
     ) -> Option<Wave> {
         let per_point = self.per_point.as_ref()?;
         if !self.enabled {
@@ -274,60 +313,96 @@ impl WaveRig {
 
         let samples =
             (self.ctx.get(self.samples).round() as i64).clamp(0, MAX_WAVE_SAMPLES as i64) as usize;
-        if samples < 2 {
+        if samples < 2 && !(self.dots && samples >= 1) {
             return None;
         }
+        let frame_colour = [
+            self.ctx.get(self.r),
+            self.ctx.get(self.g),
+            self.ctx.get(self.b),
+            self.ctx.get(self.a),
+        ];
 
+        let (mut d1, mut d2) = (vec![0.0f64; samples], vec![0.0f64; samples]);
+        let last = (samples.max(2) - 1) as f64;
+        if self.spectrum {
+            for (j, (v1, v2)) in d1.iter_mut().zip(d2.iter_mut()).enumerate() {
+                let value = spectrum_value(source.spectrum, j as f64 / last);
+                (*v1, *v2) = (value, value);
+            }
+        } else {
+            let len = source.left.len().min(source.right.len()) as i64;
+            let centre = (len - samples as i64) / 2;
+            let read = |data: &[f32], start: i64, j: usize| -> f64 {
+                let i = (start + j as i64).clamp(0, (len - 1).max(0)) as usize;
+                data.get(i).copied().unwrap_or(0.0) as f64
+            };
+            for j in 0..samples {
+                d1[j] = read(source.left, centre - self.sep / 2, j);
+                d2[j] = read(source.right, centre + self.sep / 2, j);
+            }
+        }
+        // Forward and back, so the smoothing has no direction.
+        let mix1 = (self.smoothing * 0.98).max(0.0).sqrt();
+        let mix2 = 1.0 - mix1;
+        for d in [&mut d1, &mut d2] {
+            for j in 1..samples {
+                d[j] = d[j] * mix2 + d[j - 1] * mix1;
+            }
+            for j in (0..samples.saturating_sub(1)).rev() {
+                d[j] = d[j] * mix2 + d[j + 1] * mix1;
+            }
+        }
+        // MilkDrop scales the spectrum by 0.15 of its own FFT's magnitudes,
+        // which have no counterpart in a dBFS band; the spectrum keeps this
+        // build's 0..1 amplitude, scaled only by the wave's own `scaling`.
+        let mult = if self.spectrum {
+            self.scaling
+        } else {
+            WAVEFORM_MULT * self.scaling * source.wave_scale as f64
+        };
+
+        let (inv_x, inv_y) = (source.aspect.inv_x, source.aspect.inv_y);
         let mut points = Vec::with_capacity(samples);
-        for i in 0..samples {
-            let sample = if samples > 1 {
-                i as f64 / (samples - 1) as f64
-            } else {
-                0.0
-            };
-            self.ctx.set(self.sample, sample);
-
-            let (v1, v2) = if self.spectrum {
-                let value = spectrum_value(spectrum, sample) * self.scaling;
-                (value, value)
-            } else {
-                let idx = (sample * (left.len().max(1) - 1) as f64).round() as usize;
-                (
-                    left.get(idx).copied().unwrap_or(0.0) as f64 * self.scaling,
-                    right.get(idx).copied().unwrap_or(0.0) as f64 * self.scaling,
-                )
-            };
+        let mut colours = Vec::with_capacity(samples);
+        for j in 0..samples {
+            let (v1, v2) = (d1[j] * mult, d2[j] * mult);
+            self.ctx.set(self.sample, j as f64 / last);
             self.ctx.set(self.value1, v1);
             self.ctx.set(self.value2, v2);
+            self.ctx.set(self.x, 0.5 + v1);
+            self.ctx.set(self.y, 0.5 + v2);
+            self.ctx.set(self.r, frame_colour[0]);
+            self.ctx.set(self.g, frame_colour[1]);
+            self.ctx.set(self.b, frame_colour[2]);
+            self.ctx.set(self.a, frame_colour[3]);
 
             if self.ctx.run(per_point).is_err() {
                 self.faults.push("per_point ran past its budget".into());
                 break;
             }
 
-            let x = self.ctx.get(self.x);
-            let y = self.ctx.get(self.y);
-            points.push([(x as f32) * 2.0 - 1.0, (y as f32) * 2.0 - 1.0]);
+            let x = self.ctx.get(self.x) as f32;
+            let y = self.ctx.get(self.y) as f32;
+            points.push([(x * 2.0 - 1.0) * inv_x, (y * 2.0 - 1.0) * inv_y]);
+            colours.push([
+                self.ctx.get(self.r).clamp(0.0, 1.0) as f32,
+                self.ctx.get(self.g).clamp(0.0, 1.0) as f32,
+                self.ctx.get(self.b).clamp(0.0, 1.0) as f32,
+                self.ctx.get(self.a).clamp(0.0, 1.0) as f32,
+            ]);
         }
 
-        // The strip takes one colour: the one the last point left. (This
-        // build's line pipeline is one colour per strip -- the built-in wave's
-        // own limit -- so a preset that colours per point gets its last colour,
-        // which is what a uniform colouring would show anyway.)
-        let colour = [
-            self.ctx.get(self.r).clamp(0.0, 1.0) as f32,
-            self.ctx.get(self.g).clamp(0.0, 1.0) as f32,
-            self.ctx.get(self.b).clamp(0.0, 1.0) as f32,
-            self.ctx.get(self.a).clamp(0.0, 1.0) as f32,
-        ];
-
-        let alpha = colour[3];
-        if alpha < 0.004 || points.len() < 2 {
+        if points.is_empty() || colours.iter().all(|c| c[3] < 0.004) {
             return None;
         }
-
+        if !self.dots && points.len() >= 2 {
+            (points, colours) = crate::milk::wave::smooth_coloured(&points, &colours);
+        }
+        let colour = colours[colours.len() / 2];
         Some(Wave {
             points,
+            colours: Some(colours),
             break_at: None,
             colour,
             additive: self.additive,
@@ -351,6 +426,17 @@ fn spectrum_value(spectrum: &[f32], sample: f64) -> f64 {
     10f64.powf((db as f64) / 20.0)
 }
 
+/// A divisor a preset may have set to zero: MilkDrop divides by `tex_zoom`
+/// unguarded. Here zero is "no zoom", the default, rather than an infinity
+/// that blanks the shape.
+fn non_zero(v: f64) -> f64 {
+    if v.abs() < 1e-6 || !v.is_finite() {
+        1.0
+    } else {
+        v
+    }
+}
+
 /// One custom shape, compiled and runnable.
 pub struct ShapeRig {
     _symbols: Symbols,
@@ -366,6 +452,8 @@ pub struct ShapeRig {
     y: usize,
     rad: usize,
     ang: usize,
+    tex_ang: usize,
+    tex_zoom: usize,
     textured: usize,
     r: usize,
     g: usize,
@@ -388,6 +476,8 @@ pub struct ShapeRig {
     file_y: f64,
     file_rad: f64,
     file_ang: f64,
+    file_tex_ang: f64,
+    file_tex_zoom: f64,
     file_textured: bool,
     file_inner: [f64; 4],
     file_outer: [f64; 4],
@@ -409,6 +499,15 @@ pub struct ShapeGeom {
     /// Border colour; an alpha under 0.004 means no border.
     pub border_colour: [f32; 4],
     pub additive: bool,
+    /// Whether the fill samples the previous frame (`textured=1`), in which
+    /// case `inner`/`outer` *modulate* that picture rather than being the
+    /// fill. MilkDrop's way of drawing a shrunken, rotated copy of the screen
+    /// inside a shape -- the whole of the "nested" and "mirror" families.
+    pub textured: bool,
+    /// Where the centre and each rim vertex sample the previous frame, in
+    /// texture space. Meaningful only when `textured`.
+    pub centre_uv: [f32; 2],
+    pub rim_uv: Vec<[f32; 2]>,
 }
 
 impl ShapeRig {
@@ -429,6 +528,7 @@ impl ShapeRig {
             symbols.slot("ang"),
             symbols.slot("textured"),
         );
+        let (tex_ang, tex_zoom) = (symbols.slot("tex_ang"), symbols.slot("tex_zoom"));
         let (r, g, b, a) = (
             symbols.slot("r"),
             symbols.slot("g"),
@@ -452,6 +552,7 @@ impl ShapeRig {
         let per_frame = compile(&mut symbols, &custom.per_frame, &mut faults);
 
         let mut ctx = Context::new(&symbols);
+        ctx.reseed(2000 + u64::from(custom.index));
         ctx.sync(&symbols);
 
         let mut t_after_init = [0.0f64; T_COUNT];
@@ -481,6 +582,8 @@ impl ShapeRig {
             y,
             rad,
             ang,
+            tex_ang,
+            tex_zoom,
             textured,
             r,
             g,
@@ -501,26 +604,32 @@ impl ShapeRig {
             file_thick: read_flag(&custom.base, "thickOutline", false),
             file_x: read_num(&custom.base, "x", 0.5),
             file_y: read_num(&custom.base, "y", 0.5),
-            file_rad: read_num(&custom.base, "rad", 0.5),
+            // MilkDrop 2's own defaults (`state.cpp`), for the keys a preset
+            // leaves out: a small red-to-transparent-green shape, not a large
+            // white one. A preset that relies on a default draws what its
+            // author saw.
+            file_rad: read_num(&custom.base, "rad", 0.1),
             file_ang: read_num(&custom.base, "ang", 0.0),
+            file_tex_ang: read_num(&custom.base, "tex_ang", 0.0),
+            file_tex_zoom: read_num(&custom.base, "tex_zoom", 1.0),
             file_textured: read_flag(&custom.base, "textured", false),
             file_inner: [
                 read_num(&custom.base, "r", 1.0),
-                read_num(&custom.base, "g", 1.0),
-                read_num(&custom.base, "b", 1.0),
+                read_num(&custom.base, "g", 0.0),
+                read_num(&custom.base, "b", 0.0),
                 read_num(&custom.base, "a", 1.0),
             ],
             file_outer: [
-                read_num(&custom.base, "r2", 1.0),
+                read_num(&custom.base, "r2", 0.0),
                 read_num(&custom.base, "g2", 1.0),
-                read_num(&custom.base, "b2", 1.0),
-                read_num(&custom.base, "a2", 1.0),
+                read_num(&custom.base, "b2", 0.0),
+                read_num(&custom.base, "a2", 0.0),
             ],
             file_border: [
                 read_num(&custom.base, "border_r", 1.0),
                 read_num(&custom.base, "border_g", 1.0),
                 read_num(&custom.base, "border_b", 1.0),
-                read_num(&custom.base, "border_a", 0.0),
+                read_num(&custom.base, "border_a", 0.1),
             ],
             t_after_init,
             faults,
@@ -529,8 +638,10 @@ impl ShapeRig {
 
     /// Runs every instance of this shape and returns the geometry to draw.
     ///
-    /// Textured shapes (`textured` set) are not drawn -- sampling the feedback
-    /// buffer into the polygon is a separate pass. The fill still shows.
+    /// The arithmetic is MilkDrop 2's `DrawCustomShapes`, with this crate's
+    /// one standing difference: y is negated throughout (MilkDrop writes
+    /// `y*-2+1`, this crate `y*2-1`, for waves and shapes alike), so the rim's
+    /// `sin` term and the texture's `v` term are negated with it.
     pub fn build(
         &mut self,
         inputs: &Inputs,
@@ -564,6 +675,8 @@ impl ShapeRig {
             self.ctx.set(self.y, self.file_y);
             self.ctx.set(self.rad, self.file_rad);
             self.ctx.set(self.ang, self.file_ang);
+            self.ctx.set(self.tex_ang, self.file_tex_ang);
+            self.ctx.set(self.tex_zoom, self.file_tex_zoom);
             self.ctx.set(self.r, self.file_inner[0]);
             self.ctx.set(self.g, self.file_inner[1]);
             self.ctx.set(self.b, self.file_inner[2]);
@@ -615,13 +728,30 @@ impl ShapeRig {
                 continue;
             }
 
+            // `rad` is in *clip* units (-1..1), not in the 0..1 space `x` and
+            // `y` are given in -- MilkDrop adds it after the conversion. Adding
+            // it before and doubling drew every shape at twice its size, which
+            // for an additive or textured shape nested a few deep is a white
+            // screen. The quarter turn is MilkDrop's too: at `ang=0` a
+            // four-sided shape is a square with its sides on the axes, not a
+            // diamond.
+            let tex_ang = self.ctx.get(self.tex_ang);
+            let tex_zoom = non_zero(self.ctx.get(self.tex_zoom));
             let centre = [(x as f32) * 2.0 - 1.0, (y as f32) * 2.0 - 1.0];
             let mut rim = Vec::with_capacity(sides);
+            let mut rim_uv = Vec::with_capacity(sides);
             for k in 0..sides {
-                let a = ang + std::f64::consts::TAU * k as f64 / sides as f64;
-                let ex = x + rad * a.cos() * aspect.y as f64;
-                let ey = y + rad * a.sin() * aspect.x as f64;
-                rim.push([(ex as f32) * 2.0 - 1.0, (ey as f32) * 2.0 - 1.0]);
+                let t = std::f64::consts::TAU * k as f64 / sides as f64;
+                let a = t + ang + std::f64::consts::FRAC_PI_4;
+                rim.push([
+                    centre[0] + (rad * a.cos() * aspect.y as f64) as f32,
+                    centre[1] - (rad * a.sin()) as f32,
+                ]);
+                let ta = t + tex_ang + std::f64::consts::FRAC_PI_4;
+                rim_uv.push([
+                    (0.5 + 0.5 * ta.cos() / tex_zoom * aspect.y as f64) as f32,
+                    (0.5 - 0.5 * ta.sin() / tex_zoom) as f32,
+                ]);
             }
 
             out.push(ShapeGeom {
@@ -631,6 +761,9 @@ impl ShapeRig {
                 outer,
                 border_colour,
                 additive: self.ctx.get(self.additive) >= 0.5,
+                textured: self.ctx.get(self.textured) >= 0.5,
+                centre_uv: [0.5, 0.5],
+                rim_uv,
             });
         }
         out
@@ -649,6 +782,16 @@ mod tests {
         [0.0; Q_COUNT]
     }
 
+    fn source<'a>(left: &'a [f32], right: &'a [f32]) -> WaveSource<'a> {
+        WaveSource {
+            left,
+            right,
+            spectrum: &[],
+            wave_scale: 1.0,
+            aspect: Aspect::default(),
+        }
+    }
+
     #[test]
     fn a_wave_with_no_per_point_draws_nothing() {
         let mut rig = WaveRig::new(&CustomWave {
@@ -658,7 +801,7 @@ mod tests {
             per_frame: String::new(),
             per_point: String::new(),
         });
-        assert!(rig.build(&inputs(), &q_seed(), &[], &[], &[]).is_none());
+        assert!(rig.build(&inputs(), &q_seed(), &source(&[], &[])).is_none());
     }
 
     #[test]
@@ -673,7 +816,7 @@ mod tests {
             per_point: "x=0.5;y=0.5;".to_string(),
         });
         assert!(rig
-            .build(&inputs(), &q_seed(), &[0.0; 512], &[0.0; 512], &[])
+            .build(&inputs(), &q_seed(), &source(&[0.0; 512], &[0.0; 512]))
             .is_none());
     }
 
@@ -690,9 +833,10 @@ mod tests {
             per_point: "x=sample;y=0.5;a=1;".to_string(),
         });
         let wave = rig
-            .build(&inputs(), &q_seed(), &[0.0; 512], &[0.0; 512], &[])
+            .build(&inputs(), &q_seed(), &source(&[0.0; 512], &[0.0; 512]))
             .expect("draws");
-        assert_eq!(wave.points.len(), 3);
+        // Three points, tessellated to five: a new one between each pair.
+        assert_eq!(wave.points.len(), 5);
         // sample 0 -> x=0 -> clip -1; sample 1 -> x=1 -> clip +1.
         assert!(
             (wave.points[0][0] + 1.0).abs() < 1e-5,
@@ -700,11 +844,11 @@ mod tests {
             wave.points[0]
         );
         assert!(
-            (wave.points[2][0] - 1.0).abs() < 1e-5,
+            (wave.points[4][0] - 1.0).abs() < 1e-5,
             "{:?}",
-            wave.points[2]
+            wave.points[4]
         );
-        assert!((wave.points[1][1]).abs() < 1e-5, "y=0.5 -> 0");
+        assert!((wave.points[2][1]).abs() < 1e-5, "y=0.5 -> 0");
     }
 
     #[test]
@@ -719,17 +863,63 @@ mod tests {
             per_frame: String::new(),
             per_point: "x=value1+0.5;y=0.5;a=1;".to_string(),
         });
-        // value1 = left[0] = 0.25 -> x = 0.75 -> clip 0.5.
+        // value1 = 0.25 * MilkDrop's 0.512 = 0.128 -> x = 0.628 -> clip 0.256.
         let left = [0.25f32; 512];
         let right = [0.0f32; 512];
         let wave = rig
-            .build(&inputs(), &q_seed(), &left, &right, &[])
+            .build(&inputs(), &q_seed(), &source(&left, &right))
             .expect("draws");
         assert!(
-            (wave.points[0][0] - 0.5).abs() < 1e-4,
+            (wave.points[0][0] - 0.256).abs() < 1e-4,
             "{:?}",
             wave.points[0]
         );
+    }
+
+    #[test]
+    fn a_wave_whose_ends_fade_out_still_draws_and_keeps_each_points_colour() {
+        // The idiom that drew nothing when the strip took its last point's
+        // colour: alpha follows sin(sample*pi), so the last point is 0.
+        let mut base = BTreeMap::new();
+        base.insert("enabled".to_string(), "1".to_string());
+        base.insert("samples".to_string(), "5".to_string());
+        base.insert("bUseDots".to_string(), "1".to_string());
+        let mut rig = WaveRig::new(&CustomWave {
+            index: 0,
+            base,
+            init: String::new(),
+            per_frame: String::new(),
+            per_point: "x=sample;y=0.5;a=sin(sample*3.14159265);".to_string(),
+        });
+        let wave = rig
+            .build(&inputs(), &q_seed(), &source(&[0.0; 512], &[0.0; 512]))
+            .expect("a wave with opaque middle points draws");
+        let colours = wave.colours.expect("per-point colours");
+        assert!(colours[0][3] < 1e-3 && colours[4][3] < 1e-3);
+        assert!((colours[2][3] - 1.0).abs() < 1e-3);
+    }
+
+    #[test]
+    fn each_point_starts_from_the_frame_colour_not_the_previous_point() {
+        let mut base = BTreeMap::new();
+        base.insert("enabled".to_string(), "1".to_string());
+        base.insert("samples".to_string(), "3".to_string());
+        base.insert("bUseDots".to_string(), "1".to_string());
+        base.insert("r".to_string(), "0.25".to_string());
+        let mut rig = WaveRig::new(&CustomWave {
+            index: 0,
+            base,
+            init: String::new(),
+            per_frame: String::new(),
+            // Only the first point writes r; the others must read 0.25 again.
+            per_point: "r=if(equal(sample,0),1,r);a=1;".to_string(),
+        });
+        let wave = rig
+            .build(&inputs(), &q_seed(), &source(&[0.0; 512], &[0.0; 512]))
+            .expect("draws");
+        let colours = wave.colours.expect("per-point colours");
+        assert!((colours[0][0] - 1.0).abs() < 1e-6);
+        assert!((colours[1][0] - 0.25).abs() < 1e-6, "{:?}", colours[1]);
     }
 
     #[test]

@@ -1068,6 +1068,11 @@ fn milk_comp_fs(in: MilkCompOut) -> @location(0) vec4<f32> {
         vec2<f32>(rad, ang),
         vec4<f32>(hue, 1.0),
     ).rgb;
+    // MilkDrop writes the composite to an 8-bit backbuffer and applies the
+    // four filters to *that*, so they only ever see [0,1]. Unclamped, a
+    // preset that ends `ret = 1 - fret*fret` and goes hugely negative in the
+    // dark -- black, in MilkDrop -- is squared by `bDarken` into white.
+    colour = clamp(colour, vec3<f32>(0.0), vec3<f32>(1.0));
 
     if (comp_extra.filters.x > 0.5) { colour = 1.0 - (1.0 - colour) * (1.0 - colour); }
     if (comp_extra.filters.y > 0.5) { colour = colour * colour; }

@@ -15,7 +15,7 @@ Phase 0 (spikes) is built end to end: Rust workspace (`crates/player-core`, `cra
 `crates/player-rt-wasm`), Tauri desktop shell (`src-tauri/`), and React/TS/Vite frontend (`app/`,
 both native and web playback paths). Every build/check/test command below passes.
 
-**The dev machine is Windows** (`Z:\_dev\latent\latentPlayer`) as of 2026-08-15; Linux is a later
+**The dev machine is Windows** (`Z:\dev\latent\latentPlayer` since a reformat in late 2026; `Z:\_dev\...` before) as of 2026-08-15; Linux is a later
 test target. The Linux-only workarounds still documented in `WORKFLOW.md` (Wayland env vars) and
 `ARCHITECTURE.md` (Chrome WebGPU flags) do not apply here.
 
@@ -832,6 +832,36 @@ preset and it works."** Sprites are **not yet live-looked** -- the y-orientation
 and the 7/8/10 blend-mode fallbacks are the two things a readback cannot
 settle. A live look at sprites is the remaining M7c item 2 work; the preset
 library (item 3) is next.
+
+**Phase 3 M7c third item (the preset library) is built** (2026-09-03,
+`8dee831`): "Add preset folder", rows with each preset's report, selection
+persisted on both shells. See `tasks/phase-3.md`.
+
+**M7c polish: the white screens** (2026-11-22). The user's verdict from daily
+listening was that working presets look good and "a lot show bright white
+screen". `cargo run --release -p player-render --example milk_look --
+<folder|file|list.txt> [every-nth] [out.tsv]` now watches presets headlessly
+through the app's own path and classes each WHITE/BLACK/OK (`MILK_LOOK_SIZE`,
+`MILK_LOOK_DUMP`, `MILK_LOOK_SHEET`). **Measure at a real size** -- at 320x240 a
+one-pixel line covers 16x more of the frame and line-heavy presets saturate
+falsely. On a 1-in-20 sample at 1280x720, white went from 68 to
+22 of 561 presets (OK 451 to 489). Eight fixes, all read out of MilkDrop 2's source:
+textured shapes now sample the previous frame instead of drawing solid white;
+shapes were twice their size (and missing MilkDrop's quarter-turn) and had
+white defaults; the composite's brighten/darken filters ran on unclamped shader
+output (`bDarken` squared large negatives into white); the fixed-function warp
+now clamps like the shader one; custom waves keep per-point colour (a wave
+fading its ends to alpha 0 drew nothing at all), reset each point, and scale
+and smooth as MilkDrop does; draw order is shapes, custom waves, built-in wave;
+`q` is read before `per_pixel` can change it; and each EEL variable pool has
+its own `rand` stream (two shapes with the same `rand` code landed on top of
+each other). The desktop shell's image finder moved to `milk::files`.
+Verified: 125/125 `visual_smoke`, **136/136** at `/visualizer.html` (agreeing
+with the native half), 293 `player-render` tests. **User-confirmed live on the
+desktop (2026-11-22): "so much better ... 100% improvement"** -- the majority of
+the collection now loads and draws; a few still do not, names to follow. Clippy is
+clean except a lint new in Rust 1.99 (`chunks_exact_to_as_chunks`) in untouched
+`player-core` code. Details in `tasks/phase-3.md` "M7c polish".
 
 The certificate answer changed a finding into a fix: ureq defaults to
 webpki-roots, a bundle compiled into the binary, under which installing a

@@ -182,6 +182,7 @@ impl SpriteRig {
         let code = compile(&mut symbols, &sprite.code, &mut faults);
 
         let mut ctx = Context::new(&symbols);
+        ctx.reseed(3000 + u64::from(sprite.index));
         ctx.sync(&symbols);
         if let Some(init) = &init {
             if ctx.run(init).is_err() {

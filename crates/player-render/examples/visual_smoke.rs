@@ -2640,20 +2640,42 @@ fn check_milkdrop() {
         ),
     );
 
-    // A custom shape draws at its centre and radius: a radius of 0.25 around the
-    // centre spans a quarter of the frame on a side.
+    // A custom shape draws at its centre and radius, by MilkDrop's arithmetic:
+    // `rad` is in clip units (-1..1) and the rim starts a quarter turn round,
+    // so four sides at `ang=0` are an axis-aligned square whose half-side is
+    // rad*cos(45deg) = 0.177 of clip space -- 28px of this 320px frame, centred
+    // on 160. (Until 2026-11 this read 80..240: the shape drawn at twice its
+    // size and turned 45 degrees, which is what white-screened nested presets.)
     let square = measure(&run_preset(&mut renderer, &custom_square(0.25), 4));
     check(
         "a custom shape draws at its centre and radius",
-        square.count > 5000
-            && (square.min_x as i64 - 80).abs() < 12
-            && (square.max_x as i64 - 240).abs() < 12
-            && (square.min_y as i64 - 80).abs() < 12
-            && (square.max_y as i64 - 240).abs() < 12,
+        square.count > 2800
+            && (square.min_x as i64 - 132).abs() < 4
+            && (square.max_x as i64 - 188).abs() < 4
+            && (square.min_y as i64 - 132).abs() < 4
+            && (square.max_y as i64 - 188).abs() < 4,
         format!(
             "{}px, x {}..{}, y {}..{}",
             square.count, square.min_x, square.max_x, square.min_y, square.max_y
         ),
+    );
+
+    // A *textured* shape copies the previous frame through its colour rather
+    // than painting the colour itself: white-modulated over an empty frame it
+    // is still empty. Drawn untextured -- how this build drew it until 2026-11
+    // -- it is a white polygon, which nested a few deep is a white screen.
+    let textured = mean_brightness(&run_preset(
+        &mut renderer,
+        &custom_square(0.9).replace(
+            "shapecode_0_enabled=1\n",
+            "shapecode_0_enabled=1\nshapecode_0_textured=1\n",
+        ),
+        4,
+    ));
+    check(
+        "a textured shape copies the frame instead of painting its colour",
+        textured < 12.0,
+        format!("mean brightness {textured:.1} (untextured, it would be a white square)"),
     );
 
     // An `enabled=0` wave or shape is not drawn, and with the built-in waveform
